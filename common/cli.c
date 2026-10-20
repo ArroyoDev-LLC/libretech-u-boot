@@ -299,6 +299,18 @@ void cli_loop(void)
 	if (IS_ENABLED(CONFIG_CMDLINE_FLUSH_STDIN))
 		console_flush_stdin();
 
+	/*
+	 * Residual SCMI (CONFIG_SCMI_RESIDUAL_DIAG): hush
+	 * parse_file_outer never emitted => on Solitude after PREBOOT
+	 * (p02-cli1c/cli2). Use simple CLI for the interactive loop;
+	 * PREBOOT still runs via hush. Prompt flush is in cli_readline.
+	 */
+	if (IS_ENABLED(CONFIG_SCMI_RESIDUAL_DIAG) &&
+	    IS_ENABLED(CONFIG_CMDLINE)) {
+		cli_simple_loop();
+		panic("No CLI available");
+	}
+
 #if CONFIG_IS_ENABLED(HUSH_PARSER)
 	if (gd->flags & GD_FLG_HUSH_MODERN_PARSER)
 		parse_and_run_file();

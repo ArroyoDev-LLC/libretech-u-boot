@@ -39,6 +39,31 @@ struct dwc3_generic_host_priv {
 	struct udevice *vbus_supply;
 };
 
+/*
+ * RK3399 in an xPL phase: the controller runs at high speed on its USB 2 PHY
+ * alone unless this phase's device tree carries the Type-C PHY (usb3-phy).
+ * A board that puts it there (and the connector graph its orientation comes
+ * from, fusb302-cc.c) gets SuperSpeed in its SPL; one that does not keeps the
+ * USB 2 PHY, where a usb3-phy phandle to a dropped node would fail the gadget
+ * (claude rockchip/rk3399/plan/spl-usb-flasher.md).
+ */
+static bool dwc3_generic_xpl_usb2_only(struct udevice *dev)
+{
+	struct ofnode_phandle_args args;
+	int idx;
+
+	if (!IS_ENABLED(CONFIG_XPL_BUILD) ||
+	    !device_is_compatible(dev->parent, "rockchip,rk3399-dwc3"))
+		return false;
+
+	idx = dev_read_stringlist_search(dev, "phy-names", "usb3-phy");
+	if (idx < 0)
+		return true;
+
+	return dev_read_phandle_with_args(dev, "phys", "#phy-cells", 0, idx,
+					  &args) != 0;
+}
+
 static int dwc3_generic_probe(struct udevice *dev,
 			      struct dwc3_generic_priv *priv,
 			      enum usb_dr_mode mode)
@@ -90,7 +115,10 @@ static int dwc3_generic_probe(struct udevice *dev,
 		udelay(1);
 	}
 
-	rc = dwc3_setup_phy(dev, &priv->phys);
+	if (dwc3_generic_xpl_usb2_only(dev))
+		rc = dwc3_setup_phy_by_name(dev, &priv->phys, "usb2-phy", mode);
+	else
+		rc = dwc3_setup_phy_mode(dev, &priv->phys, mode);
 	if (rc && rc != -ENOTSUPP)
 		return rc;
 
@@ -167,6 +195,9 @@ static int dwc3_generic_of_to_plat(struct udevice *dev)
 		pr_info("No USB maximum speed specified. Using super speed\n");
 		plat->maximum_speed = USB_SPEED_SUPER;
 	}
+	if (dwc3_generic_xpl_usb2_only(dev) &&
+	    plat->maximum_speed > USB_SPEED_HIGH)
+		plat->maximum_speed = USB_SPEED_HIGH;
 
 	plat->dr_mode = usb_get_dr_mode(node);
 	if (plat->dr_mode == USB_DR_MODE_UNKNOWN) {

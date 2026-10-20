@@ -15,6 +15,8 @@ obj-$(CONFIG_HUSH_MODERN_PARSER) += cli_hush_modern.o
 obj-$(CONFIG_AUTOBOOT) += autoboot.o
 obj-$(CONFIG_BUTTON_CMD) += button_cmd.o
 obj-y += version.o
+# `usbflash boot kernel`: proper bootm's the FIT the SPL session kept
+obj-$(CONFIG_SPL_USBFLASH) += usbflash_bootm.o
 
 # # boards
 obj-y += board_f.o
@@ -39,6 +41,7 @@ obj-$(CONFIG_USB_ONBOARD_HUB) += usb_onboard_hub.o
 
 # others
 obj-$(CONFIG_CONSOLE_MUX) += iomux.o
+obj-$(CONFIG_USB_BOOT_ACM_CONSOLE) += usb_boot_acm_console.o
 obj-$(CONFIG_MTD_NOR_FLASH) += flash.o
 obj-$(CONFIG_CMD_KGDB) += kgdb.o kgdb_stubs.o
 obj-$(CONFIG_I2C_EDID) += edid.o

@@ -20,8 +20,13 @@
 #include <net.h>
 #include <linux/printk.h>
 
+__weak void dfu_background(void)
+{
+}
+
 int run_usb_dnl_gadget(int usbctrl_index, char *usb_dnl_gadget)
 {
+	const char *exit_reason = "unknown";
 	bool dfu_reset = false;
 	struct udevice *udc;
 	int ret, i = 0;
@@ -39,9 +44,13 @@ int run_usb_dnl_gadget(int usbctrl_index, char *usb_dnl_gadget)
 		goto err_detach;
 	}
 
-#ifdef CONFIG_DFU_TIMEOUT
-	unsigned long start_time = get_timer(0);
-#endif
+	/*
+	 * Say so. Without this the gadget loop below is completely silent, and
+	 * a running gadget, one that exited instantly, and leftover scrollback
+	 * from the previous command are indistinguishable on the console.
+	 */
+	printf("Gadget \"%s\" up on UDC %d - waiting for host (Ctrl-C aborts)\n",
+	       usb_dnl_gadget, usbctrl_index);
 
 	while (1) {
 		if (g_dnl_detach()) {
@@ -52,6 +61,7 @@ int run_usb_dnl_gadget(int usbctrl_index, char *usb_dnl_gadget)
 			 */
 			if (dfu_usb_get_reset()) {
 				dfu_reset = true;
+				exit_reason = "host issued USB reset (dfu-util -R); rebooting";
 				goto exit;
 			}
 
@@ -60,12 +70,19 @@ int run_usb_dnl_gadget(int usbctrl_index, char *usb_dnl_gadget)
 			 * calls is necessary to assure correct transmission
 			 * completion with dfu-util
 			 */
-			if (++i == 10000)
+			if (++i == 10000) {
+				exit_reason = "host detached";
 				goto exit;
+			}
 		}
 
-		if (ctrlc())
+		/* A back end's work on what has arrived, between USB events */
+		dfu_background();
+
+		if (ctrlc()) {
+			exit_reason = "aborted by Ctrl-C";
 			goto exit;
+		}
 
 		if (dfu_get_defer_flush()) {
 			/*
@@ -81,8 +98,20 @@ int run_usb_dnl_gadget(int usbctrl_index, char *usb_dnl_gadget)
 			dm_usb_gadget_handle_interrupts(udc);
 			ret = dfu_flush(dfu_get_defer_flush(), NULL, 0, 0);
 			dfu_set_defer_flush(NULL);
+#ifdef CONFIG_DFU_TIMEOUT
+			/*
+			 * The flush (a storage write) is the host's work and can
+			 * outlast an idle timeout: the host waits on it, it has
+			 * not gone quiet. An xPL phase writes storage only with
+			 * SPL_USBFLASH_WRITE; without it a flush is a RAM copy.
+			 */
+			if ((!IS_ENABLED(CONFIG_XPL_BUILD) ||
+			     IS_ENABLED(CONFIG_SPL_USBFLASH_WRITE)) && dfu_get_timeout())
+				dfu_host_active();
+#endif
 			if (ret) {
 				pr_err("Deferred dfu_flush() failed!");
+				exit_reason = "deferred flush failed";
 				goto exit;
 			}
 		}
@@ -91,25 +120,43 @@ int run_usb_dnl_gadget(int usbctrl_index, char *usb_dnl_gadget)
 		unsigned long wait_time = dfu_get_timeout();
 
 		if (wait_time) {
-			unsigned long current_time = get_timer(start_time);
+			unsigned long current_time = dfu_timeout_elapsed();
 
 			if (current_time > wait_time) {
-				debug("Inactivity timeout, abort DFU\n");
+				exit_reason = "inactivity timeout";
+				printf("DFU: inactivity timeout after %lu ms\n",
+				       wait_time);
 				goto exit;
 			}
 		}
 #endif
 
-		if (dfu_reinit_needed)
+		/*
+		 * f_dfu drops the timeout to 0 on the first request, so a host that
+		 * leaves without DETACH used to strand this loop until Ctrl-C.  A
+		 * board cable check (weak default: -EOPNOTSUPP, i.e. "connected")
+		 * that answers 0 ends the session.
+		 */
+		if (!g_dnl_board_usb_cable_connected()) {
+			exit_reason = "host gone";
 			goto exit;
+		}
+
+		if (dfu_reinit_needed) {
+			exit_reason = "re-init requested";
+			goto exit;
+		}
 
 		schedule();
 		dm_usb_gadget_handle_interrupts(udc);
 	}
 exit:
-	g_dnl_unregister();
+	printf("Gadget \"%s\" stopped: %s\n", usb_dnl_gadget, exit_reason);
+	g_dnl_release(udc);
+	goto out;
 err_detach:
 	udc_device_put(udc);
+out:
 
 	if (dfu_reset)
 		do_reset(NULL, 0, 0, NULL);

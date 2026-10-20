@@ -11,6 +11,7 @@
 #include <linux/delay.h>
 #include <linux/err.h>
 #include <dm/device_compat.h>
+#include <power/regulator.h>
 #include <usb/tcpm.h>
 #include "fusb302_reg.h"
 
@@ -47,6 +48,17 @@ struct fusb302_chip {
 	bool intr_togdone;
 	bool intr_bc_lvl;
 	bool intr_comp_chng;
+
+	/*
+	 * Whether the port manager currently wants PD messages reported.
+	 * Shadowed for the same reason as intr_*: a wake has to restore the
+	 * configuration the port is IN, and HARD_RESET_START deliberately
+	 * turns this off for the duration of the reset window.
+	 */
+	bool intr_pd;
+
+	/* The port's VBUS rail, from vbus-supply. NULL if the board has none */
+	struct udevice *vbus;
 
 	/* port status */
 	bool vconn_on;
@@ -219,6 +231,21 @@ static int fusb302_init(struct udevice *dev)
 	struct fusb302_chip *chip = dev_get_priv(dev);
 	int ret;
 	u8 data;
+
+	if (CONFIG_IS_ENABLED(DM_REGULATOR)) {
+		/*
+		 * Optional: a sink-only port sources no VBUS and needs no
+		 * rail. Resolve it here rather than at set_vbus() time so a
+		 * missing regulator is a boot-time diagnostic and not a
+		 * failure in the middle of a state transition.
+		 */
+		ret = device_get_supply_regulator(dev, "vbus-supply",
+						  &chip->vbus);
+		if (ret) {
+			dev_dbg(dev, "no vbus-supply: %d\n", ret);
+			chip->vbus = NULL;
+		}
+	}
 
 	ret = fusb302_sw_reset(dev);
 	if (ret)
@@ -504,8 +531,38 @@ done:
 	return ret;
 }
 
+/*
+ * Source VBUS on or off.
+ *
+ * This was a stub returning success, which makes a source-role port a
+ * contradiction: the port manager believes it has raised VBUS, the partner
+ * never sees it, and so -- per the Type-C state machine -- the partner stays
+ * in AttachWait.SNK and answers no PD message at all. The visible symptom is
+ * not "no power", it is every PD transmission timing out against a device
+ * that is plainly attached.
+ *
+ * The FUSB302 has no VBUS switch of its own; the rail is a board regulator
+ * named by the chip node's vbus-supply. A board without one keeps the old
+ * behaviour -- a sink-only port never asks for VBUS, so its absence is not
+ * an error to report at init.
+ */
 static int fusb302_set_vbus(struct udevice *dev, bool on, bool charge)
 {
+	struct fusb302_chip *chip = dev_get_priv(dev);
+	int ret;
+
+	if (!CONFIG_IS_ENABLED(DM_REGULATOR) || !chip->vbus)
+		return 0;
+
+	ret = regulator_set_enable_if_allowed(chip->vbus, on);
+	if (ret) {
+		dev_err(dev, "cannot turn VBUS %s: %d\n", on ? "on" : "off",
+			ret);
+		return ret;
+	}
+
+	dev_dbg(dev, "set vbus = %s\n", on ? "on" : "off");
+
 	return 0;
 }
 
@@ -558,6 +615,7 @@ static int fusb302_pd_set_interrupts(struct udevice *dev, bool on)
 
 static int fusb302_set_pd_rx(struct udevice *dev, bool on)
 {
+	struct fusb302_chip *chip = dev_get_priv(dev);
 	int ret;
 
 	ret = fusb302_pd_rx_flush(dev);
@@ -582,6 +640,7 @@ static int fusb302_set_pd_rx(struct udevice *dev, bool on)
 			on ? "on" : "off", ret);
 		goto done;
 	}
+	chip->intr_pd = on;
 	dev_dbg(dev, "set pd RX %s\n", on ? "on" : "off");
 done:
 	return ret;
@@ -810,6 +869,72 @@ static int fusb302_enter_low_power_mode(struct udevice *dev,
 		reg = 0;
 
 	return fusb302_set_power_mode(dev, reg);
+}
+
+/*
+ * The inverse. Low power drops the chip to PWR_MEDIUM, which clears PWR3 --
+ * the internal oscillator -- so the BMC transmitter is unclocked, and masks
+ * every interrupt, so even a transmit that did happen would report nothing.
+ * Restore both before the port manager tries to speak again.
+ */
+static int fusb302_exit_low_power_mode(struct udevice *dev)
+{
+	struct fusb302_chip *chip = dev_get_priv(dev);
+	u8 mask = 0xFF & ~FUSB_REG_MASK_VBUSOK;
+	u8 maska = 0xFF;
+	int ret;
+
+	ret = fusb302_set_power_mode(dev, FUSB_REG_POWER_PWR_ALL);
+	if (ret)
+		return ret;
+
+	/*
+	 * Rebuild the masks from the port's CURRENT configuration rather than
+	 * calling fusb302_init_interrupt(), which writes MASK/MASKA/MASKB
+	 * wholesale and would drop the CC interrupts an attached port depends
+	 * on -- BC_LVL for a sink, COMP_CHNG for a source, TOGDONE while
+	 * toggling. Those are armed by set_cc()/set_toggling(), and nothing
+	 * re-runs those after a wake.
+	 *
+	 * Worse than losing them: this driver keeps shadow copies
+	 * (chip->intr_*) that the handler ANDs against the hardware bits, and
+	 * a wholesale init updates none of them. The shadows would keep saying
+	 * "armed" while the hardware said "off", so a detach after the first
+	 * consumer command would simply never be reported and the port would
+	 * go on believing it was attached.
+	 */
+	if (chip->intr_bc_lvl)
+		mask &= ~FUSB_REG_MASK_BC_LVL;
+	if (chip->intr_comp_chng)
+		mask &= ~FUSB_REG_MASK_COMP_CHNG;
+	if (chip->intr_togdone)
+		maska &= ~FUSB_REG_MASKA_TOGDONE;
+
+	ret = fusb302_i2c_write(dev, FUSB_REG_MASK, mask);
+	if (ret)
+		return ret;
+
+	ret = fusb302_i2c_write(dev, FUSB_REG_MASKA, maska);
+	if (ret)
+		return ret;
+
+	ret = fusb302_i2c_write(dev, FUSB_REG_MASKB, 0xFF);
+	if (ret)
+		return ret;
+
+	ret = fusb302_i2c_clear_bits(dev, FUSB_REG_CONTROL0,
+				     FUSB_REG_CONTROL0_INT_MASK);
+	if (ret)
+		return ret;
+
+	/*
+	 * And the PD interrupts to whatever set_pd_rx() last asked for, NOT
+	 * unconditionally on. HARD_RESET_START turns them off on purpose, to
+	 * silence GCRCSENT and TX_SUCCESS for the duration of the reset
+	 * window; a wake landing inside that window would otherwise re-enable
+	 * them behind the port manager's back.
+	 */
+	return fusb302_pd_set_interrupts(dev, chip->intr_pd);
 }
 
 static const char * const cc_polarity_name[] = {
@@ -1100,6 +1225,28 @@ static int fusb302_pd_reset(struct udevice *dev)
 				    FUSB_REG_RESET_PD_RESET);
 }
 
+/**
+ * fusb302_rx_token_class() - name the packet class in an RX FIFO token
+ *
+ * Bits [7:5] of the token, per the datasheet table quoted in fusb302_reg.h.
+ * A byte that is not a token at all still lands in one of these classes --
+ * naming the class is a description, never on its own a proof that a real
+ * frame of that class arrived.
+ */
+static const char *fusb302_rx_token_class(u8 token)
+{
+	switch (token & FUSB302_RX_TOKEN_CLASS_MASK) {
+	case FUSB302_RX_TOKEN_SOP:
+		return "SOP";
+	case FUSB302_RX_TOKEN_SOP1:
+		return "SOP'";
+	case FUSB302_RX_TOKEN_SOP2:
+		return "SOP''";
+	default:
+		return "no token class";
+	}
+}
+
 static int fusb302_pd_read_message(struct udevice *dev,
 				   struct pd_message *msg)
 {
@@ -1134,6 +1281,73 @@ static int fusb302_pd_read_message(struct udevice *dev,
 	dev_dbg(dev, "Received PD message (header=0x%x len=%d)\n", msg->header, len);
 
 	/*
+	 * DROP the frame. The RX token is the only thing that says where a frame
+	 * starts, so a token that is not SOP means the bytes just read are not a
+	 * header and a payload -- and a frame whose framing has been disproved
+	 * must not be acted on.
+	 *
+	 * On a FUSB302 a received SOP frame is prefixed 0b111xxxxx. The other
+	 * two classes are REAL tokens -- 0b110xxxxx is SOP' and 0b101xxxxx is
+	 * SOP'' -- so the token is now CLASSIFIED rather than declared a
+	 * desync, which the earlier version of this message did assert. The
+	 * observed 0xc7 lands exactly on the SOP' class, and a mid-payload byte
+	 * hitting a neighbouring class boundary is a coincidence worth ruling
+	 * out before believing the desync story.
+	 *
+	 * It is ruled out HERE, not asserted: SOP'/SOP'' are delivered only
+	 * with CONTROL1.ENSOP1/ENSOP2 set, this driver never sets either, and
+	 * fusb302_init() opens with a full software reset (FUSB_REG_RESET_SW_RESET)
+	 * that returns CONTROL1 to its 0x00 default -- so no SOP' frame can be
+	 * queued for us at all. CONTROL1 is READ BACK into the message rather
+	 * than trusted, because that reasoning is the only thing standing
+	 * between "mid-frame byte" and "a cable-plug frame we asked for".
+	 *
+	 * With SOP'/SOP'' excluded, a non-SOP token is a partial frame or a
+	 * desync. A drain that terminates on STATUS1.RX_EMPTY cannot tell
+	 * "another complete message" from "a message still arriving", and a pop
+	 * that lands mid-frame desynchronises the FIFO: every subsequent
+	 * "header" is payload bytes, so its data-role bit is arbitrary and
+	 * ~half of them trip tcpm_pd_rx_handler()'s mismatch check.
+	 *
+	 * This was previously a diagnostic that printed and then fell through to
+	 * tcpm_pd_receive() anyway, on the grounds that the token encoding is
+	 * not in fusb302_reg.h. That reasoning does not survive what the frame
+	 * is USED for: a bogus data-role bit does not produce a bogus reading,
+	 * it initiates a full PD ERROR RECOVERY -- the port detaches, re-attaches
+	 * and renegotiates -- and when that lands inside an alt-mode VDM
+	 * sequence it destroys a DisplayPort entry. Measured on this bench: a
+	 * boot carrying "RX token 0xc7 is not SOP (header=0xe0be len=24)" went on
+	 * to fail DisplayPort Status Update at -110. Not knowing the exact
+	 * encoding of a token is a reason to distrust the frame, not a reason to
+	 * trust it.
+	 *
+	 * Dropping is still the conservative half of the trade, but NOT for the
+	 * reason first written here: "a PD-layer retransmission, which the
+	 * protocol is built for" is not what this layer does. tcpm_vdm_xfer()
+	 * retries only on CMDT_RSP_BUSY; tcpm_vdm_wait() returning -ETIMEDOUT
+	 * goes straight out, and a dropped GoodCRC expires into
+	 * `TCPM: PD transmit data failed` -- the same line the boot-time DP
+	 * failure signature is made of. That claim is WITHDRAWN.
+	 *
+	 * What survives is the comparison: dropping costs one failed exchange,
+	 * which the port survives, while accepting a frame whose framing has
+	 * been disproved costs a spurious PD error recovery mid-alt-mode, which
+	 * it does not. Still logged, because both a desync and a lost message
+	 * are real faults and a silent drop would hide either.
+	 */
+	if ((token & FUSB302_RX_TOKEN_CLASS_MASK) != FUSB302_RX_TOKEN_SOP) {
+		u8 control1;
+
+		if (fusb302_i2c_read(dev, FUSB_REG_CONTROL1, &control1))
+			control1 = 0xff;
+
+		dev_err(dev, "RX token %#04x is not SOP (class %s, header=%#06x len=%d, CONTROL1=%#04x) -- frame DROPPED\n",
+			token, fusb302_rx_token_class(token), msg->header, len,
+			control1);
+		return -EPROTO;
+	}
+
+	/*
 	 * Check if we've read off a GoodCRC message. If so then indicate to
 	 * TCPM that the previous transmission has completed. Otherwise we pass
 	 * the received message over to TCPM for processing.
@@ -1151,6 +1365,95 @@ static int fusb302_pd_read_message(struct udevice *dev,
 	return ret;
 }
 
+/*
+ * Empty the RX FIFO, rather than popping one message per interrupt bit.
+ *
+ * The FIFO is a QUEUE and the interrupts are EDGES, so the two do not have a
+ * fixed ratio. INTERRUPTA/B are read-to-clear at the top of the handler, and
+ * the only two places that ever popped a message were the TX_SUCCESS and
+ * GCRCSENT branches -- so one pass drained at most two, and a third message
+ * queued in the same window was stranded with no interrupt left to retrieve
+ * it. CRC_CHK and ACTIVITY are permanently masked and have no handler branch,
+ * so nothing else would ever come back for it.
+ *
+ * That is the whole of the intermittent DisplayPort failure. Entering alt
+ * mode makes the monitor start sending unsolicited Attention VDMs; when one
+ * lands between our GoodCRC and our response the FIFO holds three, two are
+ * popped, and OUR ANSWER is the one left behind. tcpm_vdm_wait() then polls
+ * for 300 ms against interrupt registers reading all-zero while the reply
+ * sits unread inside the chip, and reports -ETIMEDOUT. The queue drains by
+ * exactly one only when the partner next speaks, which is why a boot that
+ * fails once keeps failing: the pump runs permanently one message behind.
+ *
+ * Measured over three instrumented boots: every failing attempt, and only a
+ * failing attempt, begins with the TX_SUCCESS branch popping something that
+ * is not a GoodCRC. Zero anomalies in the boot that passed.
+ *
+ * STATUS1.RX_EMPTY is the level status that answers "is a message waiting",
+ * it has been defined in fusb302_reg.h all along, and nothing read it.
+ * Reading it is also what makes the GoodCRC-vs-message decision inside
+ * fusb302_pd_read_message() sound: that check is already order-independent,
+ * but it can only be right about messages that are actually read out.
+ */
+static int fusb302_pd_drain_rx(struct udevice *dev)
+{
+	struct pd_message msg;
+	u8 status1;
+	int i, ret;
+
+	/*
+	 * Bounded because a wedged chip that never asserts RX_EMPTY would
+	 * otherwise spin forever. The FIFO holds far fewer than this; the cap
+	 * is a backstop, not a policy.
+	 */
+	for (i = 0; i < 16; i++) {
+		ret = fusb302_i2c_read(dev, FUSB_REG_STATUS1, &status1);
+		if (ret)
+			return ret;
+
+		if (status1 & FUSB_REG_STATUS1_RX_EMPTY)
+			return 0;
+
+		ret = fusb302_pd_read_message(dev, &msg);
+
+		/*
+		 * -EPROTO is "that frame was not SOP-framed and was dropped",
+		 * not "the chip is broken" -- so KEEP DRAINING. Returning here
+		 * would leave the rest of the FIFO unread and recreate, exactly,
+		 * the one-message-behind pathology this drain was written to
+		 * cure: the reply we are waiting for stays inside the chip while
+		 * tcpm_vdm_wait() polls interrupt registers that read all-zero.
+		 *
+		 * Continuing EMPTIES the FIFO. It does NOT resynchronise it --
+		 * an earlier version of this comment claimed it did, and that
+		 * claim is WITHDRAWN. Nothing here re-establishes framing:
+		 * every following iteration reads `1 + 2 + len + 4` bytes with
+		 * @len taken from a header this function has just proved bogus,
+		 * so the pops walk the FIFO in the wrong stride until it
+		 * happens to run dry.
+		 *
+		 * FUSB_REG_CONTROL1_RX_FLUSH is the primitive that would
+		 * actually reset framing, and it is deliberately NOT used here:
+		 * it discards the whole FIFO, including the reply the caller is
+		 * waiting for, which recreates by hand the one-message-behind
+		 * pathology this drain exists to cure. Draining to RX_EMPTY
+		 * reaches the same empty FIFO while still delivering every
+		 * frame that IS correctly framed. Choosing flush over drain is
+		 * a behavioural change and needs a bench, which this has not
+		 * had. Only a real I2C failure is worth abandoning the drain
+		 * for.
+		 */
+		if (ret == -EPROTO)
+			continue;
+		if (ret)
+			return ret;
+	}
+
+	dev_warn(dev, "RX FIFO still not empty after %d messages\n", i);
+
+	return 0;
+}
+
 static void fusb302_interrupt_handle(struct udevice *dev)
 {
 	struct fusb302_chip *chip = dev_get_priv(dev);
@@ -1163,7 +1466,6 @@ static void fusb302_interrupt_handle(struct udevice *dev)
 	bool intr_togdone;
 	bool intr_bc_lvl;
 	bool intr_comp_chng;
-	struct pd_message pd_msg;
 	int ret;
 
 	/* grab a snapshot of intr flags */
@@ -1250,7 +1552,7 @@ static void fusb302_interrupt_handle(struct udevice *dev)
 
 	if (interrupta & FUSB_REG_INTERRUPTA_TX_SUCCESS) {
 		dev_dbg(dev, "IRQ: PD tx success\n");
-		ret = fusb302_pd_read_message(dev, &pd_msg);
+		ret = fusb302_pd_drain_rx(dev);
 		if (ret) {
 			dev_err(dev, "cannot read in PD message, ret=%d\n", ret);
 			return;
@@ -1269,7 +1571,7 @@ static void fusb302_interrupt_handle(struct udevice *dev)
 
 	if (interruptb & FUSB_REG_INTERRUPTB_GCRCSENT) {
 		dev_dbg(dev, "IRQ: PD sent good CRC\n");
-		ret = fusb302_pd_read_message(dev, &pd_msg);
+		ret = fusb302_pd_drain_rx(dev);
 		if (ret) {
 			dev_err(dev, "cannot read in PD message, ret=%d\n", ret);
 			return;
@@ -1307,6 +1609,7 @@ static struct dm_tcpm_ops fusb302_ops = {
 	.pd_transmit = fusb302_pd_transmit,
 	.poll_event = fusb302_poll_event,
 	.enter_low_power_mode = fusb302_enter_low_power_mode,
+	.exit_low_power_mode = fusb302_exit_low_power_mode,
 };
 
 static const struct udevice_id fusb302_ids[] = {

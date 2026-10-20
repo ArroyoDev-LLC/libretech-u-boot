@@ -14,6 +14,8 @@
 
 #include <clk.h>
 #include <dm.h>
+#include <errno.h>
+#include <linux/err.h>
 #include <reset.h>
 #include <scmi_agent.h>
 #include <scmi_agent-uclass.h>
@@ -279,6 +281,88 @@ static int dm_test_scmi_cmd(struct unit_test_state *uts)
 	ut_assert_nextline("Reset failed (-13)");
 	ut_assert_console_end();
 
+	/* scmi clk get/set: writable, readonly DENIED, invalid NOT_FOUND */
+	if (CONFIG_IS_ENABLED(CLK_SCMI)) {
+		ut_assertok(run_command("scmi clk get 0", 0));
+		ut_assert_nextline("clk 0 333");
+		ut_assert_console_end();
+
+		ut_assertok(run_command("scmi clk set 0 444", 0));
+		ut_assert_nextline("clk 0 set 444 -> 444");
+		ut_assert_console_end();
+
+		ut_assertok(run_command("scmi clk set 0 333", 0));
+		ut_assert_nextline("clk 0 set 333 -> 333");
+		ut_assert_console_end();
+
+		ut_assert(run_command("scmi clk set 1 400", 0));
+		ut_assert_nextline("clk 1 set 400 err -13");
+		ut_assert_console_end();
+
+		ut_assertok(run_command("scmi clk get 1", 0));
+		ut_assert_nextline("clk 1 200");
+		ut_assert_console_end();
+
+		ut_assertok(run_command("scmi clk dis 0", 0));
+		ut_assert_nextline("clk 0 dis ok");
+		ut_assert_console_end();
+
+		ut_assertok(run_command("scmi clk en 0", 0));
+		ut_assert_nextline("clk 0 en ok");
+		ut_assert_console_end();
+
+		ut_assert(run_command("scmi clk dis 1", 0));
+		ut_assert_nextline("clk 1 dis err -13");
+		ut_assert_console_end();
+
+		ut_assertok(run_command("scmi clk dis 0", 0));
+		ut_assert_nextline("clk 0 dis ok");
+		ut_assert_console_end();
+
+		ut_assertok(run_command("scmi clk rates 0", 0));
+		ut_assert_nextline("clk 0 discrete 1 333");
+		ut_assert_console_end();
+
+		ut_assertok(run_command("scmi clk rates 1", 0));
+		ut_assert_nextline("clk 1 discrete 1 200");
+		ut_assert_console_end();
+
+		ut_assertok(run_command("scmi clk rates 2", 0));
+		ut_assert_nextline("clk 2 range 3 31 1000 1");
+		ut_assert_console_end();
+
+		ut_assert(run_command("scmi clk rates 99", 0));
+		ut_assert_skip_to_line("clk 99 rates err -2");
+		ut_assert_console_end();
+
+		ut_assert(run_command("scmi clk get 99", 0));
+		ut_assert_skip_to_line("clk 99 get err -2");
+		ut_assert_console_end();
+	}
+
+	/* scmi rd: valid domain, invalid NOT_FOUND */
+	if (CONFIG_IS_ENABLED(RESET_SCMI)) {
+		ut_assertok(run_command("scmi rd get 3", 0));
+		ut_assert_nextline("rd 3 rd3");
+		ut_assert_console_end();
+
+		ut_assert(run_command("scmi rd get 4", 0));
+		ut_assert_skip_to_line("rd 4 attr err 0/-4");
+		ut_assert_console_end();
+
+		ut_assertok(run_command("scmi rd assert 3", 0));
+		ut_assert_nextline("rd 3 assert ok");
+		ut_assert_console_end();
+
+		ut_assertok(run_command("scmi rd deassert 3", 0));
+		ut_assert_nextline("rd 3 deassert ok");
+		ut_assert_console_end();
+
+		ut_assert(run_command("scmi rd assert 4", 0));
+		ut_assert_skip_to_line("rd 4 request err -2");
+		ut_assert_console_end();
+	}
+
 	return 0;
 }
 DM_TEST(dm_test_scmi_cmd, UTF_SCAN_FDT | UTF_CONSOLE);
@@ -453,6 +537,44 @@ static int dm_test_scmi_clocks(struct unit_test_state *uts)
 	ut_assert(!agent->clk[1].enabled);
 	ut_assert(!agent->clk[2].enabled);
 
+	/*
+	 * By-id path used on RK3399 (no CLK_CCF child names): RATE_GET every
+	 * advertised clock, RATE_SET a writable one, RATE_SET a readonly one
+	 * is DENIED, invalid id is NOT_FOUND.
+	 */
+	for (int i = 0; i < agent->clk_count; i++) {
+		struct clk clk = { .dev = clock_dev, .id = i };
+		ulong rate = clk_get_rate(&clk);
+
+		ut_assert(!IS_ERR_VALUE(rate));
+		ut_asserteq(agent->clk[i].rate, rate);
+	}
+	{
+		struct clk clk = { .dev = clock_dev, .id = 0 };
+		ulong rate = clk_set_rate(&clk, 444);
+
+		ut_assert(!IS_ERR_VALUE(rate));
+		ut_asserteq(444, agent->clk[0].rate);
+		ut_asserteq(444, clk_get_rate(&clk));
+		rate = clk_set_rate(&clk, 333);
+		ut_assert(!IS_ERR_VALUE(rate));
+	}
+	{
+		struct clk clk = { .dev = clock_dev, .id = 1 };
+		ulong rate = clk_set_rate(&clk, 400);
+
+		ut_asserteq(-EACCES, (int)rate);
+		ut_asserteq(200, agent->clk[1].rate);
+	}
+	{
+		struct clk clk = { .dev = clock_dev, .id = 99 };
+		ulong rate = clk_get_rate(&clk);
+
+		ut_asserteq(-ENOENT, (int)rate);
+		rate = clk_set_rate(&clk, 1);
+		ut_asserteq(-ENOENT, (int)rate);
+	}
+
 	return release_sandbox_scmi_test_devices(uts, dev);
 }
 DM_TEST(dm_test_scmi_clocks, UTF_SCAN_FDT);
@@ -490,6 +612,13 @@ static int dm_test_scmi_resets(struct unit_test_state *uts)
 
 	ut_assertok(reset_deassert(&scmi_devices->reset[0]));
 	ut_assert(!agent->reset[0].asserted);
+
+	{
+		struct reset_ctl rst = { .dev = reset_dev, .id = 99 };
+
+		ut_asserteq(-ENOENT, reset_request(&rst));
+		ut_asserteq(-ENOENT, reset_assert(&rst));
+	}
 
 	return release_sandbox_scmi_test_devices(uts, dev);
 }

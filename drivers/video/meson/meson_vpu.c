@@ -8,6 +8,7 @@
 
 #include <display.h>
 #include <dm.h>
+#include <asm/io.h>
 #include <efi_loader.h>
 #include <fdt_support.h>
 #include <log.h>
@@ -23,6 +24,19 @@
 #include "simplefb_common.h"
 
 #define MESON_VPU_OVERSCAN SZ_64K
+
+/*
+ * HHI clock registers, byte offsets into the vpu node's second reg range.
+ * Datasheet word indices 0x6F and 0x7D.
+ */
+#define MESON_HHI_VPU_CLK_CNTL		0x1bc
+#define MESON_HHI_VAPBCLK_CNTL		0x1f4
+
+/* vpu_clk_0: mux [10:9] (0 = fclk_div4), divider [6:0] (N-1), gate BIT(8) */
+#define MESON_VPU_CLK_SEL_FCLK_DIV4	(0 << 9)
+#define MESON_VPU_CLK_GATE		BIT(8)
+/* vapb_clk_0 = fclk_div4 / 2; path gate BIT(8) and final gate BIT(30) */
+#define MESON_VAPB_CLK_ENABLE		(BIT(30) | BIT(8) | 1)
 
 /* Static variable for use in meson_vpu_rsv_fb() */
 static struct meson_framebuffer {
@@ -127,6 +141,47 @@ static int meson_vpu_probe(struct udevice *dev)
 	priv->dmc_base = dev_remap_addr_index(dev, 2);
 	if (!priv->dmc_base)
 		return -EINVAL;
+
+	/*
+	 * Give the VPU a clock that is actually RUNNING before touching VCBUS.
+	 *
+	 * The meson clk driver models vpu_clk as a GATE only
+	 * (drivers/clk/meson/gxbb.c: MESON_GATE(CLKID_VPU_0, HHI_VPU_CLK_CNTL,
+	 * 8)); it never programs the mux or the divider.  So the clk_enable_bulk()
+	 * the power-domain driver issues gates whatever selection the earlier
+	 * firmware left behind, and never checks that the selection produces a
+	 * clock.  Linux does not have this problem because meson-gxl.dtsi drives
+	 * CLKID_VPU_0_SEL/_DIV through assigned-clocks; nothing in u-boot does.
+	 *
+	 * On the GXL open boot chain that inherited selection is mux 1
+	 * (fclk_div3), and that mux position delivers NO CLOCK on S905X.
+	 * Measured on AML-S905X-CC-V2 from EL3 with the SoC's own clock-measure
+	 * block (CBUS 0xc1108758, channel 46 "vpu"): 0 Hz at mux 1, 0 Hz at
+	 * mux 2, 62 500 000 Hz at mux 0 with the same /8 divider -- while
+	 * fclk_div5 measures 399 984 375 Hz on channel 43, so the source clocks
+	 * are alive and it is the selection, not the source, that is dead.
+	 *
+	 * An unclocked VPU never completes a bus transfer and this bus has no
+	 * timeout, so the FIRST VCBUS access below (meson_vpu_init()'s
+	 * VPU_RDARB_MODE_L1C1 at 0xd0109e40) never retires: a bus STALL, not an
+	 * abort, with no exception to report it and no console output.  It
+	 * stalls identically from EL2 non-secure and from EL3 secure, which is
+	 * what ruled out a security filter.
+	 *
+	 * Program it here, in the order Amlogic's own GXL VPU driver uses -- mux
+	 * and divider first with the gate closed, gate afterwards:
+	 * vpu_clk = fclk_div4 / 1 = 500 MHz, vapb_clk = fclk_div4 / 2 = 250 MHz.
+	 * G12A and later are excluded: their clock tree is different and they are
+	 * not affected.
+	 */
+	if (!meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
+		writel(MESON_VPU_CLK_SEL_FCLK_DIV4,
+		       priv->hhi_base + MESON_HHI_VPU_CLK_CNTL);
+		writel(MESON_VPU_CLK_SEL_FCLK_DIV4 | MESON_VPU_CLK_GATE,
+		       priv->hhi_base + MESON_HHI_VPU_CLK_CNTL);
+		writel(MESON_VAPB_CLK_ENABLE,
+		       priv->hhi_base + MESON_HHI_VAPBCLK_CNTL);
+	}
 
 	meson_vpu_init(dev);
 

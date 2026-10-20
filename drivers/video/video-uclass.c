@@ -406,13 +406,29 @@ void video_set_default_colors(struct udevice *dev, bool invert)
 void video_damage(struct udevice *vid, int x, int y, int width, int height)
 {
 	struct video_priv *priv = dev_get_uclass_priv(vid);
-	int xend = x + width;
-	int yend = y + height;
+	int xend, yend;
 
-	if (x > priv->xsize)
+	/* Clamp negative origins: a negative xstart would reach the
+	 * consumer (e.g. a u16 display window register) as a huge value.
+	 */
+	if (x < 0) {
+		width += x;
+		x = 0;
+	}
+	if (y < 0) {
+		height += y;
+		y = 0;
+	}
+	if (width <= 0 || height <= 0)
 		return;
 
-	if (y > priv->ysize)
+	xend = x + width;
+	yend = y + height;
+
+	if (x >= priv->xsize)
+		return;
+
+	if (y >= priv->ysize)
 		return;
 
 	if (xend > priv->xsize)
@@ -497,6 +513,10 @@ int video_sync(struct udevice *vid, bool force)
 	struct video_ops *ops = video_get_ops(vid);
 	int ret;
 
+	if (CONFIG_IS_ENABLED(CYCLIC) && !force &&
+	    get_timer(priv->last_sync) < CONFIG_VIDEO_SYNC_MS)
+		return 0;
+
 	if (IS_ENABLED(CONFIG_VIDEO_COPY))
 		video_flush_copy(vid);
 
@@ -505,10 +525,6 @@ int video_sync(struct udevice *vid, bool force)
 		if (ret)
 			return ret;
 	}
-
-	if (CONFIG_IS_ENABLED(CYCLIC) && !force &&
-	    get_timer(priv->last_sync) < CONFIG_VIDEO_SYNC_MS)
-		return 0;
 
 	video_flush_dcache(vid, false);
 
@@ -729,13 +745,20 @@ static int video_post_probe(struct udevice *dev)
 	}
 
 	/* register cyclic as soon as the first video device is probed */
-	if (CONFIG_IS_ENABLED(CYCLIC) && (gd->flags && GD_FLG_RELOC) &&
+	if (CONFIG_IS_ENABLED(CYCLIC) && (gd->flags & GD_FLG_RELOC) &&
 	    !uc_priv->cyc_active) {
 		uint ms = CONFIG_IF_ENABLED_INT(CYCLIC, VIDEO_SYNC_CYCLIC_MS);
 
-		cyclic_register(&uc_priv->cyc, video_idle, ms * 1000,
-				"video_idle");
-		uc_priv->cyc_active = true;
+		/*
+		 * 0 disables the idle sync. Without this guard a 0-period
+		 * cyclic is "due" on every schedule() call, force-syncing
+		 * constantly -- the opposite of the configured intent.
+		 */
+		if (ms) {
+			cyclic_register(&uc_priv->cyc, video_idle, ms * 1000,
+					"video_idle");
+			uc_priv->cyc_active = true;
+		}
 	}
 
 	return 0;

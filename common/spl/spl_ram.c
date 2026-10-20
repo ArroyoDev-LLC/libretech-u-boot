@@ -69,7 +69,7 @@ static int spl_ram_load_image(struct spl_image_info *spl_image,
 	}
 	header = map_sysmem(addr, 0);
 
-#if CONFIG_IS_ENABLED(DFU)
+#if CONFIG_IS_ENABLED(DFU) && CONFIG_IS_ENABLED(ENV_SUPPORT)
 	if (bootdev->boot_device == BOOT_DEVICE_DFU)
 		spl_dfu_cmd(0, "dfu_alt_info_ram", "ram", "0");
 #endif
@@ -114,7 +114,8 @@ static int spl_ram_load_image(struct spl_image_info *spl_image,
 #if CONFIG_IS_ENABLED(RAM_DEVICE)
 SPL_LOAD_IMAGE_METHOD("RAM", 0, BOOT_DEVICE_RAM, spl_ram_load_image);
 #endif
-#if CONFIG_IS_ENABLED(DFU)
+/* env-based: spl_dfu_cmd() is built only with an environment (Makefile) */
+#if CONFIG_IS_ENABLED(DFU) && CONFIG_IS_ENABLED(ENV_SUPPORT)
 SPL_LOAD_IMAGE_METHOD("DFU", 0, BOOT_DEVICE_DFU, spl_ram_load_image);
 #endif
 #if CONFIG_IS_ENABLED(PCI_DFU)

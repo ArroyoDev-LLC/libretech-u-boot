@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * mt8183-pumpkin (Pumpkin i500) u-boot control-FDT overlay -- intentionally empty.
+ *
+ * This control FDT is what u-boot hands to Linux over the standard EFI boot path:
+ * bootefi passes u-boot's own control DTB when no separate OS DTB is loaded, so any
+ * &ssusb / &usb_host override placed here PROPAGATES INTO the OS device tree.
+ *
+ * u-boot therefore keeps the shared OF_UPSTREAM i500 USB nodes UNCHANGED so the FDT
+ * stays bit-identical to linux-6.18.y-lc's mt8183-pumpkin.dts: dr_mode = "otg" +
+ * usb-role-switch + role-switch-default-mode = "host" + usb_host enabled. u-boot's
+ * own DFU/UMS/fastboot gadget still works under dr_mode = "otg" --
+ * drivers/usb/mtu3/mtu3_plat.c maps USB_DR_MODE_OTG -> USB_DR_MODE_PERIPHERAL in
+ * both get_ssusb_rscs() and mtu3_glue_bind(), and mt8183_pumpkin_defconfig is
+ * gadget-only (CONFIG_DM_USB_GADGET, no CONFIG_USB_HOST / xhci-mtk), so the enabled
+ * usb_host node has no driver to bind and is inert for u-boot.
+ *
+ * The previous overlay forced dr_mode = "peripheral", deleted the role-switch
+ * properties, and disabled usb_host; that override leaked into the OS DT and left
+ * Linux stuck in mtu3 device mode -> no USB host (no LAN9512 ethernet, no MS2130
+ * capture), which is what forced the manual OTG-DTB EFI override. Do NOT re-add
+ * those overrides -- they are redundant for u-boot's gadget and break host USB in
+ * the OS. See mediatek/todo.md "U-Boot -> v2026.07/lc-master consolidation".
+ */

@@ -155,6 +155,7 @@ config SPL_DM_SEQ_ALIAS
 config TPL_DM_SEQ_ALIAS
 	bool "Support numbered aliases in device tree in TPL"
 	depends on TPL_DM
+	select TPL_STRTO
 	help
 	  Most boards will have a '/aliases' node containing the path to
 	  numbered devices (e.g. serial0 = &serial0). This feature can be
@@ -317,6 +318,7 @@ config SPL_SIMPLE_BUS
 config TPL_SIMPLE_BUS
 	bool "Support simple-bus driver in TPL"
 	depends on TPL_DM && TPL_OF_CONTROL
+	default y
 	help
 	  Supports the 'simple-bus' driver, which is used on some systems
 	  in TPL.

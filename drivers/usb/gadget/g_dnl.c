@@ -6,6 +6,7 @@
  * Lukasz Majewski  <l.majewski@samsung.com>
  */
 
+#include <chip_serial.h>
 #include <log.h>
 #include <malloc.h>
 
@@ -14,6 +15,7 @@
 #include <usb.h>
 
 #include <g_dnl.h>
+#include <linux/string.h>
 #include <usb_mass_storage.h>
 #include <dfu.h>
 #include <thor.h>
@@ -43,9 +45,9 @@
 
 #define DRIVER_VERSION		"usb_dnl 2.0"
 
-static const char product[] = "USB download gadget";
 static char g_dnl_serial[MAX_STRING_SERIAL];
 static const char manufacturer[] = CONFIG_USB_GADGET_MANUFACTURER;
+static const char product[] = CONFIG_USB_GADGET_PRODUCT;
 
 void g_dnl_set_serialnumber(char *s)
 {
@@ -120,17 +122,44 @@ static inline struct g_dnl_bind_callback *g_dnl_bind_callback_end(void)
 				g_dnl_bind_callbacks);
 }
 
+/*
+ * USB_GADGET_DNL_ACM: the DFU gadget also carries a CDC ACM function in the
+ * same configuration, so the host flashing the board sees its console too.
+ * DFU uses ep0 only, so the ACM endpoints come out of the UDC's data
+ * endpoints without taking anything from DFU.
+ */
+static bool g_dnl_with_acm(const char *name)
+{
+	return CONFIG_IS_ENABLED(USB_GADGET_DNL_ACM) &&
+	       !strcmp(name, "usb_dnl_dfu");
+}
+
 static int g_dnl_do_config(struct usb_configuration *c)
 {
 	const char *s = c->cdev->driver->name;
 	struct g_dnl_bind_callback *callback = g_dnl_bind_callback_first();
+	int ret;
 
 	debug("%s: configuration: 0x%p composite dev: 0x%p\n",
 	      __func__, c, c->cdev);
 
-	for (; callback != g_dnl_bind_callback_end(); callback++)
-		if (!strcmp(s, callback->usb_function_name))
-			return callback->fptr(c);
+	for (; callback != g_dnl_bind_callback_end(); callback++) {
+		if (strcmp(s, callback->usb_function_name))
+			continue;
+
+		ret = callback->fptr(c);
+		if (ret || !g_dnl_with_acm(s))
+			return ret;
+
+		/* DFU stays up whether or not the console could join it */
+		if (CONFIG_IS_ENABLED(USB_GADGET_DNL_ACM)) {
+			ret = acm_dnl_attach(c);
+			if (ret)
+				printf("%s: no ACM console beside %s: %d\n",
+				       __func__, s, ret);
+		}
+		return 0;
+	}
 	return -ENODEV;
 }
 
@@ -235,7 +264,57 @@ static int g_dnl_bind(struct usb_composite_dev *cdev)
 	g_dnl_string_defs[1].id = id;
 	device_desc.iProduct = id;
 
+	/*
+	 * A multi-function device whose ACM pair is grouped by an IAD declares
+	 * the IAD class triple (USB IAD ECN); every other gadget keeps the
+	 * per-interface class. device_desc is static, so set it each bind.
+	 */
+	if (g_dnl_with_acm(cdev->driver->name)) {
+		device_desc.bDeviceClass = USB_CLASS_MISC;
+		device_desc.bDeviceSubClass = 0x02;
+		device_desc.bDeviceProtocol = 0x01;
+	} else {
+		device_desc.bDeviceClass = USB_CLASS_PER_INTERFACE;
+		device_desc.bDeviceSubClass = 0;
+		device_desc.bDeviceProtocol = 0;
+	}
+
+	/*
+	 * The ids too: the console's 0525:a4a7 below would otherwise outlive its
+	 * gadget, and a board fixup that sets only the product id then gave the
+	 * next one (DFU after the usbacm console) 0525:330c.
+	 */
+	device_desc.idVendor = cpu_to_le16(CONFIG_USB_GADGET_VENDOR_NUM);
+	device_desc.idProduct = cpu_to_le16(CONFIG_USB_GADGET_PRODUCT_NUM);
+
 	g_dnl_bind_fixup(&device_desc, cdev->driver->name);
+
+	/*
+	 * After the board's fixup, which may set the product id per gadget: a
+	 * gadget carrying the console, the stand-alone usbacm one or DFU with
+	 * ACM beside it, takes the Linux-USB serial gadget's id
+	 * (USB_FUNCTION_ACM_LINUX_GADGET_ID), the one a CDC ACM device needs for
+	 * ChromeOS to pass it on to Android or a VM.
+	 */
+	if (IS_ENABLED(CONFIG_USB_FUNCTION_ACM_LINUX_GADGET_ID) &&
+	    (!strcmp(cdev->driver->name, "usb_serial_acm") ||
+	     g_dnl_with_acm(cdev->driver->name))) {
+		device_desc.idVendor = cpu_to_le16(0x0525);
+		device_desc.idProduct = cpu_to_le16(0xa4a7);
+	}
+
+	/*
+	 * iSerialNumber is the chip id in every phase that can read it
+	 * (include/chip_serial.h), an environment-less xPL included.  In U-Boot
+	 * proper serial# holds the same string, so the env callback and the
+	 * functions' own serial# reads agree with it.
+	 */
+	{
+		char serial[CHIP_SERIAL_MAX];
+
+		if (!chip_serial_get(serial, sizeof(serial)))
+			g_dnl_set_serialnumber(serial);
+	}
 
 	if (strlen(g_dnl_serial)) {
 		id = usb_string_id(cdev);
@@ -286,11 +365,26 @@ static struct usb_composite_driver g_dnl_driver = {
  * Registering via USB function name won't be necessary after rewriting
  * g_dnl to support multiple USB functions.
  */
+/* The usbacm console's own gadget, which a download gadget takes the UDC from */
+#define G_DNL_ACM_CONSOLE	"usb_serial_acm"
+
+static bool g_dnl_is_acm_console(const char *name)
+{
+	return name && !strcmp(name, G_DNL_ACM_CONSOLE);
+}
+
 int g_dnl_register(const char *name)
 {
 	int ret;
 
 	debug("%s: g_dnl_driver.name = %s\n", __func__, name);
+	/*
+	 * One UDC, one composite gadget: a running usbacm console steps aside
+	 * for dfu/fastboot/ums and comes back at g_dnl_unregister().
+	 */
+	if (IS_ENABLED(CONFIG_USB_FUNCTION_ACM) && !IS_ENABLED(CONFIG_XPL_BUILD) &&
+	    !g_dnl_is_acm_console(name))
+		acm_console_suspend();
 	g_dnl_driver.name = name;
 
 	ret = usb_composite_register(&g_dnl_driver);
@@ -303,5 +397,32 @@ int g_dnl_register(const char *name)
 
 void g_dnl_unregister(void)
 {
+	bool resume = !g_dnl_is_acm_console(g_dnl_driver.name);
+
 	usb_composite_unregister(&g_dnl_driver);
+	if (IS_ENABLED(CONFIG_USB_FUNCTION_ACM) && !IS_ENABLED(CONFIG_XPL_BUILD) &&
+	    resume)
+		acm_console_resume();
+}
+
+/*
+ * End a download gadget that ran on @udc: unbind it while the controller is
+ * still there, release the UDC (with device removal the controller goes),
+ * then bring a suspended usbacm console back, which gets the UDC afresh.
+ * Neither order of g_dnl_unregister() and udc_device_put() is right once the
+ * put removes the controller: unregistering first resumed the console on a
+ * UDC about to be removed (SError in acm_stdio_puts()); putting first
+ * unbound the gadget -- and, in an SPL with the ACM console beside DFU,
+ * queued its console output -- on a removed controller, and the next gadget
+ * on it never came up.
+ */
+void g_dnl_release(struct udevice *udc)
+{
+	bool resume = !g_dnl_is_acm_console(g_dnl_driver.name);
+
+	usb_composite_unregister(&g_dnl_driver);
+	udc_device_put(udc);
+	if (IS_ENABLED(CONFIG_USB_FUNCTION_ACM) && !IS_ENABLED(CONFIG_XPL_BUILD) &&
+	    resume)
+		acm_console_resume();
 }

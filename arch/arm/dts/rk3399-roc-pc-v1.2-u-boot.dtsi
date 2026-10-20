@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * ROC-RK3399-PC V1.2A: the U-Boot side is the shared board's. This
+ * revision's root regulator-dc-12v is already a regulator-fixed in the
+ * shared -v1.2.dts, so nothing here differs -- except which DTB the shared
+ * file's FIT `fdt-1` node packs, which must be this one whenever this DTS is
+ * the build's CONFIG_DEFAULT_DEVICE_TREE (see the macros' definition there).
+ */
+
+#define ROC_PC_FIT_FDT_FILE	"rockchip/rk3399-roc-pc-v1.2.dtb"
+#define ROC_PC_FIT_FDT_DESC	"fdt-rockchip/rk3399-roc-pc-v1.2"
+
+#include "rk3399-roc-pc-u-boot.dtsi"

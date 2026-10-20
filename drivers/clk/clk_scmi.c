@@ -14,6 +14,8 @@
 #include <scmi_protocols.h>
 #include <asm/types.h>
 #include <linux/clk-provider.h>
+#include <linux/err.h>
+#include <linux/string.h>
 
 struct clk_scmi {
 	struct clk clk;
@@ -25,6 +27,13 @@ struct clk_scmi {
 struct scmi_clock_priv {
 	u32 version;
 };
+
+/* CCF children have the protocol device as parent. By-id handles do not. */
+static bool scmi_clk_ccf_child(struct clk *clk)
+{
+	return CONFIG_IS_ENABLED(CLK_CCF) && clk->dev && clk->dev->parent &&
+	       device_get_uclass_id(clk->dev->parent) == UCLASS_CLK;
+}
 
 static int scmi_clk_get_permissions(struct udevice *dev, int clkid, u32 *perm)
 {
@@ -157,11 +166,10 @@ static int scmi_clk_gate(struct clk *clk, int enable)
 	int ret;
 
 	/*
-	 * In scmi_clk_probe(), in case of CLK_CCF is set, SCMI clock
-	 * version is set in dev's parent priv struct. Otherwise
-	 * SCMI clock version is set in dev priv struct.
+	 * CCF children store the protocol version on the parent. A by-id
+	 * handle has clk->dev == the protocol device itself.
 	 */
-	if (CONFIG_IS_ENABLED(CLK_CCF))
+	if (scmi_clk_ccf_child(clk))
 		priv = dev_get_parent_priv(clk->dev);
 	else
 		priv = dev_get_priv(clk->dev);
@@ -226,19 +234,15 @@ static int scmi_clk_enable(struct clk *clk)
 	u32 ctrl_flags;
 	int ret;
 
-	if (!CONFIG_IS_ENABLED(CLK_CCF))
-		return scmi_clk_gate(clk, 1);
+	if (scmi_clk_ccf_child(clk)) {
+		ret = scmi_clk_get_ctrl_flags(clk, &ctrl_flags);
+		if (ret)
+			return ret;
+		if (!(ctrl_flags & SUPPORT_CLK_STAT_CONTROL))
+			return 0;
+	}
 
-	ret = scmi_clk_get_ctrl_flags(clk, &ctrl_flags);
-	if (ret)
-		return ret;
-
-	if (ctrl_flags & SUPPORT_CLK_STAT_CONTROL)
-		return scmi_clk_gate(clk, 1);
-
-	/* Following Linux drivers/clk/clk-scmi.c, directly return 0 if agent has no permission. */
-	dev_dbg(clk->dev, "%s: SCMI CLOCK: the clock cannot be enabled by the agent.\n", __func__);
-	return 0;
+	return scmi_clk_gate(clk, 1);
 }
 
 static int scmi_clk_disable(struct clk *clk)
@@ -246,20 +250,15 @@ static int scmi_clk_disable(struct clk *clk)
 	u32 ctrl_flags;
 	int ret;
 
-	if (!CONFIG_IS_ENABLED(CLK_CCF))
-		return scmi_clk_gate(clk, 0);
+	if (scmi_clk_ccf_child(clk)) {
+		ret = scmi_clk_get_ctrl_flags(clk, &ctrl_flags);
+		if (ret)
+			return ret;
+		if (!(ctrl_flags & SUPPORT_CLK_STAT_CONTROL))
+			return 0;
+	}
 
-	ret = scmi_clk_get_ctrl_flags(clk, &ctrl_flags);
-	if (ret)
-		return ret;
-
-	if (ctrl_flags & SUPPORT_CLK_STAT_CONTROL)
-		return scmi_clk_gate(clk, 0);
-
-	/* Following Linux drivers/clk/clk-scmi.c, directly return 0 if agent has no permission. */
-	dev_dbg(clk->dev,
-		"%s: SCMI CLOCK: the clock cannot be disabled by the agent.\n", __func__);
-	return 0;
+	return scmi_clk_gate(clk, 0);
 }
 
 static ulong scmi_clk_get_rate(struct clk *clk)
@@ -314,20 +313,22 @@ static ulong scmi_clk_set_rate(struct clk *clk, ulong rate)
 	u32 ctrl_flags;
 	int ret;
 
-	if (!CONFIG_IS_ENABLED(CLK_CCF))
-		return __scmi_clk_set_rate(clk, rate);
+	if (scmi_clk_ccf_child(clk)) {
+		ret = scmi_clk_get_ctrl_flags(clk, &ctrl_flags);
+		if (ret)
+			return ret;
 
-	ret = scmi_clk_get_ctrl_flags(clk, &ctrl_flags);
-	if (ret)
-		return ret;
+		if (ctrl_flags & SUPPORT_CLK_RATE_CONTROL)
+			return __scmi_clk_set_rate(clk, rate);
 
-	if (ctrl_flags & SUPPORT_CLK_RATE_CONTROL)
-		return __scmi_clk_set_rate(clk, rate);
+		/* Following Linux drivers/clk/clk-scmi.c, directly return 0 if agent has no permission. */
+		dev_dbg(clk->dev,
+			"%s: SCMI CLOCK: the clock rate cannot be changed by the agent.\n",
+			__func__);
+		return 0;
+	}
 
-	/* Following Linux drivers/clk/clk-scmi.c, directly return 0 if agent has no permission. */
-	dev_dbg(clk->dev,
-		"%s: SCMI CLOCK: the clock rate cannot be changed by the agent.\n", __func__);
-	return 0;
+	return __scmi_clk_set_rate(clk, rate);
 }
 
 static int scmi_clk_probe(struct udevice *dev)
@@ -420,12 +421,58 @@ static int scmi_clk_set_parent(struct clk *clk, struct clk *parent)
 	return 0;
 }
 
+#if CONFIG_IS_ENABLED(CMD_CLK)
+/*
+ * RATE_GET every clock the server advertised. CLK_CCF is not required:
+ * without it probe does not register child udevices, so the tree walk in
+ * `clk dump` would otherwise skip this provider entirely.
+ */
+static void scmi_clk_dump(struct udevice *dev)
+{
+	size_t num_clocks, i;
+	int ret;
+
+	ret = scmi_clk_get_num_clock(dev, &num_clocks);
+	if (ret) {
+		printf("  CLOCK_ATTRIBUTES failed (%d)\n", ret);
+		return;
+	}
+
+	printf("  id  name              rate\n");
+	for (i = 0; i < num_clocks; i++) {
+		char name[SCMI_CLOCK_NAME_LENGTH_MAX];
+		u32 attr;
+		struct clk clk = {
+			.dev = dev,
+			.id = i,
+		};
+		ulong rate;
+
+		memset(name, 0, sizeof(name));
+		ret = scmi_clk_get_attribute(dev, i, name, &attr);
+		if (ret) {
+			printf("  %2zu  (attr %d)\n", i, ret);
+			continue;
+		}
+		name[sizeof(name) - 1] = '\0';
+		rate = scmi_clk_get_rate(&clk);
+		if (IS_ERR_VALUE(rate))
+			printf("  %2zu  %-16s  err %ld\n", i, name, (long)rate);
+		else
+			printf("  %2zu  %-16s  %lu\n", i, name, rate);
+	}
+}
+#endif
+
 static const struct clk_ops scmi_clk_ops = {
 	.enable = scmi_clk_enable,
 	.disable = scmi_clk_disable,
 	.get_rate = scmi_clk_get_rate,
 	.set_rate = scmi_clk_set_rate,
 	.set_parent = scmi_clk_set_parent,
+#if CONFIG_IS_ENABLED(CMD_CLK)
+	.dump = scmi_clk_dump,
+#endif
 };
 
 U_BOOT_DRIVER(scmi_clock) = {

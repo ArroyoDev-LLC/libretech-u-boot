@@ -9,6 +9,7 @@
 #include <dm/device_compat.h>
 #include <regmap.h>
 #include <syscon.h>
+#include <asm/arch-rockchip/io-domain.h>
 #include <power/regulator.h>
 
 #define MAX_SUPPLIES		16
@@ -312,6 +313,72 @@ static const struct udevice_id rockchip_iodomain_ids[] = {
 	{ }
 };
 
+struct rockchip_iodomain_priv {
+	struct regmap *grf;
+};
+
+static int rockchip_iodomain_write_uV(struct udevice *dev, int idx, int uV)
+{
+	struct rockchip_iodomain_soc_data *soc_data =
+		(struct rockchip_iodomain_soc_data *)dev_get_driver_data(dev);
+	struct rockchip_iodomain_priv *priv = dev_get_priv(dev);
+	const char *supply_name = soc_data->supply_names[idx];
+	int ret;
+
+	if (uV > MAX_VOLTAGE_3_3) {
+		dev_crit(dev, "%s: %d uV is too high. May damage SoC!\n",
+			 supply_name, uV);
+		return -EINVAL;
+	}
+
+	ret = soc_data->write(priv->grf, soc_data->grf_offset, idx, uV);
+	if (ret)
+		dev_err(dev, "%s: Couldn't write to GRF\n", supply_name);
+
+	return ret;
+}
+
+int rockchip_iodomain_set_supply(struct udevice *supply, int uV)
+{
+	struct udevice *dev;
+	struct uclass *uc;
+	int ret, found = 0;
+
+	ret = uclass_get(UCLASS_NOP, &uc);
+	if (ret)
+		return ret;
+
+	uclass_foreach_dev(dev, uc) {
+		struct rockchip_iodomain_soc_data *soc_data;
+
+		if (dev->driver != DM_DRIVER_GET(rockchip_iodomain) ||
+		    !device_active(dev))
+			continue;
+
+		soc_data = (struct rockchip_iodomain_soc_data *)
+				dev_get_driver_data(dev);
+		for (int i = 0; i < MAX_SUPPLIES; i++) {
+			struct udevice *reg;
+
+			if (!soc_data->supply_names[i])
+				continue;
+			if (device_get_supply_regulator(dev,
+							soc_data->supply_names[i],
+							&reg))
+				continue;
+			if (reg != supply)
+				continue;
+
+			ret = rockchip_iodomain_write_uV(dev, i, uV);
+			if (ret)
+				return ret;
+			found++;
+		}
+	}
+
+	return found ? 0 : -ENOENT;
+}
+
 static int rockchip_iodomain_bind(struct udevice *dev)
 {
 	/*
@@ -328,12 +395,12 @@ static int rockchip_iodomain_probe(struct udevice *dev)
 {
 	struct rockchip_iodomain_soc_data *soc_data =
 		(struct rockchip_iodomain_soc_data *)dev_get_driver_data(dev);
-	struct regmap *grf;
+	struct rockchip_iodomain_priv *priv = dev_get_priv(dev);
 	int ret;
 
-	grf = syscon_get_regmap(dev_get_parent(dev));
-	if (IS_ERR(grf))
-		return PTR_ERR(grf);
+	priv->grf = syscon_get_regmap(dev_get_parent(dev));
+	if (IS_ERR(priv->grf))
+		return PTR_ERR(priv->grf);
 
 	for (int i = 0; i < MAX_SUPPLIES; i++) {
 		const char *supply_name = soc_data->supply_names[i];
@@ -359,15 +426,7 @@ static int rockchip_iodomain_probe(struct udevice *dev)
 		if (uV <= 0)
 			continue;
 
-		if (uV > MAX_VOLTAGE_3_3) {
-			dev_crit(dev, "%s: %d uV is too high. May damage SoC!\n",
-				 supply_name, uV);
-			continue;
-		}
-
-		ret = soc_data->write(grf, soc_data->grf_offset, i, uV);
-		if (ret)
-			dev_err(dev, "%s: Couldn't write to GRF\n", supply_name);
+		rockchip_iodomain_write_uV(dev, i, uV);
 	}
 
 	return 0;
@@ -379,4 +438,5 @@ U_BOOT_DRIVER(rockchip_iodomain) = {
 	.of_match = rockchip_iodomain_ids,
 	.bind = rockchip_iodomain_bind,
 	.probe = rockchip_iodomain_probe,
+	.priv_auto = sizeof(struct rockchip_iodomain_priv),
 };

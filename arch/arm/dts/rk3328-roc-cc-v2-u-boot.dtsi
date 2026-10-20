@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * U-Boot additions for Libre Computer ROC-RK3328-CC V2.
+ *
+ * Mirrors rk3328-roc-cc-u-boot.dtsi (same SoC, same DDR4 config, same
+ * board code) and differs only in the SMBIOS product strings, so a V2
+ * board reports itself as a V2 to userspace.
+ */
+
+#include "rk3328-u-boot.dtsi"
+#include "rk3328-sdram-ddr4-1600.dtsi"
+
+/ {
+	smbios {
+		compatible = "u-boot,sysinfo-smbios";
+
+		smbios {
+			system {
+				manufacturer = "Libre Computer";
+				product = "ROC-RK3328-CC-V2";
+			};
+
+			baseboard {
+				manufacturer = "Libre Computer";
+				product = "ROC-RK3328-CC-V2";
+			};
+
+			chassis {
+				manufacturer = "Libre Computer";
+				product = "ROC-RK3328-CC-V2";
+			};
+		};
+	};
+};
+
+&usb20_otg {
+	hnp-srp-disable;
+};
+
+&vcc_sd {
+	bootph-pre-ram;
+};
+
+&spi0 {
+	bootph-pre-ram;
+	bootph-some-ram;
+
+	flash@0 {
+		bootph-pre-ram;
+		bootph-some-ram;
+	};
+};

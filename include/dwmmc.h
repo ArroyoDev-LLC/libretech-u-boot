@@ -143,6 +143,7 @@
 #define DWMCI_BMOD_IDMAC_EN	BIT(7)
 
 /* UHS register */
+#define DWMCI_UHS_VOLT_18V	BIT(0)
 #define DWMCI_DDR_MODE		BIT(16)
 
 /* Internal IDMAC interrupt defines */
@@ -188,6 +189,10 @@ struct dwmci_idmac_regs {
  * @mmc:	Pointer to generic MMC structure for this device
  * @priv:	Private pointer for use by controller
  * @clksel:	(Optional) Platform function to run when speed/width is changed
+ * @io_voltage:	(Optional) Platform function to run around a vqmmc change:
+ *		once BEFORE the regulator moves with the higher of the old and
+ *		new level (@pre true), once AFTER with the new level. For a
+ *		pad bank / IO domain that must track the rail.
  * @board_init:	(Optional) Platform function to run on init
  * @cfg:	Internal MMC configuration, for !CONFIG_BLK cases
  * @fifo_mode:	Use FIFO mode (not DMA) to read and write data
@@ -209,6 +214,8 @@ struct dwmci_host {
 	void *priv;
 
 	int (*clksel)(struct dwmci_host *host);
+	int (*io_voltage)(struct dwmci_host *host, int uV, bool pre);
+	unsigned int power_off_ms;
 	void (*board_init)(struct dwmci_host *host);
 	/**
 	 * @get_mmc_clk: (Optional) Platform function to get/set a particular
@@ -226,6 +233,24 @@ struct dwmci_host {
 	 */
 	unsigned int (*get_mmc_clk)(struct dwmci_host *host, uint freq);
 
+	/**
+	 * @bus_error: (Optional) Platform function to run when a block
+	 * read / write command failed on the bus -- a response or data CRC,
+	 * a data read timeout, a start / end-bit error -- rather than by a
+	 * host-side fault. The controller has already been recovered; the
+	 * card may still be mid-transfer. Return 0 to have the same command
+	 * re-issued (after re-tuning, lowering the clock, ...), or a negative
+	 * error to give up and fail the command as it did. Never called for
+	 * the tuning block itself, nor re-entered from within itself.
+	 *
+	 * @host:	DWMMC host
+	 * @cmd:	The command that failed
+	 * @data:	Its data phase
+	 * @rintsts:	RINTSTS at the failure
+	 */
+	int (*bus_error)(struct dwmci_host *host, struct mmc_cmd *cmd,
+			 struct mmc_data *data, u32 rintsts);
+
 #ifndef CONFIG_BLK
 	struct mmc_config cfg;
 #endif
@@ -233,6 +258,9 @@ struct dwmci_host {
 	bool fifo_mode;
 	bool dma_64bit_address;
 	bool volt_switching;
+	bool in_bus_error;
+	u32 err_rintsts;
+	u32 abort_rintsts;	/* RINTSTS of the STOP that aborted the last failed data command */
 	const struct dwmci_idmac_regs *regs;
 };
 

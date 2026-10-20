@@ -6,6 +6,8 @@
 #ifndef __MENU_H__
 #define __MENU_H__
 
+#include <linux/types.h>
+
 struct cli_ch_state;
 struct menu;
 
@@ -37,12 +39,21 @@ int menu_default_choice(struct menu *m, void **choice);
  */
 int menu_show(int bootdelay);
 
+/* Entries a shortcut key can select: 1-9 then a-z, positionally (0 is reserved) */
+#define BOOTMENU_MAX_SHORTCUTS	35
+
 struct bootmenu_data {
 	int delay;			/* delay for autoboot */
 	int active;			/* active menu entry */
 	int last_active;		/* last active menu entry */
 	int count;			/* total count of menu entries */
 	struct bootmenu_entry *first;	/* first menu entry */
+	/*
+	 * Named shortcut keys: when any bootmenu_key_<n> is set, each entry's
+	 * key is the one it names (0 = none), and positional keys are off.
+	 */
+	bool named_keys;
+	char shortcut[BOOTMENU_MAX_SHORTCUTS];
 };
 
 /** enum bootmenu_key - keys that can be returned by the bootmenu */

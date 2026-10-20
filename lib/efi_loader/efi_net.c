@@ -86,6 +86,8 @@ static int next_dhcp_entry;
  * @wait_for_packet:	signaled when a packet has been received
  * @network_timer_event:	event to check for new network packets.
  * @efi_seq_num:		sequence number of the EFI net object.
+ * @hw_started:		the net udevice has been started (link brought up)
+ *			on behalf of this object; cleared on Stop/Shutdown.
  */
 struct efi_net_obj {
 	struct efi_object header;
@@ -109,6 +111,7 @@ struct efi_net_obj {
 	struct efi_event *wait_for_packet;
 	struct efi_event *network_timer_event;
 	int efi_seq_num;
+	bool hw_started;
 };
 
 static int curr_efi_net_obj;
@@ -146,6 +149,44 @@ static struct efi_net_obj *efi_netobj_from_snp(struct efi_simple_network *snp)
 		}
 	}
 	return NULL;
+}
+
+/**
+ * efi_net_hw_start() - bring the network hardware up on first use
+ *
+ * Initialize() only records that the client wants the interface; the MAC and
+ * PHY are started the first time the client actually transmits or receives.
+ * Starting the device means phy_startup(), which blocks for the whole
+ * autonegotiation timeout (CONFIG_PHY_ANEG_TIMEOUT, 4 s by default) when no
+ * link partner answers -- and EFI loaders such as GRUB Initialize() every
+ * SNP handle they enumerate at load time, whether or not they ever use one.
+ * With no cable that turned every disk boot through GRUB into a 4 s stall.
+ * Deferring the link bring-up to first use keeps the network available to a
+ * client that needs it (the wait moves into its first Transmit()) and costs
+ * nothing for one that does not.
+ *
+ * @nt:		EFI net object
+ * Return:	EFI_SUCCESS, or EFI_DEVICE_ERROR if the device did not start
+ */
+static efi_status_t efi_net_hw_start(struct efi_net_obj *nt)
+{
+	int ret;
+
+	if (nt->hw_started)
+		return EFI_SUCCESS;
+
+	/* Set the net device corresponding to the efi net object */
+	eth_set_dev(nt->dev);
+	env_set("ethact", eth_get_name());
+	/* Get hardware ready for send and receive operations */
+	ret = eth_start_udev(nt->dev);
+	if (ret < 0) {
+		eth_halt();
+		return EFI_DEVICE_ERROR;
+	}
+	nt->hw_started = true;
+
+	return EFI_SUCCESS;
 }
 
 /*
@@ -215,6 +256,7 @@ static efi_status_t EFIAPI efi_net_stop(struct efi_simple_network *this)
 		eth_set_dev(nt->dev);
 		env_set("ethact", eth_get_name());
 		eth_halt();
+		nt->hw_started = false;
 		/* Clear cache of packets */
 		nt->rx_packet_num = 0;
 		this->mode->state = EFI_NETWORK_STOPPED;
@@ -238,7 +280,6 @@ out:
 static efi_status_t EFIAPI efi_net_initialize(struct efi_simple_network *this,
 					      ulong extra_rx, ulong extra_tx)
 {
-	int ret;
 	efi_status_t r = EFI_SUCCESS;
 	struct efi_net_obj *nt;
 
@@ -264,21 +305,14 @@ static efi_status_t EFIAPI efi_net_initialize(struct efi_simple_network *this,
 	net_init();
 	/* Clear cache of packets */
 	nt->rx_packet_num = 0;
-	/* Set the net device corresponding to the efi net object */
-	eth_set_dev(nt->dev);
-	env_set("ethact", eth_get_name());
-	/* Get hardware ready for send and receive operations */
-	ret = eth_start_udev(nt->dev);
-	if (ret < 0) {
-		eth_halt();
-		this->mode->state = EFI_NETWORK_STOPPED;
-		r = EFI_DEVICE_ERROR;
-		goto out;
-	} else {
-		this->int_status = 0;
-		nt->wait_for_packet->is_signaled = false;
-		this->mode->state = EFI_NETWORK_INITIALIZED;
-	}
+	/*
+	 * The hardware itself is started lazily by efi_net_hw_start() on the
+	 * first Transmit()/Receive(), so a client that initializes every
+	 * interface it finds does not wait for a link on each of them.
+	 */
+	this->int_status = 0;
+	nt->wait_for_packet->is_signaled = false;
+	this->mode->state = EFI_NETWORK_INITIALIZED;
 out:
 	return EFI_EXIT(r);
 }
@@ -362,6 +396,7 @@ static efi_status_t EFIAPI efi_net_shutdown(struct efi_simple_network *this)
 	eth_set_dev(nt->dev);
 	env_set("ethact", eth_get_name());
 	eth_halt();
+	nt->hw_started = false;
 
 	this->int_status = 0;
 	nt->wait_for_packet->is_signaled = false;
@@ -659,6 +694,10 @@ static efi_status_t EFIAPI efi_net_transmit
 		break;
 	}
 
+	ret = efi_net_hw_start(nt);
+	if (ret != EFI_SUCCESS)
+		goto out;
+
 	eth_set_dev(nt->dev);
 	env_set("ethact", eth_get_name());
 
@@ -723,6 +762,10 @@ static efi_status_t EFIAPI efi_net_receive
 	default:
 		break;
 	}
+
+	ret = efi_net_hw_start(nt);
+	if (ret != EFI_SUCCESS)
+		goto out;
 
 	if (!nt->rx_packet_num) {
 		ret = EFI_NOT_READY;
@@ -865,6 +908,13 @@ static void EFIAPI efi_network_timer_notify(struct efi_event *event,
 		goto out;
 
 	nt = efi_netobj_from_snp(this);
+	/*
+	 * The hardware comes up on the client's first Transmit()/Receive(),
+	 * not here: polling from the timer would start it -- and pay the
+	 * link wait -- the moment any client Initialize()s the interface.
+	 */
+	if (!nt->hw_started)
+		goto out;
 	curr_efi_net_obj = nt->efi_seq_num;
 
 	if (!nt->rx_packet_num) {

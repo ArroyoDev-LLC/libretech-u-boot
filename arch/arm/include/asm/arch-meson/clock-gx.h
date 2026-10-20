@@ -115,7 +115,7 @@
 
 ulong meson_measure_clk_rate(unsigned int clk);
 
-#if defined(CONFIG_SPL_BUILD)
+#if defined(CONFIG_XPL_BUILD)
 #define HHI_SCC_CNTL0_FINAL_MUX_SEL	BIT(11)
 #define HHI_SCC_CNTL0_FINAL_DYN_MUX_SEL	BIT(10)
 #define HHI_SCC_CNTL0_MUX0_DIVN_TCNT	(0x3f << 4)

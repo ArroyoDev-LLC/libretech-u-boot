@@ -504,6 +504,7 @@ int usb_setup_ehci_gadget(struct ehci_ctrl **ctlrp)
 
 int usb_remove_ehci_gadget(struct ehci_ctrl **ctlrp)
 {
+	struct usb_plat *plat;
 	struct udevice *dev;
 	int ret;
 
@@ -514,6 +515,26 @@ int usb_remove_ehci_gadget(struct ehci_ctrl **ctlrp)
 	ret = device_remove(dev, DM_REMOVE_NORMAL);
 	if (ret)
 		return ret;
+
+	/*
+	 * Put the role back. usb_setup_ehci_gadget() latches
+	 * plat->init_type = USB_INIT_DEVICE and nothing else ever clears it,
+	 * while usb_init() probes the bus without setting init_type at all --
+	 * so after a gadget has run, `usb start` re-probes the controller in
+	 * DEVICE mode. ehci_register() then takes its `if (init ==
+	 * USB_INIT_DEVICE) goto done` path, skipping ehci_reset(),
+	 * ehci_common_init() and the CM_HC write, and host mode is silently
+	 * never entered.
+	 *
+	 * Measured on a Zynq-7020 (ANTSDR E310) before this: after a gadget,
+	 * `usb start` printed its usual "Bus usb@e0002000: 1 USB Device(s)
+	 * found" yet left USBMODE=0x2 (device) and USBCMD=0x0 (halted),
+	 * against USBMODE=0x3 / USBCMD=0x00080b01 on a clean host boot. The
+	 * success message made a dead controller look live.
+	 */
+	plat = dev_get_plat(dev);
+	if (plat)
+		plat->init_type = USB_INIT_HOST;
 
 	*ctlrp = NULL;
 

@@ -35,6 +35,38 @@ config DFU_TIMEOUT
 	  This option adds an optional timeout parameter for DFU which, if set,
 	  will cause DFU to only wait for that many seconds before exiting.
 
+config DFU_TRANSFER_SIZE
+	int "DFU over USB transfer size (wTransferSize)"
+	range 4096 65535
+	default 4096
+	help
+	  The most bytes one DFU DNLOAD or UPLOAD request carries, as the DFU
+	  functional descriptor's wTransferSize tells the host.  Every block
+	  is a control transfer followed by a GETSTATUS round trip, so a
+	  bigger block costs fewer round trips per byte.  Keep it a multiple
+	  of 512, the SuperSpeed EP0 packet: DWC3 bounces an OUT data stage
+	  that is not whole packets through a 512-byte buffer.  The composite
+	  gadget's EP0 buffer is sized to hold one block.
+
+config DFU_BULK
+	bool "DFU bulk data path for RAM alternates (vendor extension)"
+	depends on DFU_OVER_USB
+	help
+	  Adds a vendor interface with a bulk IN and a bulk OUT endpoint
+	  beside the DFU interface.  A host that knows it arms a download or
+	  upload of whole 64 KiB units on the selected alternate with a
+	  vendor request, and the units move over bulk straight to or from
+	  RAM (alternates with a direct buffer only: DFU_RAM's plain layout).
+	  EP0 control transfers are paced per 64-byte packet at high speed,
+	  which caps DFU near 12 MiB/s; bulk is not.  The rest of the
+	  protocol is DFU's own, so dfu-util and other hosts are unaffected.
+
+config SPL_DFU_BULK
+	bool "DFU bulk data path in SPL"
+	depends on SPL_DFU && DFU_BULK
+	help
+	  DFU_BULK in the SPL's DFU session.
+
 config DFU_MMC
 	bool "MMC back end for DFU"
 	depends on MMC
@@ -66,6 +98,24 @@ config DFU_RAM
 	bool "RAM back end for DFU"
 	help
 	  This option enables using DFU to read and write RAM on the target.
+
+config DFU_RAM_LZMA
+	bool "DFU RAM: the lzma layout, unpacked while the download runs"
+	depends on DFU_RAM && LZMA
+	default y
+	help
+	  `<name> lzma <addr> <size> <staging>` alternates: the host sends an
+	  LZMA ("alone") stream and the board unpacks it into <addr> as it
+	  arrives. Off, the layout is refused and its code is not built.
+
+config SPL_DFU_RAM_LZMA
+	bool "DFU RAM lzma layout in SPL"
+	depends on SPL_DFU && SPL_LZMA
+	default y
+	help
+	  DFU_RAM_LZMA in the SPL's DFU session. A board whose SPL decodes an
+	  LZMA FIT keeps SPL_LZMA and may still turn this off: the decoder
+	  stays, the streaming layout goes.
 
 config DFU_SF
 	bool "SPI flash back end for DFU"

@@ -108,6 +108,7 @@ static int set_name(fat_itr *itr, const char *filename, char *shortname)
 	char *pos;
 	int period_location;
 	char buf[13];
+	int ext_len;
 	int i;
 	int ret;
 	struct nameext dirent;
@@ -136,8 +137,24 @@ static int set_name(fat_itr *itr, const char *filename, char *shortname)
 	if (*dirent.name == DELETED_FLAG)
 		*dirent.name = aRING;
 
+	/*
+	 * The extension is space padded to 3 bytes. Names compared below are
+	 * the trimmed form get_name() produces for an existing entry, so a
+	 * shorter extension (".gz") must not carry the padding, and no
+	 * extension must not leave a trailing period: "A~1.GZ " never equals
+	 * the "A~1.GZ" read back from the directory, so a clashing short name
+	 * went undetected and two entries got the same one.
+	 */
+	ext_len = sizeof(dirent.ext);
+	while (ext_len && dirent.ext[ext_len - 1] == ' ')
+		ext_len--;
+
 	/* If filename and short name are the same, quit. */
-	sprintf(buf, "%.*s.%.3s", period_location, dirent.name, dirent.ext);
+	if (ext_len)
+		sprintf(buf, "%.*s.%.*s", period_location, dirent.name,
+			ext_len, dirent.ext);
+	else
+		sprintf(buf, "%.*s", period_location, dirent.name);
 	if (!strcmp(buf, filename)) {
 		ret = 1;
 		goto out;
@@ -164,9 +181,9 @@ static int set_name(fat_itr *itr, const char *filename, char *shortname)
 		if (suffix_start > period_location)
 			suffix_start = period_location;
 		memcpy(dirent.name + suffix_start, buf, suffix_len);
-		if (*dirent.ext != ' ')
-			sprintf(buf, "%.*s.%.3s", suffix_start + suffix_len,
-				dirent.name, dirent.ext);
+		if (ext_len)
+			sprintf(buf, "%.*s.%.*s", suffix_start + suffix_len,
+				dirent.name, ext_len, dirent.ext);
 		else
 			sprintf(buf, "%.*s", suffix_start + suffix_len,
 				dirent.name);

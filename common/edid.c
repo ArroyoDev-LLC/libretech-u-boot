@@ -480,8 +480,20 @@ int edid_get_timing_validate(u8 *buf, int buf_size,
 	found = edid_find_valid_detailed_timing(edid->monitor_details.descriptor, 4,
 						timing, mode_valid, mode_valid_priv);
 
-	/* Look for detailed timing in CTA-861 Extension Block */
-	if (!found && edid->extension_flag && buf_size >= EDID_EXT_SIZE) {
+	/*
+	 * Look for detailed timing in CTA-861 Extension Block.
+	 *
+	 * The checksum is a precondition, not a nicety. extension_tag is one
+	 * byte and there are 256 things it can be, so an extension block that
+	 * was never filled in -- a short read, a caller's uninitialised stack --
+	 * has a 1-in-256 chance of reading 0x02 and being walked as a real
+	 * CTA-861 block: EDID_CEA861_DTD_COUNT detailed timings decoded out of
+	 * garbage, and hdmi_monitor (HDMI vs DVI signalling) set from it below.
+	 * The base block has been checksum-checked since forever, by
+	 * edid_check_info(); this one was not checked anywhere.
+	 */
+	if (!found && edid->extension_flag && buf_size >= EDID_EXT_SIZE &&
+	    !edid_check_checksum(buf + sizeof(*edid))) {
 		struct edid_cea861_info *info =
 			(struct edid_cea861_info *)(buf + sizeof(*edid));
 
@@ -516,8 +528,10 @@ int edid_get_timing_validate(u8 *buf, int buf_size,
 			((edid->video_input_definition & 0x70) >> 3) + 4;
 	}
 
+	/* Same checksum precondition as the detailed-timing search above. */
 	timing->hdmi_monitor = false;
-	if (edid->extension_flag && (buf_size >= EDID_EXT_SIZE)) {
+	if (edid->extension_flag && (buf_size >= EDID_EXT_SIZE) &&
+	    !edid_check_checksum(buf + sizeof(*edid))) {
 		struct edid_cea861_info *info =
 			(struct edid_cea861_info *)(buf + sizeof(*edid));
 

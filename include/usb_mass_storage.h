@@ -18,11 +18,24 @@ struct ums {
 			   ulong start, lbaint_t blkcnt, void *buf);
 	int (*write_sector)(struct ums *ums_dev,
 			    ulong start, lbaint_t blkcnt, const void *buf);
+	/*
+	 * Discard [start, start + blkcnt) for a SCSI UNMAP, or NULL when the
+	 * LUN cannot discard (then UNMAP is an invalid command and nothing
+	 * advertises it). Never touches a block outside the range; may leave
+	 * some of the range as it was (UNMAP is advisory). 0 or -errno.
+	 */
+	int (*erase_sector)(struct ums *ums_dev, ulong start, lbaint_t blkcnt);
 	unsigned int start_sector;
 	unsigned int num_sectors;
 	const char *name;
 	struct blk_desc block_dev;
 	int hwpart;
+	/*
+	 * Export the LUN read-only: MODE SENSE reports it write-protected and
+	 * f_mass_storage refuses every WRITE with DATA PROTECT before
+	 * write_sector is reached.
+	 */
+	bool ro;
 };
 
 int fsg_init(struct ums *ums_devs, int count, struct udevice *udc);

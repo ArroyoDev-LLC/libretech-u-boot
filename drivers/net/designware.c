@@ -531,11 +531,25 @@ static void _dw_eth_halt(struct dw_eth_dev *priv)
 {
 	struct eth_mac_regs *mac_p = priv->mac_regs_p;
 	struct eth_dma_regs *dma_p = priv->dma_regs_p;
+	ulong start;
 
 	writel(readl(&mac_p->conf) & ~(RXENABLE | TXENABLE), &mac_p->conf);
 	writel(readl(&dma_p->opmode) & ~(RXSTART | TXSTART), &dma_p->opmode);
 
 	phy_shutdown(priv->phydev);
+
+	/*
+	 * Issue DMA soft reset to leave the MAC in a clean state for Linux.
+	 * Without this, stale DMA descriptor pointers from u-boot's network
+	 * activity can cause TX timeouts in the Linux stmmac driver.
+	 */
+	writel(readl(&dma_p->busmode) | DMAMAC_SRST, &dma_p->busmode);
+	start = get_timer(0);
+	while (readl(&dma_p->busmode) & DMAMAC_SRST) {
+		if (get_timer(start) >= CFG_MACRESET_TIMEOUT)
+			break;
+		udelay(100);
+	}
 }
 
 int designware_eth_init(struct dw_eth_dev *priv, u8 *enetaddr)

@@ -32,6 +32,8 @@ endif
 endif
 
 ifndef CONFIG_XPL_BUILD
+obj-$(CONFIG_ZYNQ_ADRV9009) += zynq-adrv9009/board.o
+obj-$(CONFIG_ZYNQ_E310) += zynq-e310/board.o
 obj-$(CONFIG_CMD_ZYNQ) += cmds.o
 obj-$(CONFIG_CMD_ZYNQ_RSA) += bootimg.o
 endif

@@ -711,6 +711,33 @@ compress:
     Sets the compression algorithm to use (for blobs only). See the entry
     documentation for details.
 
+decomp-in-place:
+    Indicates that the loader of this entry decompresses it from a source
+    buffer which overlaps the destination. Whether that is safe is a
+    property of THIS image's compression ratio, not of the loader: a stream
+    decompressor working across an overlap is only correct while its read
+    pointer stays ahead of its write pointer, which requires
+
+        2 * compressed_size > uncompressed_size
+
+    i.e. the ratio must stay worse than 50%. Setting this property makes
+    binman check the inequality at pack time -- the one place both numbers
+    are known -- and fail the build, naming the image and both sizes, if it
+    does not hold. Nothing downstream can catch the violation: a FIT hash
+    is verified over the compressed bytes before decompression runs, and
+    formats which do not record their decompressed length (LZ4) give the
+    loader no way to detect the overlap at runtime. Has no effect unless
+    ``compress`` is set.
+
+    If the compressor bintool is not installed the check cannot be
+    performed, and binman fails rather than packing the 1 KB zero stub it
+    would otherwise substitute. ``--allow-missing`` / ``--ignore-missing``
+    do NOT waive this: they exist for external blobs the build does not
+    have, whereas this is a correctness assertion on data binman produces
+    itself, and a stub would otherwise ship inside a FIT image labelled
+    with the compression algorithm and carrying a valid hash over the
+    zeros.
+
 missing-msg:
     Sets the tag of the message to show if this entry is missing. This is
     used for external blobs. When they are missing it is helpful to show

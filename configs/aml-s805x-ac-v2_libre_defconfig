@@ -1,0 +1,15 @@
+#include <configs/libretech-ac_libre_defconfig>
+
+# Open-chain TPL->SPL boot for AML-S805X-AC-V2 (Das Frite). Used by LBS
+# aml-s805x-ac-v2.
+#
+# The V2 is the same board as the AML-S805X-AC: the vendor BL2 (which carries
+# the DDR init and timing) and BL30 that LBS ships for the two are byte-identical
+# (vendor/amlogic/blx/aml-s805x-ac{,-v2}/), and their vendor defconfigs differ
+# only in the four identity lines below. So this file is the V1 open chain --
+# every DDR, power and chain value comes from libretech-ac_libre_defconfig -- with
+# the V2's identity. Change a chain value there, never here.
+CONFIG_SYS_BOARD="aml-s805x-ac-v2"
+CONFIG_DEFAULT_DEVICE_TREE="amlogic/meson-gxl-s805x-libretech-ac-v2-libre"
+CONFIG_IDENT_STRING=" Libre Computer AML-S805X-AC-V2 Das Frite"
+CONFIG_USB_GADGET_PRODUCT="Das Frite"

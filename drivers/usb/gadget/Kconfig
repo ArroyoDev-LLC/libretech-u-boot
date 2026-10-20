@@ -56,6 +56,16 @@ config USB_GADGET_MANUFACTURER
 	  Vendor name of the USB device emulated, reported to the host device.
 	  This is usually either the manufacturer of the device or the SoC.
 
+config USB_GADGET_PRODUCT
+	string "Product name of the USB device"
+	default "NVIDIA" if ARCH_TEGRA
+	default "Allwinner Technology" if ARCH_SUNXI
+	default "Rockchip" if ARCH_ROCKCHIP
+	default "U-Boot"
+	help
+	  Product name of the USB device emulated, reported to the host device.
+	  This is the product name of the device or the SoC.
+
 config USB_GADGET_VENDOR_NUM
 	hex "Vendor ID of the USB device"
 	default 0x0955 if ARCH_TEGRA
@@ -198,6 +208,28 @@ config USB_FUNCTION_MASS_STORAGE
 	  Enable mass storage protocol support in U-Boot. It allows exporting
 	  the eMMC/SD card content to HOST PC so it can be mounted.
 
+config USB_GADGET_MASS_STORAGE_BUFLEN
+	hex "Mass storage data buffer size"
+	depends on USB_FUNCTION_MASS_STORAGE || SPL_USB_FUNCTION_MASS_STORAGE
+	default 0x20000
+	help
+	  Size of each of the two data buffers of the mass storage function,
+	  in bytes; a multiple of 512. It is also the most a single WRITE
+	  moves per block-device call. A larger buffer also lengthens each
+	  USB-to-storage hand-off: on AML-S905D3-CC 1 MiB was slower than
+	  128 KiB in both directions. Two buffers are allocated with malloc
+	  in each stage that runs the function.
+
+config USB_GADGET_MASS_STORAGE_READ_FILL
+	hex "Mass storage READ fill per block-device call"
+	depends on USB_FUNCTION_MASS_STORAGE || SPL_USB_FUNCTION_MASS_STORAGE
+	default 0x4000
+	help
+	  The most one READ fills per block-device call, at most the buffer
+	  size. 16 KiB (the default) pipelines the storage read with bulk-IN
+	  on MediaTek MT8188's MTU3, where a 16 KiB buffer hung; a card with
+	  a large per-command cost may read faster with a larger fill.
+
 config USB_FUNCTION_ROCKUSB
 	bool "Enable USB rockusb gadget"
 	depends on ARCH_ROCKCHIP
@@ -228,6 +260,57 @@ config USB_FUNCTION_ACM
 	  ACM serial link. This function can be used to create a stdio device to
 	  interoperate with MS-Windows hosts or with the Linux-USB "cdc-acm"
 	  driver.
+
+config USB_FUNCTION_ACM_LINUX_GADGET_ID
+	bool "Gadgets carrying the ACM console present the Linux-USB serial gadget's id"
+	depends on USB_FUNCTION_ACM || SPL_USB_GADGET_DNL_ACM
+	help
+	  Every gadget that carries the CDC ACM console enumerates as
+	  0525:a4a7, the id of the Linux-USB serial gadget (g_serial), instead
+	  of USB_GADGET_VENDOR_NUM:USB_GADGET_PRODUCT_NUM: the stand-alone
+	  usbacm console, and DFU with ACM beside it (USB_GADGET_DNL_ACM,
+	  SPL_USB_GADGET_DNL_ACM) in every phase. Strings and serial number
+	  are unchanged. Gadgets without ACM (DFU alone, UMS, fastboot,
+	  rockusb) keep their id; hosts tell the functions apart by interface.
+
+	  A host that hands CDC ACM devices on only by id needs it: ChromeOS's
+	  permission_broker lets a device whose interface cdc_acm has claimed
+	  pass to Android or a Linux VM only if its id is on its serial
+	  allowlist, and 0525:a4a7 is.
+
+config USB_FUNCTION_ACM_CONNECT_TIMEOUT_MS
+	int "How long starting the usbacm console waits for a host (ms)"
+	depends on USB_FUNCTION_ACM
+	default 0
+	help
+	  Starting the usbacm stdio device registers the ACM gadget and waits
+	  for a host to configure it. 0 waits until one does or Ctrl-C is
+	  pressed. A non-zero value gives up after that many milliseconds:
+	  the gadget is unregistered and the start fails, so the console runs
+	  on without usbacm. A board that adds usbacm to its console by
+	  itself needs one, or a boot with no host on the port hangs.
+
+config USB_FUNCTION_ACM_TX_BUF_SIZE
+	int "usbacm transmit ring size (bytes)"
+	depends on USB_FUNCTION_ACM
+	default 2048
+	help
+	  What the usbacm console keeps while the host is not reading: before
+	  it raises DTR, or between reads. When the ring is full the oldest
+	  bytes are overwritten.
+
+config USB_GADGET_DNL_ACM
+	bool "Serve a CDC ACM console beside DFU in the download gadget"
+	depends on USB_FUNCTION_ACM && DFU_OVER_USB && CONSOLE_MUX
+	help
+	  When the download gadget runs DFU (the `dfu` command), bind a CDC ACM
+	  function in the same configuration, so the host that flashes the
+	  board also gets its console as /dev/ttyACM*. The console is the
+	  stdio device `dnlacm`: list it in stdout/stderr (and stdin) next to
+	  `serial`. It never registers the UDC itself; its output is dropped
+	  whenever no download gadget is up. UMS, fastboot and the stand-alone
+	  `usbacm` console are unchanged. Needs three free data endpoints on
+	  the UDC (bulk IN, bulk OUT, interrupt IN); DFU uses ep0 only.
 
 endif # USB_GADGET_DOWNLOAD
 
@@ -355,6 +438,56 @@ config SPL_DFU_RAM
 	 DFU and execute the u-boot/kernel from RAM.
 
 endchoice
+
+config SPL_DFU_MMC
+	bool "MMC back end for DFU in SPL"
+	depends on SPL_DFU && SPL_MMC
+	help
+	  Build drivers/dfu/dfu_mmc.c into SPL, so a DFU session run by SPL can
+	  offer raw MMC alternate settings. Only the raw layout is available:
+	  SPL has no filesystem writer and no shell, so fat/ext4 and script
+	  entities are refused. Whether the alternates can be written is
+	  decided by SPL_MMC_WRITE; without it an MMC download fails at the
+	  block layer and only uploads (reads) work.
+
+config SPL_DFU_VIRT
+	bool "Virtual back end for DFU in SPL"
+	depends on SPL_DFU
+	help
+	  Build drivers/dfu/dfu_virt.c into SPL. A virt alternate has no
+	  storage of its own: the board supplies dfu_read_medium_virt(),
+	  dfu_write_medium_virt() and dfu_get_medium_size_virt(). The Meson
+	  SPL flash session uses it to serve SPI NOR regions read-only through
+	  a bare controller reader, without the SPI flash stack.
+
+config SPL_USB_FUNCTION_MASS_STORAGE
+	bool "USB mass storage function in SPL"
+	depends on SPL_USB_GADGET && SPL_BLK
+	help
+	  Build f_mass_storage into SPL, so a session run by SPL can export a
+	  block device over USB. SPL has no ums command: the caller fills a
+	  struct ums, calls fsg_init() and g_dnl_register("usb_dnl_ums"), and
+	  runs fsg_main_thread() in its own loop. Whether the LUN can be
+	  written is decided by the caller (struct ums ro and write_sector) and
+	  by the block device: without SPL_MMC_WRITE an MMC LUN has no write
+	  path.
+
+config SPL_USB_GADGET_DNL_ACM
+	bool "Serve a CDC ACM console beside DFU in the SPL download gadget"
+	depends on SPL_DFU && SPL_SERIAL
+	select SPL_CIRCBUF
+	help
+	  USB_GADGET_DNL_ACM for SPL: when SPL registers the download gadget
+	  as usb_dnl_dfu, a CDC ACM function joins DFU in the same
+	  configuration (bulk IN, bulk OUT, interrupt IN; DFU uses ep0
+	  only), so the host sees the SPL console as /dev/ttyACM*. SPL has no
+	  stdio, so every console byte is teed into the ACM console's 4 KiB
+	  ring (common/console.c) once the caller has started it with
+	  acm_dnl_console_start(); the serial / debug UART output is
+	  unchanged. Bytes printed while no DFU gadget is up (a UMS gadget
+	  carries no ACM) stay in the ring, oldest overwritten, and reach the
+	  next DFU session's ttyACM once its host raises DTR. Input is
+	  received but never read.
 
 config SPL_USB_SDP_SUPPORT
 	bool "Support SDP (Serial Download Protocol) in SPL"

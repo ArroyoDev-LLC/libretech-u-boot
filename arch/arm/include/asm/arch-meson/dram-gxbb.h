@@ -160,6 +160,12 @@
 #define DDR0_SOFT_RESET	(DDR_MMC_BASE + 0x404)
 #define DDR_CLK_CNTL	(DDR_MMC_BASE + 0x18)
 #define DDR0_APD_CTRL	(DDR_MMC_BASE + 0x408)
+/*
+ * GXBB-only: the vendor's P_DDR0_CLK_CTRL is 0xc8836c00 under the
+ * P_DDR_PHY_GX_BABY arm of cmd/amlogic/cmd_ddr_test.c, and 0x5 is that arm's
+ * own CLOSE_CHANNEL_A_PHY_CLK() value.  There is no GXL instance at +0x400.
+ */
+#define DDR0_CLK_CTRL	(DDR_MMC_BASE + 0x400)
 
 /* These will get optimized out by the compiler */
 #define AM_DDR_PLL_CNTL5	0

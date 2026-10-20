@@ -13,6 +13,7 @@
 #include <command.h>
 #include <hang.h>
 #include <malloc.h>
+#include <stdio.h>
 #include <time.h>
 #include <watchdog.h>
 #include <linux/errno.h>
@@ -676,6 +677,21 @@ int cli_readline_into_buffer(const char *const prompt, char *buffer,
 		return rc < 0 ? rc : len;
 
 	} else {
+		/*
+		 * Residual SCMI (n2-prompt, Solitude AO UART @0xff803000):
+		 * 30180a60b8a printf+flush() busy-waits serial-uclass
+		 * _serial_flush → meson_serial_pending(tx) on
+		 * AML_UART_TX_EMPTY (bit 22). That wait never returns —
+		 * PREBOOT (no flush) prints residual-scmi-done; then
+		 * silence; fleetctl send version produced no echo
+		 * (getchar never reached). Do not flush. Print the
+		 * prompt with a newline so a line-buffered UART log
+		 * shows `=>` (puts("=> ") has no newline).
+		 */
+		if (IS_ENABLED(CONFIG_SCMI_RESIDUAL_DIAG) && prompt) {
+			printf("%s\n", prompt);
+			return cread_line_simple(NULL, p);
+		}
 		return cread_line_simple(prompt, p);
 	}
 }

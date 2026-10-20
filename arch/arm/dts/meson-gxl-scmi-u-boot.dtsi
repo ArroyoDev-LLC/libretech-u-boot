@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Open-chain SCMI for Amlogic GXL (U-Boot only overlay).
+ *
+ * Included from board *-u-boot.dtsi under #ifdef CONFIG_SCMI_FIRMWARE.
+ * Does not alter the Linux-bound SoC DT (meson-gx.dtsi SCPI path).
+ *
+ * Address map (must match SC product / gxl_mmap.h):
+ *   docs: amlogic/software/boot/upstream-transition/scp-firmware-build.md
+ *         § "MHU / SHMEM address map (vendor SCPI → open SCMI)"
+ *   code: product/amlogic/gxl/include/gxl_mmap.h
+ *
+ * Meson MHU — NOT stock ARM MHU (arm,mhu / primecell; different reg order):
+ *   compatible = "amlogic,meson-gxbb-mhu"   // correct GXL NS doorbell
+ *   reg        = <0 0x404 0 0x4c> under hiubus → phys 0xC883C404 size 0x4c
+ *                (GXL_MHU_DT_BASE / GXL_MHU_DT_SIZE in gxl_mmap.h)
+ *   Per-channel AP RX base (platform_mhu / module/meson_mhu):
+ *     ch0 SEC  0xC883C404   SET@+0  STAT@+4  CLR@+8
+ *     ch1 LP   0xC883C410   (+0x0c from DT base)
+ *     ch2 HP   0xC883C41C   (+0x18) — OSPM SCMI (U-Boot mboxes[0])
+ *     AP TX    = AP_RX + 0x24   (e.g. HP TX 0xC883C440)
+ *
+ * NS shmem (AHB sram@c8000000; GXL_NS_SRAM_*):
+ *   lpri 0xC8013000 size 0x400  (cpu_scp_lpri)
+ *   hpri 0xC8013400 size 0x400  (cpu_scp_hpri / GXL_SCMI_PAYLOAD_NS_HP)
+ *   Secure BL31 payloads 0xD9013xxx are NOT used by NS SCMI.
+ *
+ * Runtime: needs U-Boot meson-mhu provider + open SC answering SCMI.
+ * status remains "disabled" until that path is ready.
+ *
+ * THIS BLOB IS A LINUX DT.  meson_gx_libre_scmi_fixup() flips
+ * /firmware/scmi to "okay" and repoints the CPUs at protocol@14/@13 on the
+ * blob handed to booti, and on a rig whose kernel DTB carries no SCMI
+ * package that blob is THIS ONE ($fdtcontroladdr).  So the two rules the
+ * board DTSes already follow apply here verbatim:
+ *
+ * NODE ORDER IS LOAD-BEARING -- protocol@14 MUST come before protocol@13:
+ * scmi-cpufreq's OPP setup resolves the CPUs' `clocks` phandle into the
+ * clock provider, and with perf ahead of clock every OPP add fails with -19
+ * and no cpufreq policy exists.  Do not tidy this list.
+ *
+ * DECLARE ONLY WHAT THE SC SERVES.  The open SC builds BASE 0x10,
+ * POWER_DOMAIN 0x11, SYSTEM_POWER 0x12, PERFORMANCE 0x13 and CLOCK 0x14;
+ * SENSOR 0x15 is OFF (SCP_GXL_SENSOR) and RESET 0x16 is in no SCP_MODULES
+ * rung.  Declaring those two made Linux enumerate and reject them
+ * ("SCMI protocol 21 not implemented", "22 not implemented").
+ * Order and protocol set now match the board DTSes
+ * (arch/arm64/boot/dts/amlogic/meson-gxl-s905x-libretech-cc{,-v2}.dts in
+ * linux-6.18.y-lc), which are the same hardware described twice.
+ */
+
+/ {
+	firmware {
+		scmi: scmi {
+			compatible = "arm,scmi";
+			/*
+			 * "okay" lets DM bind the SCMI agent at initr_dm so the
+			 * `scmi` command reaches the open SC from the boot
+			 * shell.  This is safe only because the self-guard in
+			 * board-gx.c asks the SC first: on a mute SC it DELETES
+			 * this node in board_init_f before DM scans it, so the
+			 * agent is never bound and the SMT-window read that
+			 * would abort never happens.  With a live SC the node
+			 * stays okay and the agent binds.  Off unless the
+			 * diagnostic config is set, so the shipping DTB is
+			 * byte-identical.
+			 */
+#ifdef CONFIG_MESON_GX_SCMI_AP_AGENT
+			status = "okay";
+#else
+			status = "disabled";
+#endif
+
+			/* U-Boot mailbox_agent uses mboxes[0] only today → ch2 HP */
+			mboxes = <&mailbox 2>, <&mailbox 1>;
+			mbox-names = "tx", "rx";
+			shmem = <&cpu_scp_hpri>, <&cpu_scp_lpri>;
+			arm,max-rx-timeout-ms = <30>;
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			scmi_power: protocol@11 {
+				reg = <0x11>;
+				#power-domain-cells = <1>;
+			};
+
+			scmi_clk: protocol@14 {
+				reg = <0x14>;
+				#clock-cells = <1>;
+			};
+
+			scmi_perf: protocol@13 {
+				reg = <0x13>;
+				#power-domain-cells = <1>;
+			};
+		};
+	};
+};
+
+/*
+ * Prefer arm,scmi-shmem for U-Boot SMT mapping; keep vendor fallback
+ * compatible for dual-stack / Linux SCPI coexistence documentation.
+ * Bases: 0xC8013000 / 0xC8013400 — scp-firmware-build.md + gxl_mmap.h
+ */
+&cpu_scp_lpri {
+	compatible = "arm,scmi-shmem", "amlogic,meson-gxbb-scp-shmem";
+};
+
+&cpu_scp_hpri {
+	compatible = "arm,scmi-shmem", "amlogic,meson-gxbb-scp-shmem";
+};
+
+/*
+ * Meson MHU node (hardware description already in meson-gx.dtsi).
+ * compatible MUST stay amlogic,meson-gxbb-mhu — not arm,mhu.
+ *
+ * Snippet as compiled into libretech-cc DTB (hiubus-relative reg):
+ *
+ *   mailbox@404 {
+ *       compatible = "amlogic,meson-gxbb-mhu";
+ *       reg = <0x0 0x404 0x0 0x4c>;   // phys 0xC883C404
+ *       #mbox-cells = <1>;
+ *       // Driver layout (gxl_mmap / platform_mhu / meson_mhu):
+ *       //   SET@0 STAT@4 CLR@8 per channel; ch2 HP @ +0x18
+ *   };
+ *
+ * Ref: amlogic/.../upstream-transition/scp-firmware-build.md
+ *      product/amlogic/gxl/include/gxl_mmap.h
+ */
+&mailbox {
+	compatible = "amlogic,meson-gxbb-mhu";
+};
+
+/*
+ * OBSOLETE: vendor SCPI — interim only, see clean-slate §5.3.
+ * meson-gx.dtsi names the node /scpi without a label, so merge by path.
+ */
+/ {
+	scpi {
+		status = "disabled";
+	};
+};

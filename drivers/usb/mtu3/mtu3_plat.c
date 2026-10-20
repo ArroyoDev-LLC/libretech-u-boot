@@ -136,6 +136,8 @@ static void ssusb_ip_sw_reset(struct ssusb_mtk *ssusb)
 static int get_ssusb_rscs(struct udevice *dev, struct ssusb_mtk *ssusb)
 {
 	struct udevice *child;
+	struct udevice *macdev;
+	bool flat_binding;
 	int ret;
 
 	ret = device_get_supply_regulator(dev, "vusb33-supply",
@@ -163,16 +165,48 @@ static int get_ssusb_rscs(struct udevice *dev, struct ssusb_mtk *ssusb)
 	ret = device_find_first_child(dev, &child);
 	if (ret || !child) {
 		dev_err(dev, "failed to get child %d!\n", ret);
-		return ret;
+		return ret ? ret : -ENODEV;
 	}
 
-	ssusb->mac_base = devfdt_remap_addr_name(child, "mac");
+	/*
+	 * Two DT bindings are supported. The legacy MediaTek binding puts the
+	 * "mac" reg and dr_mode on a "mediatek,ssusb" child node. The flat
+	 * upstream binding (e.g. "mediatek,mt8183-mtu3") puts them on the mtu3
+	 * node itself, with no ssusb child -- there mtu3_glue_bind() binds the
+	 * mode driver to the mtu3 node, so this first child shares our ofnode
+	 * and is not a "mediatek,ssusb" node. Read mac/dr_mode from whichever
+	 * node actually carries them.
+	 */
+	if (ofnode_device_is_compatible(dev_ofnode(child), "mediatek,ssusb")) {
+		macdev = child;
+		flat_binding = false;
+	} else {
+		macdev = dev;
+		flat_binding = true;
+	}
+
+	ssusb->mac_base = devfdt_remap_addr_name(macdev, "mac");
 	if (!ssusb->mac_base) {
 		dev_err(dev, "error mapping memory for mac\n");
 		return -ENODEV;
 	}
 
-	ssusb->dr_mode = usb_get_dr_mode(dev_ofnode(child));
+	/*
+	 * u-boot's mtu3 MAC register offsets are all SSUSB_DEV_BASE-relative to
+	 * a mac_base that must point at U3D_BASE (= ippc - 0x3e00). The legacy
+	 * "mediatek,ssusb" child's "mac" reg already is U3D_BASE, but the flat
+	 * upstream binding's "mac" reg is the DEV window (U3D_BASE +
+	 * SSUSB_DEV_BASE), so back it off by SSUSB_DEV_BASE. Without this every
+	 * MAC CSR read lands 0x1000 high -- CAP_EPINFO reads 0 (num_eps=1, no
+	 * bulk endpoints), the SOFT_CONN pull-up write is dropped, and the
+	 * fastboot/DFU function fails to bind (-ENOMEM) so the host never
+	 * enumerates the gadget.
+	 */
+	if (flat_binding)
+		ssusb->mac_base = (void __iomem *)((uintptr_t)ssusb->mac_base -
+						   SSUSB_DEV_BASE);
+
+	ssusb->dr_mode = usb_get_dr_mode(dev_ofnode(macdev));
 
 	if (ssusb->dr_mode == USB_DR_MODE_UNKNOWN ||
 		ssusb->dr_mode == USB_DR_MODE_OTG)
@@ -308,6 +342,53 @@ U_BOOT_DRIVER(mtu3_host) = {
 };
 #endif
 
+/*
+ * The upstream nested binding puts an "mediatek,mtk-xhci" host child under the
+ * mtu3 glue (mt8183: usb_host; mt8188: xhci0..2). Because this glue supplies
+ * its own .bind, the DM never scans that child unless we bind it here.
+ *
+ * HOST-only (dr_mode=host, nested xhci enabled): bind xhci-mtk as the sole
+ * UCLASS_USB device. Binding mtu3-host as well dual-probes xhci_reset() --
+ * once on the DEV-window mac, once on the nested xHCI -- and both fail
+ * -EBUSY ("Host not halted"). Linux is xhci-mtk only on that child.
+ *
+ * OTG/peripheral: still bind mtu3-peripheral, and only add the extra xhci
+ * host when USB_MTU3_XHCI_CHILD is set (Pumpkin-style dual role). HOST-only
+ * nested xhci does not require that Kconfig -- it *is* the host.
+ */
+static int mtu3_glue_bind_nested_xhci(struct udevice *parent)
+{
+	struct udevice *dev;
+	ofnode node;
+	int ret;
+
+	ofnode_for_each_subnode(node, dev_ofnode(parent)) {
+		if (!ofnode_device_is_compatible(node, "mediatek,mtk-xhci"))
+			continue;
+		if (!ofnode_is_enabled(node))
+			continue;
+
+		ret = device_bind_driver_to_node(parent, "xhci-mtk",
+						 ofnode_get_name(node), node,
+						 &dev);
+		if (ret) {
+			dev_err(parent, "%s: cannot bind xhci-mtk: %d\n",
+				__func__, ret);
+			return ret;
+		}
+		return 0;
+	}
+	return -ENODEV;
+}
+
+static void mtu3_glue_bind_xhci(struct udevice *parent)
+{
+	if (!IS_ENABLED(CONFIG_USB_MTU3_XHCI_CHILD))
+		return;
+
+	mtu3_glue_bind_nested_xhci(parent);
+}
+
 static int mtu3_glue_bind(struct udevice *parent)
 {
 	struct udevice *dev;
@@ -318,8 +399,16 @@ static int mtu3_glue_bind(struct udevice *parent)
 	int ret;
 
 	node = ofnode_by_compatible(dev_ofnode(parent), "mediatek,ssusb");
-	if (!ofnode_valid(node))
-		return -ENODEV;
+	if (!ofnode_valid(node)) {
+		/*
+		 * Flat upstream binding (e.g. "mediatek,mt8183-mtu3"): there is
+		 * no separate "mediatek,ssusb" child node -- the mtu3 node
+		 * itself carries the mac reg and dr_mode. Bind the mode driver
+		 * to that node so both host and peripheral modes work with the
+		 * OF_UPSTREAM device tree, keeping the legacy binding above.
+		 */
+		node = dev_ofnode(parent);
+	}
 
 	name = ofnode_get_name(node);
 	dr_mode = usb_get_dr_mode(node);
@@ -337,6 +426,9 @@ static int mtu3_glue_bind(struct udevice *parent)
 	(!defined(CONFIG_XPL_BUILD) && defined(CONFIG_USB_HOST))
 	case USB_DR_MODE_HOST:
 		dev_dbg(parent, "%s: dr_mode: host\n", __func__);
+		ret = mtu3_glue_bind_nested_xhci(parent);
+		if (ret != -ENODEV)
+			return ret;
 		driver = "mtu3-host";
 		break;
 #endif
@@ -350,11 +442,16 @@ static int mtu3_glue_bind(struct udevice *parent)
 		__func__, name, driver, dr_mode);
 
 	ret = device_bind_driver_to_node(parent, driver, name, node, &dev);
-	if (ret)
+	if (ret) {
 		dev_err(parent, "%s: not able to bind usb device mode\n",
 			__func__);
+		return ret;
+	}
 
-	return ret;
+	if (dr_mode != USB_DR_MODE_HOST)
+		mtu3_glue_bind_xhci(parent);
+
+	return 0;
 }
 
 static const struct udevice_id mtu3_of_match[] = {

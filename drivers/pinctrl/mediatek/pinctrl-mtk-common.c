@@ -393,6 +393,30 @@ static const struct pinconf_param mtk_conf_params[] = {
 	{ "drive-strength", PIN_CONFIG_DRIVE_STRENGTH, 0 },
 };
 
+/*
+ * Combo bias setter: try each bias scheme in turn (PU/PD, then
+ * pullen/pullsel, then PUPD/R1/R0). Used by newer SoCs (e.g. MT8188)
+ * whose pins mix bias hardware types. Forward-ported from the 2022.10
+ * BSP pinctrl-mtk-common.c; all three sub-setters already exist here.
+ */
+int mtk_pinconf_bias_set_combo(struct udevice *dev, u32 pin, bool disable,
+			       bool pullup, u32 val)
+{
+	int err;
+
+	err = mtk_pinconf_bias_set_pu_pd(dev, pin, disable, pullup, val);
+	if (!err)
+		return err;
+
+	err = mtk_pinconf_bias_set_pullen_pullsel(dev, pin, disable, pullup, val);
+	if (!err)
+		return err;
+
+	err = mtk_pinconf_bias_set_pupd_r1_r0(dev, pin, disable, pullup, val);
+
+	return err;
+}
+
 int mtk_pinconf_bias_set_v0(struct udevice *dev, u32 pin, bool disable,
 			    bool pullup, u32 val)
 {

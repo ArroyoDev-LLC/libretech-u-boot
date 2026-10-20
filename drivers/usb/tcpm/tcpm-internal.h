@@ -7,6 +7,11 @@
 #ifndef __LINUX_USB_TCPM_INTERNAL_H
 #define __LINUX_USB_TCPM_INTERNAL_H
 
+#include <cyclic.h>
+#include <usb/pd_vdo.h>
+#include <usb/tcpm.h>
+#include <usb/typec_dp.h>
+
 #define FOREACH_TCPM_STATE(S)			\
 	S(INVALID_STATE),			\
 	S(TOGGLING),			\
@@ -61,6 +66,18 @@ enum tcpm_state {
 	FOREACH_TCPM_STATE(GENERATE_TCPM_ENUM)
 };
 
+/*
+ * What DATA roles this port can take, from the connector's data-role
+ * property. Distinct from the power role: a port can be a power sink and a
+ * data host at once, which is exactly what a laptop driving a self-powered
+ * DisplayPort monitor is, and what DisplayPort alt mode needs from us.
+ */
+enum typec_port_data {
+	TYPEC_PORT_DATA_UFP,
+	TYPEC_PORT_DATA_DFP,
+	TYPEC_PORT_DATA_DRD,
+};
+
 enum pd_msg_request {
 	PD_MSG_NONE = 0,
 	PD_MSG_CTRL_REJECT,
@@ -72,6 +89,7 @@ enum pd_msg_request {
 
 struct tcpm_port {
 	enum typec_port_type typec_type;
+	enum typec_port_data typec_data;
 	int typec_prefer_role;
 
 	enum typec_role vconn_role;
@@ -87,7 +105,8 @@ struct tcpm_port {
 
 	bool attached;
 	bool connected;
-	int poll_event_cnt;
+	/* timer_get_us() at which the probe-time pump stops waiting for an event */
+	u64 poll_event_deadline;
 	enum typec_port_type port_type;
 
 	/*
@@ -164,10 +183,99 @@ struct tcpm_port {
 	bool self_powered;
 
 	unsigned long delay_target;
+
+	/*
+	 * Structured VDM exchange state.
+	 *
+	 * U-Boot does not need Linux's asynchronous VDM state machine.
+	 * tcpm_pd_transmit() already blocks until the TCPC reports the
+	 * message gone, running the receive path inline while it waits, so a
+	 * VDM exchange is just "send, then keep pumping the same poll loop
+	 * until the response lands". One transaction is in flight at a time
+	 * by construction.
+	 *
+	 * vdm_rx_cnt is the object count of the last received VDM including
+	 * its header, and is zeroed by the sender before each request so a
+	 * stale response cannot be mistaken for a fresh one.
+	 */
+	u32 vdm_rx[VDO_MAX_SIZE];
+	unsigned int vdm_rx_cnt;
+
+	/*
+	 * What the in-flight exchange is waiting for, so the receive path can
+	 * REFUSE to park anything else.
+	 *
+	 * The slot above holds one VDM, and since the FUSB302 driver started
+	 * draining its whole RX FIFO per interrupt, more than one can be
+	 * delivered between two looks at it. A monitor in DisplayPort alt
+	 * mode sends unsolicited Attention VDMs, so the losing order is real:
+	 * our ACK is parked, the Attention immediately overwrites it, and the
+	 * response is gone before the wait loop ever runs. Filtering in the
+	 * wait loop cannot fix that -- by then the message is already lost.
+	 */
+	bool vdm_waiting;
+	u16 vdm_wait_svid;
+	u8 vdm_wait_cmd;
+
+	/*
+	 * The negotiated DisplayPort alt mode, if any.
+	 *
+	 * It lives on the PORT because the port is what owns the connector,
+	 * and because the answer has to outlive the command that produced it:
+	 * the Type-C PHY needs the negotiated pin assignment to mux its lanes,
+	 * and it asks later, from its own probe. A stack local in cmd/tcpm.c
+	 * could not be asked at all -- which is why `tcpm dp exit` used to
+	 * FABRICATE an alt-mode state to force an exit against a port whose
+	 * real state it could not see.
+	 *
+	 * There is exactly one of these per port, so "is DP active here" has
+	 * one answer. Invalidating it is the part that has to be got right:
+	 * tcpm_reset_port() covers detach, error recovery, port reset and
+	 * init, but HARD_RESET_START leaves ->attached true and never calls
+	 * it, and DR_SWAP_CHANGE_DR changes who the DFP is. SOFT_RESET and
+	 * the generic cc-change path must NOT clear it -- the first resets
+	 * the protocol layer without leaving alt modes, and the second also
+	 * fires on a plain Rp current-limit update, so clearing there would
+	 * drop a live display every time the source re-advertised.
+	 */
+	struct typec_dp_state dp;
+
+	/*
+	 * The TCPC has been put in low power and cannot transmit until it is
+	 * woken. Tracked here because the port manager is what decided to
+	 * sleep it, so the port manager owes the wake.
+	 */
+	bool low_power;
+
+	/* Partner alt modes, discovered. Generic -- no SVID is special here. */
+	u16 partner_svids[SVID_DISCOVERY_MAX];
+	unsigned int nr_partner_svids;
+
+	/*
+	 * The probe-time pump, when it runs off the critical path. See
+	 * tcpm_post_probe(): the state machine is stepped from a cyclic tick
+	 * while the rest of the boot goes on, and ->probe_pump_pending is
+	 * true until the pump has reached the state the old synchronous loop
+	 * stopped at. Every consumer settles it first (tcpm_settle()), so
+	 * what a consumer observes is exactly what it observed before.
+	 */
+	struct cyclic_info cyclic;
+	struct udevice *dev;
+	bool probe_pump_pending;
 };
 
 extern const char * const tcpm_states[];
 
 int tcpm_post_probe(struct udevice *dev);
+int tcpm_pre_remove(struct udevice *dev);
+
+/**
+ * tcpm_settle() - finish the probe-time pump before reading the port
+ *
+ * A no-op once the pump has run to its end (or never started: a port with
+ * no VBUS, or a build without CYCLIC). Otherwise runs the remaining pump
+ * synchronously, exactly as the probe used to.
+ */
+void tcpm_settle(struct udevice *dev);
 
 #endif

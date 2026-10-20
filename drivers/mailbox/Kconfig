@@ -85,4 +85,22 @@ config ZYNQMP_IPI
 	help
 	  This enables support for the Xilinx ZynqMP Inter Processor Interrupt
 	  communication controller.
+
+config MESON_MHU
+	bool "Amlogic Meson MHU mailbox"
+	depends on DM_MAILBOX && ARCH_MESON
+	help
+	  Amlogic Meson GXBB/GXL/G12 HIU MHU doorbell (SET/STAT/CLR).
+	  Compatible "amlogic,meson-gxbb-mhu", #mbox-cells = <1>.
+	  Used by the open-chain SCMI client (SCMI_AGENT_MAILBOX). Not
+	  enabled in shipping board defconfigs until open SC answers.
+config ROCKCHIP_MAILBOX
+	bool "Rockchip mailbox doorbell"
+	depends on DM_MAILBOX
+	help
+	  Rockchip A2B/B2A mailbox doorbell (RK3368/RK3399). Carries no
+	  data; the SCMI message is in the arm,scmi-shmem page. Used by the
+	  open-SC SCMI client (SCMI_AGENT_MAILBOX) to reach the pmum0
+	  server. Compatible "rockchip,rk3368-mailbox", #mbox-cells = <1>.
+
 endmenu

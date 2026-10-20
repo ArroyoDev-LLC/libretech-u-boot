@@ -714,6 +714,14 @@ void spl_board_prepare_for_linux(void);
  */
 void spl_board_prepare_for_optee(void *fdt);
 void spl_board_prepare_for_boot(void);
+
+/**
+ * spl_boot_failed() - every boot device failed, just before hang()
+ *
+ * Weak no-op.  A board with no console to report on can reset here instead
+ * of hanging; an implementation that returns falls through to hang().
+ */
+void spl_boot_failed(void);
 int spl_board_ubi_load_image(u32 boot_device);
 int spl_board_boot_device(enum boot_device boot_dev_spl);
 
@@ -1180,7 +1188,8 @@ int spl_load_fit_image(struct spl_image_info *spl_image,
  */
 static inline bool spl_decompression_enabled(void)
 {
-	return IS_ENABLED(CONFIG_SPL_GZIP) || IS_ENABLED(CONFIG_SPL_LZMA);
+	return IS_ENABLED(CONFIG_SPL_GZIP) || IS_ENABLED(CONFIG_SPL_LZMA) ||
+	       IS_ENABLED(CONFIG_SPL_LZ4);
 }
 
 /**

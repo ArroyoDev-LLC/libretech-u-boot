@@ -31,4 +31,8 @@
 uint32_t sunxi_get_boot_device(void);
 uint32_t sunxi_get_spl_size(void);
 
+/* sunxi_get_boot_device() in the platform vocabulary (include/bootsource.h) */
+enum bootsource;
+enum bootsource sunxi_bootsource(void);
+
 #endif

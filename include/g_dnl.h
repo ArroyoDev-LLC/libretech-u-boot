@@ -37,6 +37,16 @@ int g_dnl_get_board_bcd_device_number(int gcnum);
 int g_dnl_board_usb_cable_connected(void);
 int g_dnl_register(const char *s);
 void g_dnl_unregister(void);
+struct udevice;
+void g_dnl_release(struct udevice *udc);
+
+/*
+ * The usbacm console (f_acm) hands the UDC to a download gadget and takes it
+ * back; g_dnl_register()/g_dnl_unregister() call these. No-ops when the
+ * console is not started.
+ */
+void acm_console_suspend(void);
+void acm_console_resume(void);
 void g_dnl_set_serialnumber(char *);
 void g_dnl_set_product(const char *s);
 
@@ -44,5 +54,17 @@ bool g_dnl_detach(void);
 void g_dnl_trigger_detach(void);
 void g_dnl_clear_detach(void);
 int run_usb_dnl_gadget(int usbctrl_index, char *usb_dnl_gadget);
+
+/* f_acm.c, USB_GADGET_DNL_ACM: an ACM console beside DFU in one configuration */
+int acm_dnl_attach(struct usb_configuration *c);
+/* Console bytes for that ACM console (proper's `dnlacm` stdio, the xPL tee) */
+void acm_dnl_console_putc(const char c);
+void acm_dnl_console_puts(const char *str);
+/* xPL: keep console bytes for it from now on (needs a heap) */
+int acm_dnl_console_start(void);
+/* xPL: true once acm_dnl_console_start() made the ring (safe before BSS is cleared) */
+bool acm_dnl_console_on(void);
+/* xPL: bytes already formatted for a terminal (CR/LF as is), e.g. a boot log */
+void acm_dnl_console_write(const char *s, unsigned int len);
 
 #endif /* __G_DOWNLOAD_H_ */

@@ -9,6 +9,15 @@
 # the stack-pointer is valid before switching to the U-Boot stack).
 obj-spl-$(CONFIG_ROCKCHIP_BROM_HELPER) += bootrom.o
 obj-spl-$(CONFIG_SPL_ROCKCHIP_COMMON_BOARD) += spl.o spl-boot-order.o spl_common.o
+obj-spl-$(CONFIG_SPL_ROCKCHIP_COMMON_BOARD) += spl-binman.o
+# Binman knows a symbol is optional by its weak binding, which LTO drops, and
+# then fails every image without that entry: keep the definitions out of LTO.
+CFLAGS_REMOVE_spl-binman.o := $(LTO_CFLAGS)
+# Boot-source names: SPL prints and hands over the BootROM's boot source,
+# U-Boot proper reads it back from /chosen. Not in TPL (no consumer there).
+obj-spl-$(CONFIG_SPL_ROCKCHIP_COMMON_BOARD) += bootsource.o
+# The Rockchip family of the SPL USB flash session (common/spl/spl_usbflash.c)
+obj-spl-$(CONFIG_SPL_USBFLASH) += spl-usbflash.o
 obj-tpl-$(CONFIG_ROCKCHIP_BROM_HELPER) += bootrom.o
 obj-tpl-$(CONFIG_TPL_ROCKCHIP_COMMON_BOARD) += tpl.o spl_common.o
 obj-tpl-$(CONFIG_ROCKCHIP_PX30) += px30-board-tpl.o spl_common.o
@@ -22,7 +31,7 @@ ifeq ($(CONFIG_XPL_BUILD)$(CONFIG_TPL_BUILD),)
 # we can have the preprocessor correctly recognise both 0x0 and 0
 # meaning "turn it off".
 obj-y += boot_mode.o
-obj-$(CONFIG_ROCKCHIP_COMMON_BOARD) += board.o
+obj-$(CONFIG_ROCKCHIP_COMMON_BOARD) += board.o bootsource.o
 endif
 
 ifeq ($(CONFIG_TPL_BUILD),)
@@ -30,6 +39,9 @@ obj-$(CONFIG_DISPLAY_CPUINFO) += cpu-info.o
 endif
 
 obj-$(CONFIG_$(PHASE_)RAM) += sdram.o
+
+# The chip id, every phase (include/chip_serial.h)
+obj-y += chip-serial.o
 
 obj-$(CONFIG_ROCKCHIP_PX30) += px30/
 obj-$(CONFIG_ROCKCHIP_RK3036) += rk3036/

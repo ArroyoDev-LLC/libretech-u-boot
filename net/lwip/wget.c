@@ -21,6 +21,13 @@
 #define HTTP_PORT_DEFAULT 80
 #define HTTPS_PORT_DEFAULT 443
 
+/*
+ * ctrlc() polls the console, which is slow enough that calling it on every
+ * receive iteration throttles the download. Poll for an abort at most this
+ * often instead.
+ */
+#define WGET_CTRLC_POLL_MS 512
+
 enum done_state {
 	NOT_DONE = 0,
 	SUCCESS = 1,
@@ -300,6 +307,7 @@ static int wget_handle_request(struct wget_ctx *ctx, bool is_https,
 #endif
 	httpc_connection_t conn;
 	httpc_state_t *state;
+	ulong cc_last, cc_now;
 	int ret;
 
 	/* if URL with hostname init dns */
@@ -369,11 +377,16 @@ static int wget_handle_request(struct wget_ctx *ctx, bool is_https,
 	}
 
 	errno = 0;
+	cc_last = get_timer(0);
 
 	while (!ctx->done) {
 		net_lwip_rx(udev, netif);
-		if (ctrlc())
-			break;
+		cc_now = get_timer(0);
+		if (cc_now - cc_last >= WGET_CTRLC_POLL_MS) {
+			cc_last = cc_now;
+			if (ctrlc())
+				break;
+		}
 	}
 
 	if (ctx->done == SUCCESS)

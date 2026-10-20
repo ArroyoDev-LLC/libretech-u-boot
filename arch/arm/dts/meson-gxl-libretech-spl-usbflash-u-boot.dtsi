@@ -1,0 +1,97 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * GXL libretech boards: the nodes the DRAM-stage SPL's USB flash session binds
+ * (arch/arm/mach-meson/spl-usbflash.c), the GXL counterpart of the SM1 list in
+ * meson-sm1-s905d3-libretech-cc-libre-u-boot.dtsi.  Included only when
+ * CONFIG_SPL_DFU is set, so no other build's SPL device tree changes.
+ *
+ *   USB device:  the GXL glue usb@d0078080 (dwc3-meson-gxl, mode switching),
+ *                dwc2 (dwc2_udc_otg) and both USB2 PHYs, their clocks (clkc
+ *                under hiubus/sysctrl) and the OTG reset (cbus)
+ *   storage:     sd_emmc_c (eMMC, alias mmc0) and sd_emmc_b (SD, alias mmc1)
+ *                with their pin groups (pinctrl_periphs under periphs)
+ */
+
+&xtal {
+	bootph-pre-ram;
+};
+
+&apb {
+	bootph-pre-ram;
+};
+
+&usb {
+	bootph-pre-ram;
+};
+
+&dwc2 {
+	bootph-pre-ram;
+};
+
+&usb2_phy0 {
+	bootph-pre-ram;
+};
+
+&usb2_phy1 {
+	bootph-pre-ram;
+};
+
+&hiubus {
+	bootph-pre-ram;
+};
+
+&sysctrl {
+	bootph-pre-ram;
+};
+
+&clkc {
+	bootph-pre-ram;
+};
+
+&cbus {
+	bootph-pre-ram;
+};
+
+&reset {
+	bootph-pre-ram;
+};
+
+&periphs {
+	bootph-pre-ram;
+};
+
+&pinctrl_periphs {
+	bootph-pre-ram;
+};
+
+&gpio {
+	bootph-pre-ram;
+};
+
+&sd_emmc_c {
+	bootph-pre-ram;
+};
+
+&emmc_pins {
+	bootph-pre-ram;
+	mux-0 {
+		bootph-pre-ram;
+	};
+	mux-1 {
+		bootph-pre-ram;
+	};
+};
+
+&sd_emmc_b {
+	bootph-pre-ram;
+};
+
+&sdcard_pins {
+	bootph-pre-ram;
+	mux-0 {
+		bootph-pre-ram;
+	};
+	mux-1 {
+		bootph-pre-ram;
+	};
+};

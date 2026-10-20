@@ -215,6 +215,26 @@ static int meson_spifc_xfer(struct udevice *slave, unsigned int bitlen,
 }
 
 /**
+ * meson_spifc_parent_rate() - the controller's input rate without the CLK uclass
+ *
+ * Return: rate in Hz, or 0 if this platform cannot say.
+ *
+ * The controller needs a RATE, not a clock tree.  In an xPL phase built without
+ * the CLK uclass, <clk.h>'s stub makes clk_get_rate() return -ENOSYS cast to
+ * ulong, and the divider below is a computed function of that value -- so the
+ * driver would bind and then immediately write a garbage divider.  The SoC
+ * layer overrides this to read the rate out of the registers the ROM left,
+ * which is the same argument meson_gx_mmc.c makes for SD_EMMC_CLOCK.
+ *
+ * Weak, and returning 0, so a platform that has not implemented it makes the
+ * driver refuse rather than mis-program the clock.
+ */
+__weak ulong meson_spifc_parent_rate(void)
+{
+	return 0;
+}
+
+/**
  * meson_spifc_set_speed() - program the clock divider
  * @dev:	the SPI controller device
  * @speed:	desired speed in Hz
@@ -226,6 +246,12 @@ static int meson_spifc_set_speed(struct udevice *dev, uint speed)
 	int n;
 
 	parent = clk_get_rate(&spifc->clk);
+	if (IS_ERR_VALUE(parent)) {
+		parent = meson_spifc_parent_rate();
+		if (!parent)
+			return -ENOSYS;
+	}
+
 	n = max_t(int, parent / speed - 1, 1);
 
 	debug("parent %lu, speed %u, n %d\n", parent, speed, n);
@@ -294,12 +320,22 @@ static int meson_spifc_probe(struct udevice *dev)
 		return ret;
 
 	ret = clk_get_by_index(dev, 0, &priv->clk);
-	if (ret)
+	if (ret == -ENOSYS) {
+		/*
+		 * No CLK uclass in this phase.  Not fatal: the gate this clock
+		 * describes is already on when a stage gets here (the ROM used
+		 * this controller, or clk81 is simply running), and
+		 * meson_spifc_set_speed() has a rate source that does not need
+		 * the framework.  priv->clk stays zeroed; clk_get_rate() on it
+		 * returns the same -ENOSYS and set_speed takes the fallback.
+		 */
+	} else if (ret) {
 		return ret;
-
-	ret = clk_enable(&priv->clk);
-	if (ret)
-		return ret;
+	} else {
+		ret = clk_enable(&priv->clk);
+		if (ret)
+			return ret;
+	}
 
 	meson_spifc_hw_init(priv);
 

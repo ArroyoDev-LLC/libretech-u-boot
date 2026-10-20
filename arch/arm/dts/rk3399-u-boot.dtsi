@@ -10,6 +10,42 @@
 		mmc1 = &sdmmc;
 		pci0 = &pcie0;
 		spi1 = &spi1;
+		/* the OTG port env usb_otg sets the role of (boot/usb_otg_role.c) */
+		usb-otg = &usbdrd_dwc3_0;
+
+		/*
+		 * VOPB is video0, VOPL is video1 -- and without these the order
+		 * is the reverse, by accident.
+		 *
+		 * UCLASS_VIDEO carries DM_UC_FLAG_SEQ_ALIAS, so with no videoN
+		 * alias the sequence numbers fall out of bind order, which is
+		 * device tree node order, and rk3399-base.dtsi happens to list
+		 * vop@ff8f0000 (VOPL, 2560x1600) before vop@ff900000 (VOPB,
+		 * 4096x2160). That made the small VOP video0.
+		 *
+		 * It matters because of what probes at boot. With the console
+		 * in the environment -- CONFIG_SYS_CONSOLE_IS_IN_ENV, which
+		 * CONSOLE_MUX brings in -- stdio_add_devices() skips its
+		 * probe-every-video-device loop entirely, and the ONLY boot-path
+		 * video probe left is stdio_probe_device() resolving the name
+		 * "vidconsole" to UCLASS_VIDEO sequence 0. Exactly one VOP is
+		 * probed at boot, and it was the one that cannot drive a 4K
+		 * sink.
+		 *
+		 * That also put it at odds with rk_vop_probe_ranked(), which
+		 * reserves the largest sink for the most capable VOP: VOPL,
+		 * asked to probe, correctly declined the DisplayPort encoder
+		 * held for VOPB and came up idle -- while VOPB, the one that
+		 * wanted it, was sequence 1 and never probed. Measured on
+		 * roc-rk3399-pc: the Type-C link came up ("PHY up on tcphy1, 4
+		 * lanes", "HPD asserted") and no VOP ever drove it.
+		 *
+		 * SoC-wide rather than per-board because it is a fact about
+		 * RK3399 silicon -- VOPB is the big one on every RK3399 -- and
+		 * it is the same ranking the driver already encodes.
+		 */
+		video0 = &vopb;
+		video1 = &vopl;
 	};
 
 	chosen {

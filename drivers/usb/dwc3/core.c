@@ -1052,11 +1052,60 @@ int dm_usb_gadget_handle_interrupts(struct udevice *dev)
 #if CONFIG_IS_ENABLED(PHY) && CONFIG_IS_ENABLED(DM_USB)
 int dwc3_setup_phy(struct udevice *dev, struct phy_bulk *phys)
 {
+	return dwc3_setup_phy_mode(dev, phys, USB_DR_MODE_UNKNOWN);
+}
+
+/*
+ * As dwc3_setup_phy(), telling each PHY first which role the controller runs
+ * as (generic_phy_set_mode(), a no-op for a PHY without the op). A Type-C PHY
+ * otherwise has no way to learn it before a port manager has negotiated: on
+ * RK3399 it called a gadget's port the host. USB_DR_MODE_UNKNOWN or OTG says
+ * nothing.
+ */
+int dwc3_setup_phy_mode(struct udevice *dev, struct phy_bulk *phys,
+			enum usb_dr_mode mode)
+{
 	int ret;
 
 	ret = generic_phy_get_bulk(dev, phys);
 	if (ret)
 		return ret;
+
+	return dwc3_start_phys(phys, mode);
+}
+
+/*
+ * As dwc3_setup_phy_mode(), with the one PHY of @dev named @name only (its
+ * phy-names): for a phase that runs the controller on part of its PHYs.
+ */
+int dwc3_setup_phy_by_name(struct udevice *dev, struct phy_bulk *phys,
+			   const char *name, enum usb_dr_mode mode)
+{
+	int ret;
+
+	phys->count = 0;
+	phys->phys = devm_kcalloc(dev, 1, sizeof(struct phy), GFP_KERNEL);
+	if (!phys->phys)
+		return -ENOMEM;
+	ret = generic_phy_get_by_name(dev, name, &phys->phys[0]);
+	if (ret)
+		return ret;
+	phys->count = 1;
+
+	return dwc3_start_phys(phys, mode);
+}
+
+/* Tell @phys the role (see dwc3_setup_phy_mode()), init and power them on. */
+int dwc3_start_phys(struct phy_bulk *phys, enum usb_dr_mode mode)
+{
+	int i, ret;
+
+	if (mode == USB_DR_MODE_PERIPHERAL || mode == USB_DR_MODE_HOST)
+		for (i = 0; i < phys->count; i++)
+			generic_phy_set_mode(&phys->phys[i],
+					     mode == USB_DR_MODE_PERIPHERAL ?
+					     PHY_MODE_USB_DEVICE : PHY_MODE_USB_HOST,
+					     0);
 
 	ret = generic_phy_init_bulk(phys);
 	if (ret)

@@ -223,6 +223,9 @@ struct rank_para {
 };
 
 struct dram_para {
+	u16 clk;		/* DRAM clock in MHz */
+	u32 zq;			/* ZQ calibration value */
+	u8  odt_en;		/* On-Die Termination enable */
 	u8 dual_rank;
 	u8 bus_full_width;
 	struct rank_para ranks[2];
@@ -234,6 +237,14 @@ struct dram_para {
 static inline int ns_to_t(int nanoseconds)
 {
 	const unsigned int ctrl_freq = CONFIG_DRAM_CLK / 2;
+
+	return DIV_ROUND_UP(ctrl_freq * nanoseconds, 1000);
+}
+
+/* Runtime version for sweep -- uses para->clk instead of CONFIG */
+static inline int ns_to_t_clk(int nanoseconds, int dram_clk)
+{
+	const unsigned int ctrl_freq = dram_clk / 2;
 
 	return DIV_ROUND_UP(ctrl_freq * nanoseconds, 1000);
 }

@@ -285,6 +285,16 @@ config DWC_ETH_QOS_STARFIVE
 	  The Synopsys Designware Ethernet QOS IP block with specific
 	  configuration used in STARFIVE  JH7110 soc.
 
+config DWC_ETH_QOS_MEDIATEK
+	bool "Synopsys DWC Ethernet QOS device support for MediaTek SoCs"
+	depends on DWC_ETH_QOS && ARCH_MEDIATEK
+	select DM_ETH_PHY
+	help
+	  The Synopsys Designware Ethernet QOS IP block with the specific
+	  configuration used in MediaTek SoCs (mediatek,mt8195-gmac binding,
+	  e.g. MT8188 / MT8370 on the Genio 510 / 700). Handles the pericfg
+	  interface-mode selection and the RGMII/RMII TX/RX clock delay lines.
+
 config E1000
 	bool "Intel PRO/1000 Gigabit Ethernet support"
 	depends on PCI

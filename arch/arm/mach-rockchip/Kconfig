@@ -623,6 +623,7 @@ config TPL_ROCKCHIP_BACK_TO_BROM
 
 config ROCKCHIP_COMMON_BOARD
 	bool "Rockchip common board file"
+	select BOOTSOURCE
 	help
 	  Rockchip SoCs have similar boot process, Common board file is mainly
 	  in charge of common process of board_init() and board_late_init() for
@@ -631,6 +632,8 @@ config ROCKCHIP_COMMON_BOARD
 config SPL_ROCKCHIP_COMMON_BOARD
 	bool "Rockchip SPL common board file"
 	depends on SPL
+	select BOOTSOURCE
+	select SPL_BOOTSOURCE
 	help
 	  Rockchip SoCs have similar boot process, SPL is mainly in charge of
 	  load and boot Trust ATF/U-Boot firmware, and DRAM init if there is
@@ -749,6 +752,28 @@ config ROCKCHIP_SPI_IMAGE
 	  Some Rockchip SoCs support booting from SPI flash. Enable this
 	  option to produce a SPI-flash image containing U-Boot. The image
 	  is built by binman. U-Boot sits near the start of the image.
+
+config ROCKCHIP_UNIFIED_IMAGE
+	bool "Build one SD/eMMC/SPI-NOR image for rockchip"
+	depends on ROCKCHIP_SPI_IMAGE && SPL_SPI_LOAD && SPL_MMC
+	help
+	  Produce u-boot-rockchip-unified.bin: the SD/eMMC idblock (rksd,
+	  contiguous) followed by the FIT at CONFIG_SYS_SPI_U_BOOT_OFFS --
+	  the same offset the SPI-NOR image uses. One byte stream is then
+	  written to every medium: as-is at the BootROM's MMC boot sector
+	  (64) on SD and eMMC, and with only the idblock spread into the
+	  BootROM's SPI page interleave (2 KiB used per 4 KiB, tools/rkspi.c)
+	  at NOR offset 0 -- the spread is a write-time transform, not a
+	  different image. SPL finds the FIT at that one offset on either
+	  medium: on MMC it probes CONFIG_SYS_MMCSD_RAW_MODE_U_BOOT_SECTOR
+	  first (the compact SD image) and then boot sector 64 +
+	  CONFIG_SYS_SPI_U_BOOT_OFFS / 512, and reports which it took.
+
+	  The compact u-boot-rockchip.bin and the u-boot-rockchip-spi.bin
+	  layouts are still produced unchanged. The unified image is larger
+	  than the compact one by the SPI offset, so it needs a boot-media
+	  gap of CONFIG_SYS_SPI_U_BOOT_OFFS + the FIT ahead of the first
+	  partition.
 
 config ROCKCHIP_MASKROM_IMAGE
 	bool "Build a maskrom mode image for Rockchip"

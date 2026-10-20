@@ -13,6 +13,8 @@
 #include <dm/device_compat.h>
 #include <dm/devres.h>
 #include <linux/compat.h>
+#include <asm/io.h>
+#include <stdio.h>
 
 #include "smt.h"
 
@@ -49,6 +51,11 @@ static int scmi_mbox_process_msg(struct udevice *dev,
 	if (ret)
 		return ret;
 
+	/* EL3 is out of the path: the M0 reads the shmem uncached, so
+	 * push the request out of D-cache before ringing the doorbell.
+	 */
+	scmi_smt_flush(&chan->smt);
+
 	/* Give shm addr to mbox in case it is meaningful */
 	ret = mbox_send(&chan->mbox, chan->smt.buf);
 	if (ret) {
@@ -59,10 +66,54 @@ static int scmi_mbox_process_msg(struct udevice *dev,
 	/* Receive the response */
 	ret = mbox_recv(&chan->mbox, chan->smt.buf, chan->timeout_us);
 	if (ret) {
+		/*
+		 * printf first: gap §8.12 schb7 showed zero SCMI lines despite
+		 * CONFIG+DT+strings — beat LOGLEVEL / UART races with chip_id.
+		 */
+		printf("SCMI: Response failed: %d, abort\n", ret);
 		dev_err(dev, "Response failed: %d, abort\n", ret);
+		/*
+		 * Residual soft-fail path: dump HP MHU STAT + SMT header so a
+		 * mute SC still yields doorbell/shmem evidence without =>.
+		 * SM1 HP: AP TX 0xFF63C440 / RX 0xFF63C41C (TX = RX + 0x24).
+		 */
+		if (IS_ENABLED(CONFIG_SCMI_RESIDUAL_DIAG)) {
+			u32 *smt = (u32 *)chan->smt.buf;
+			u32 *hb = (u32 *)0xFFFE7400; /* MHU_HIGH_SCP_TO_AP */
+
+			/* dev_err: LOGLEVEL=4 suppresses LOGL_WARNING on this board */
+			printf("SCMI soft-fail MHU/SMT dump: TXSET=%08x TXSTAT=%08x RXSET=%08x RXSTAT=%08x\n",
+			       readl(0xFF63C440), readl(0xFF63C444),
+			       readl(0xFF63C41C), readl(0xFF63C420));
+			dev_err(dev,
+				"SCMI soft-fail MHU/SMT dump: TXSET=%08x TXSTAT=%08x RXSET=%08x RXSTAT=%08x\n",
+				readl(0xFF63C440), readl(0xFF63C444),
+				readl(0xFF63C41C), readl(0xFF63C420));
+			if (smt) {
+				printf("SCMI SMT[0..6]=%08x %08x %08x %08x %08x %08x %08x\n",
+				       smt[0], smt[1], smt[2], smt[3],
+				       smt[4], smt[5], smt[6]);
+				dev_err(dev,
+					"SMT[0..6]=%08x %08x %08x %08x %08x %08x %08x\n",
+					smt[0], smt[1], smt[2], smt[3],
+					smt[4], smt[5], smt[6]);
+			}
+			/*
+			 * SC heartbeat (gap §8.10): magic/STAT/IRQEN/tick at
+			 * 0xFFFE7400. Also AP-view IRQEN @ SYS_CPU_CFG10.
+			 */
+			printf("SCMI SC-HB[0..3]=%08x %08x %08x %08x IRQEN=%08x\n",
+			       hb[0], hb[1], hb[2], hb[3], readl(0xFF634670));
+			dev_err(dev,
+				"SC-HB[0..3]=%08x %08x %08x %08x IRQEN=%08x\n",
+				hb[0], hb[1], hb[2], hb[3],
+				readl(0xFF634670));
+		}
 		goto out;
 	}
 
+	/* Invalidate before reading the reply the M0 wrote uncached. */
+	scmi_smt_inval(&chan->smt);
 	ret = scmi_read_resp_from_smt(dev, &chan->smt, msg);
 
 out:

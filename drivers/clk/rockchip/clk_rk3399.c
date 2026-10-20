@@ -22,6 +22,7 @@
 #include <dt-bindings/clock/rk3399-cru.h>
 #include <linux/bitops.h>
 #include <linux/delay.h>
+#include <linux/kernel.h>
 #include <linux/printk.h>
 
 DECLARE_GLOBAL_DATA_PTR;
@@ -55,6 +56,13 @@ struct pll_div {
 
 static const struct pll_div gpll_init_cfg = PLL_DIVISORS(GPLL_HZ, 2, 2, 1);
 static const struct pll_div cpll_init_cfg = PLL_DIVISORS(CPLL_HZ, 1, 2, 2);
+/*
+ * NPLL 1200 MHz as VCO 2400 / 2 (refdiv 1, fbdiv 100): the same VCO Linux
+ * runs CPLL at for its 800 MHz card-clock source (rk3399_pll_rates: 800 MHz
+ * = 1 / 100 / 3 / 1), so the SD eye measured on the two is compared at one
+ * VCO, not two.
+ */
+static const struct pll_div npll_init_cfg = PLL_DIVISORS(NPLL_HZ, 1, 2, 1);
 #if !defined(CONFIG_XPL_BUILD)
 static const struct pll_div ppll_init_cfg = PLL_DIVISORS(PPLL_HZ, 2, 2, 1);
 #endif
@@ -62,9 +70,17 @@ static const struct pll_div ppll_init_cfg = PLL_DIVISORS(PPLL_HZ, 2, 2, 1);
 static const struct pll_div apll_l_1600_cfg = PLL_DIVISORS(1600 * MHz, 3, 1, 1);
 static const struct pll_div apll_l_600_cfg = PLL_DIVISORS(600 * MHz, 1, 2, 1);
 
+/* VCO = the rate (postdiv 1, 1): 1008 / 1200 / 1416 MHz, inside 800..3200 */
+static const struct pll_div apll_l_1008_cfg = PLL_DIVISORS(1008 * MHz, 1, 1, 1);
+static const struct pll_div apll_l_1200_cfg = PLL_DIVISORS(1200 * MHz, 1, 1, 1);
+static const struct pll_div apll_l_1416_cfg = PLL_DIVISORS(1416 * MHz, 1, 1, 1);
+
 static const struct pll_div *apll_l_cfgs[] = {
 	[APLL_L_1600_MHZ] = &apll_l_1600_cfg,
 	[APLL_L_600_MHZ] = &apll_l_600_cfg,
+	[APLL_L_1008_MHZ] = &apll_l_1008_cfg,
+	[APLL_L_1200_MHZ] = &apll_l_1200_cfg,
+	[APLL_L_1416_MHZ] = &apll_l_1416_cfg,
 };
 
 static const struct pll_div apll_b_600_cfg = PLL_DIVISORS(600 * MHz, 1, 2, 1);
@@ -92,6 +108,23 @@ enum {
 	PLL_FRACDIV_SHIFT		= 0,
 
 	/* PLL_CON3 */
+	/* CLKSEL_CON32 */
+	SPDIF_REC_DPTX_PLL_SEL_SHIFT	= 15,
+	SPDIF_REC_DPTX_PLL_SEL_MASK	= 1 << SPDIF_REC_DPTX_PLL_SEL_SHIFT,
+	SPDIF_REC_DPTX_PLL_SEL_CPLL	= 0,
+	SPDIF_REC_DPTX_PLL_SEL_GPLL	= 1,
+	SPDIF_REC_DPTX_DIV_CON_SHIFT	= 8,
+	SPDIF_REC_DPTX_DIV_CON_MASK	= 0x1f << SPDIF_REC_DPTX_DIV_CON_SHIFT,
+
+	/* CLKSEL_CON46 */
+	DP_CORE_PLL_SEL_SHIFT		= 6,
+	DP_CORE_PLL_SEL_MASK		= 0x3 << DP_CORE_PLL_SEL_SHIFT,
+	DP_CORE_PLL_SEL_NPLL		= 0,
+	DP_CORE_PLL_SEL_CPLL		= 1,
+	DP_CORE_PLL_SEL_GPLL		= 2,
+	DP_CORE_DIV_CON_SHIFT		= 0,
+	DP_CORE_DIV_CON_MASK		= 0x1f << DP_CORE_DIV_CON_SHIFT,
+
 	PLL_MODE_SHIFT			= 8,
 	PLL_MODE_MASK			= 3 << PLL_MODE_SHIFT,
 	PLL_MODE_SLOW			= 0,
@@ -179,7 +212,10 @@ enum {
 	/* CLKSEL_CON22 */
 	CLK_EMMC_PLL_SHIFT              = 8,
 	CLK_EMMC_PLL_MASK               = 0x7 << CLK_EMMC_PLL_SHIFT,
+	CLK_EMMC_PLL_SEL_CPLL           = 0x0,
 	CLK_EMMC_PLL_SEL_GPLL           = 0x1,
+	/* CLKSEL_CON15/16 (sdio / sdmmc) [10:8]: cpll gpll npll ppll usb480m 24m */
+	CLK_EMMC_PLL_SEL_NPLL           = 0x2,
 	CLK_EMMC_PLL_SEL_24M            = 0x5,
 	CLK_EMMC_DIV_CON_SHIFT          = 0,
 	CLK_EMMC_DIV_CON_MASK           = 0x7f << CLK_EMMC_DIV_CON_SHIFT,
@@ -321,11 +357,30 @@ enum {
  * FBDIV = Integer value programmed into feedback divide
  *
  */
-static void rkclk_set_pll(u32 *pll_con, const struct pll_div *div)
+/*
+ * Datasheet lock time is typical 250 / max 500 input clock cycles at 24 MHz.
+ * 1000 us is ~24000 cycles -- generous, and only ever reached on a PLL that
+ * is not going to lock at all.
+ */
+#define PLL_LOCK_TIMEOUT_US	1000
+
+/*
+ * Returns 0, or -ETIMEDOUT with the PLL left parked in SLOW mode.
+ *
+ * It returns a value rather than void because "left in slow mode" is not
+ * uniformly survivable, and the caller is the only one who knows which case
+ * it is in. For GPLL/CPLL/NPLL/VPLL a 24 MHz output is merely wrong-and-slow.
+ * For DPLL it is not: DRAM whose timing and PHY delay lines were computed for
+ * 800 MHz, clocked at 24 MHz, has no defined behaviour at all, and reporting
+ * the requested rate as achieved sends the caller straight into
+ * sdram_init()/data_training() with every parameter mismatched.
+ */
+static int rkclk_set_pll(u32 *pll_con, const struct pll_div *div)
 {
 	/* All 8 PLLs have same VCO and output frequency range restrictions. */
 	u32 vco_khz = OSC_HZ / 1000 * div->fbdiv / div->refdiv;
 	u32 output_khz = vco_khz / div->postdiv1 / div->postdiv2;
+	uint i;
 
 	debug("PLL at %p: fbdiv=%d, refdiv=%d, postdiv1=%d, "
 			   "postdiv2=%d, vco=%u khz, output=%u khz\n",
@@ -348,20 +403,56 @@ static void rkclk_set_pll(u32 *pll_con, const struct pll_div *div)
 
 	rk_clrsetreg(&pll_con[0], PLL_FBDIV_MASK,
 		     div->fbdiv << PLL_FBDIV_SHIFT);
+	/*
+	 * The clear mask used to carry `| PLL_REFDIV_SHIFT`, which is 0 --
+	 * a no-op that read as a fourth field. Dropping it is bit-identical.
+	 */
 	rk_clrsetreg(&pll_con[1],
 		     PLL_POSTDIV2_MASK | PLL_POSTDIV1_MASK |
-		     PLL_REFDIV_MASK | PLL_REFDIV_SHIFT,
+		     PLL_REFDIV_MASK,
 		     (div->postdiv2 << PLL_POSTDIV2_SHIFT) |
 		     (div->postdiv1 << PLL_POSTDIV1_SHIFT) |
 		     (div->refdiv << PLL_REFDIV_SHIFT));
 
-	/* waiting for pll lock */
-	while (!(readl(&pll_con[2]) & (1 << PLL_LOCK_STATUS_SHIFT)))
+	/*
+	 * Wait for lock, BOUNDED. Datasheet: typical 250, max 500 input clock
+	 * cycles at 24 MHz, so 1000 us is ~24000 cycles -- the same very safe
+	 * bound Linux uses in rockchip_rk3399_pll_wait_lock(). Unbounded, a
+	 * PLL that never locks hung the boot inside udelay() with nothing on
+	 * the console and no way to tell it from a hang anywhere else.
+	 *
+	 * A counted udelay loop rather than readl_poll_timeout(): the latter
+	 * is built on timer_get_us(), and this runs from rkclk_init() in early
+	 * SPL where that is a dependency worth not taking.
+	 */
+	for (i = 0; i < PLL_LOCK_TIMEOUT_US; i++) {
+		if (readl(&pll_con[2]) & PLL_LOCK_STATUS_MASK)
+			break;
 		udelay(1);
+	}
+
+	if (!(readl(&pll_con[2]) & PLL_LOCK_STATUS_MASK)) {
+		/*
+		 * Leave the mode mux in SLOW. Going to NORM here would put
+		 * every consumer on an unlocked VCO. Staying on the 24 MHz
+		 * oscillator is not "defined" in any useful sense -- every
+		 * divider downstream was computed for the target rate, so the
+		 * board runs at roughly 1/25 speed with peripheral clocks no
+		 * driver's divider math expects -- but it is at least
+		 * observable, which an unlocked VCO is not, and it gets a
+		 * message onto the console instead of hanging in udelay().
+		 * The caller decides whether that is survivable.
+		 */
+		printf("PLL at %p: no lock in %d us, left in slow mode (24 MHz)\n",
+		       pll_con, PLL_LOCK_TIMEOUT_US);
+		return -ETIMEDOUT;
+	}
 
 	/* pll enter normal mode */
 	rk_clrsetreg(&pll_con[3], PLL_MODE_MASK,
 		     PLL_MODE_NORM << PLL_MODE_SHIFT);
+
+	return 0;
 }
 
 static int pll_para_config(u32 freq_hz, struct pll_div *div)
@@ -434,6 +525,28 @@ void rk3399_configure_cpu_l(struct rockchip_cru *cru,
 	u32 aclkm_div;
 	u32 pclk_dbg_div;
 	u32 atclk_div;
+
+	/*
+	 * The OPP rates take Linux's dividers (clk-rk3399.c rk3399_cpuclkl_rates
+	 * for 1008/1200/1416 MHz: aclkm 1, pclk_dbg 5, atclk 5), set BEFORE the
+	 * PLL rises so no bus is ever above its rate; the legacy entries keep
+	 * the dividers computed for LPLL_HZ.
+	 */
+	if (apll_l_freq == APLL_L_1008_MHZ || apll_l_freq == APLL_L_1200_MHZ ||
+	    apll_l_freq == APLL_L_1416_MHZ) {
+		rk_clrsetreg(&cru->clksel_con[0],
+			     ACLKM_CORE_L_DIV_CON_MASK | CLK_CORE_L_DIV_MASK,
+			     1 << ACLKM_CORE_L_DIV_CON_SHIFT |
+			     0 << CLK_CORE_L_DIV_SHIFT);
+		rk_clrsetreg(&cru->clksel_con[1],
+			     PCLK_DBG_L_DIV_MASK | ATCLK_CORE_L_DIV_MASK,
+			     5 << PCLK_DBG_L_DIV_SHIFT |
+			     5 << ATCLK_CORE_L_DIV_SHIFT);
+		rkclk_set_pll(&cru->apll_l_con[0], apll_l_cfgs[apll_l_freq]);
+		rk_clrsetreg(&cru->clksel_con[0], CLK_CORE_L_PLL_SEL_MASK,
+			     CLK_CORE_L_PLL_SEL_ALPLL << CLK_CORE_L_PLL_SEL_SHIFT);
+		return;
+	}
 
 	/* Setup cluster L */
 	rkclk_set_pll(&cru->apll_l_con[0], apll_l_cfgs[apll_l_freq]);
@@ -678,6 +791,31 @@ static ulong rk3399_spi_set_clk(struct rockchip_cru *cru, ulong clk_id, uint hz)
 	return rk3399_spi_get_clk(cru, clk_id);
 }
 
+static ulong rk3399_pll_get_rate(u32 *pll_con);
+
+/**
+ * rkclk_pll_rate_of() - what these dividers would produce, in Hz
+ *
+ * pll_para_config() picks the closest reachable dividers rather than the
+ * requested rate, so "is this PLL already where I want it" can only be asked
+ * against what the dividers actually yield.
+ */
+static ulong rkclk_pll_rate_of(const struct pll_div *div)
+{
+	/*
+	 * Same guard as rk3399_pll_get_rate(), whose result this must match
+	 * exactly. Both current callers pass either a PLL_DIVISORS() constant
+	 * or a struct that has already survived pll_para_config(), so it
+	 * cannot fire today -- but the pair is documented as having to agree,
+	 * and a zeroed struct reaching only this half is a data abort.
+	 */
+	if (!div->refdiv || !div->postdiv1 || !div->postdiv2)
+		return 0;
+
+	return (ulong)((u64)OSC_HZ * div->fbdiv / div->refdiv /
+		       div->postdiv1 / div->postdiv2);
+}
+
 static ulong rk3399_vop_set_clk(struct rockchip_cru *cru, ulong clk_id, u32 hz)
 {
 	struct pll_div vpll_config = {0};
@@ -697,6 +835,13 @@ static ulong rk3399_vop_set_clk(struct rockchip_cru *cru, ulong clk_id, u32 hz)
 	default:
 		return -EINVAL;
 	}
+	/*
+	 * Move aclk_vop to CPLL BEFORE touching VPLL below. aclk_vop's mux
+	 * resets to VPLL (sel 0), and rkclk_set_pll() parks a PLL on the
+	 * 24 MHz oscillator for the whole reprogram-and-relock window. These
+	 * two blocks must not be reordered: the second would otherwise glitch
+	 * the VOP's own bus clock while the VOP is being brought up.
+	 */
 	/* vop aclk source clk: cpll */
 	div = CPLL_HZ / aclk_vop;
 	assert(div - 1 < 32);
@@ -710,7 +855,22 @@ static ulong rk3399_vop_set_clk(struct rockchip_cru *cru, ulong clk_id, u32 hz)
 	if (pll_para_config(hz, &vpll_config))
 		return -1;
 
-	rkclk_set_pll(&cru->vpll_con[0], &vpll_config);
+	/*
+	 * Only reprogram VPLL if it is not already there. rkclk_set_pll()
+	 * forces the mode mux to SLOW, rewrites the dividers, waits for lock,
+	 * and only then returns to NORM -- so every consumer sees the 24 MHz
+	 * oscillator for that whole window and then a step back up. On a
+	 * pixel clock with a display already scanning out, that is a dropped
+	 * link, not a no-op. Free on the first call, which is the common one:
+	 * VPLL comes out of reset in slow mode and every target differs.
+	 *
+	 * Compared against the achieved rate rather than the mode bits, for
+	 * the same reason rk3399_dp_set_clk() does: NORM says the PLL is
+	 * running, not that it is running where these dividers assume.
+	 */
+	if (rk3399_pll_get_rate(&cru->vpll_con[0]) !=
+	    rkclk_pll_rate_of(&vpll_config))
+		rkclk_set_pll(&cru->vpll_con[0], &vpll_config);
 
 	rk_clrsetreg(dclkreg_addr,
 		     DCLK_VOP_DCLK_SEL_MASK | DCLK_VOP_PLL_SEL_MASK |
@@ -720,6 +880,29 @@ static ulong rk3399_vop_set_clk(struct rockchip_cru *cru, ulong clk_id, u32 hz)
 		     (1 - 1) << DCLK_VOP_DIV_CON_SHIFT);
 
 	return hz;
+}
+
+/*
+ * Bring NPLL to NPLL_HZ if it is not there already. rkclk_init() programs
+ * GPLL and CPLL only, and does not run at all in U-Boot proper when SPL
+ * handed off, so NPLL is brought up here, by whichever consumer first needs
+ * it (the DP core clock, the SD / SDIO card clock). Left alone it sits in
+ * slow mode on the 24 MHz oscillator, which would give a consumer 24 / n
+ * while it was told NPLL_HZ / n -- a silent wrong-frequency, not a failure.
+ *
+ * Checked against the RATE, not the mode bits: normal mode only says the
+ * PLL is running, not that it runs at the rate the divider assumes; TPL,
+ * SPL or a prior boot could have left it anywhere. rkclk_set_pll() parks
+ * the PLL on the oscillator for the reprogram-and-relock window, so a
+ * consumer already on NPLL at a different rate would glitch -- which is
+ * why every NPLL consumer comes through this one function and the rate is
+ * one constant.
+ */
+static void rk3399_npll_ensure(struct rockchip_cru *cru)
+{
+	if (rk3399_pll_get_rate(&cru->npll_con[0]) !=
+	    rkclk_pll_rate_of(&npll_init_cfg))
+		rkclk_set_pll(&cru->npll_con[0], &npll_init_cfg);
 }
 
 static ulong rk3399_mmc_get_clk(struct rockchip_cru *cru, uint clk_id)
@@ -747,20 +930,60 @@ static ulong rk3399_mmc_get_clk(struct rockchip_cru *cru, uint clk_id)
 		return -EINVAL;
 	}
 
-	div *= (con & CLK_EMMC_DIV_CON_MASK) >> CLK_EMMC_DIV_CON_SHIFT;
-	if ((con & CLK_EMMC_PLL_MASK) >> CLK_EMMC_PLL_SHIFT
-			== CLK_EMMC_PLL_SEL_24M)
-		return DIV_TO_RATE(OSC_HZ, div);
-	else
-		return DIV_TO_RATE(GPLL_HZ, div);
+	/*
+	 * The CRU field is (divider - 1); the dw-mshc's own halving is the
+	 * "internal div 2" above, so the card clock is src / (field + 1) / div.
+	 * (The previous `div *= field` read 594/3 = 198 MHz for a CRU divider
+	 * of 2, whose real card clock is 594/2/2 = 148.5 MHz.)
+	 */
+	div *= ((con & CLK_EMMC_DIV_CON_MASK) >> CLK_EMMC_DIV_CON_SHIFT) + 1;
+	/*
+	 * The PLL rates are read from the CRU, not assumed: a PLL that another
+	 * stage left elsewhere, or NPLL before rk3399_npll_ensure() has run,
+	 * would otherwise be reported at the rate this driver wants rather
+	 * than the one the card is clocked at.
+	 */
+	switch ((con & CLK_EMMC_PLL_MASK) >> CLK_EMMC_PLL_SHIFT) {
+	case CLK_EMMC_PLL_SEL_24M:
+		return OSC_HZ / div;
+	case CLK_EMMC_PLL_SEL_CPLL:
+		return rk3399_pll_get_rate(&cru->cpll_con[0]) / div;
+	case CLK_EMMC_PLL_SEL_NPLL:
+		return rk3399_pll_get_rate(&cru->npll_con[0]) / div;
+	default:
+		return rk3399_pll_get_rate(&cru->gpll_con[0]) / div;
+	}
 }
 
+/*
+ * clk_sdmmc / clk_sdio: the CRU divides a PLL and the dw-mshc halves that
+ * again (its CLKDIV stays 0), so the card clock is PLL / 2 / n. The parents
+ * on offer are the two PLLs rkclk_init() programs -- GPLL 594 (297 / 148.5
+ * / 99 / 74.25 ...) and CPLL 384 (192 / 96 / 64 ...) -- and NPLL, brought up
+ * on demand at the 1200 MHz that divides to every SD band exactly (200 / 150
+ * / 100 / 50 = 1200 / 2 / 3, 4, 6, 12). Pick the source and divider that
+ * give the largest card clock not above the request, the way Linux's CCF
+ * resolves the same composite over the same parents: a request of 200 lands
+ * on 200 (it used to land on 192, the CPLL step), 150 on 150 (was 148.5),
+ * 100 on 100 (was 99), 50 on 50 (was 49.5). On a tie the parent listed
+ * first wins, so a request no better served by NPLL never brings it up.
+ */
 static void rk3399_dwmmc_set_clk(struct rockchip_cru *cru,
 				 unsigned int con, ulong set_rate)
 {
-	/* Select clk_sdmmc source from GPLL by default */
+	static const struct {
+		ulong hz;
+		u8 sel;
+	} parents[] = {
+		{ GPLL_HZ, CLK_EMMC_PLL_SEL_GPLL },
+		{ CPLL_HZ, CLK_EMMC_PLL_SEL_CPLL },
+		{ NPLL_HZ, CLK_EMMC_PLL_SEL_NPLL },
+	};
 	/* mmc clock defaulg div 2 internal, provide double in cru */
 	int src_clk_div = DIV_ROUND_UP(GPLL_HZ / 2, set_rate);
+	int src = CLK_EMMC_PLL_SEL_GPLL;
+	ulong best = 0;
+	int i;
 
 	if (src_clk_div > 128) {
 		/* use 24MHz source for 400KHz clock */
@@ -770,12 +993,27 @@ static void rk3399_dwmmc_set_clk(struct rockchip_cru *cru,
 			     CLK_EMMC_PLL_MASK | CLK_EMMC_DIV_CON_MASK,
 			     CLK_EMMC_PLL_SEL_24M << CLK_EMMC_PLL_SHIFT |
 			     (src_clk_div - 1) << CLK_EMMC_DIV_CON_SHIFT);
-	} else {
-		rk_clrsetreg(&cru->clksel_con[con],
-			     CLK_EMMC_PLL_MASK | CLK_EMMC_DIV_CON_MASK,
-			     CLK_EMMC_PLL_SEL_GPLL << CLK_EMMC_PLL_SHIFT |
-			     (src_clk_div - 1) << CLK_EMMC_DIV_CON_SHIFT);
+		return;
 	}
+
+	for (i = 0; i < ARRAY_SIZE(parents); i++) {
+		int div = DIV_ROUND_UP(parents[i].hz / 2, set_rate);
+		ulong card = parents[i].hz / 2 / div;
+
+		if (div > 128 || card <= best)
+			continue;
+		best = card;
+		src_clk_div = div;
+		src = parents[i].sel;
+	}
+
+	if (src == CLK_EMMC_PLL_SEL_NPLL)
+		rk3399_npll_ensure(cru);
+
+	rk_clrsetreg(&cru->clksel_con[con],
+		     CLK_EMMC_PLL_MASK | CLK_EMMC_DIV_CON_MASK,
+		     src << CLK_EMMC_PLL_SHIFT |
+		     (src_clk_div - 1) << CLK_EMMC_DIV_CON_SHIFT);
 }
 
 static ulong rk3399_mmc_set_clk(struct rockchip_cru *cru,
@@ -847,6 +1085,7 @@ static ulong rk3399_ddr_set_clk(struct rockchip_cru *cru,
 				ulong set_rate)
 {
 	struct pll_div dpll_cfg;
+	int ret;
 
 	/*  IC ECO bug, need to set this register */
 	writel(0xc000c000, PMUSGRF_DDR_RGN_CON16);
@@ -882,9 +1121,26 @@ static ulong rk3399_ddr_set_clk(struct rockchip_cru *cru,
 		{.refdiv = 1, .fbdiv = 116, .postdiv1 = 3, .postdiv2 = 1};
 		break;
 	default:
+		/*
+		 * Return, do not fall through. dpll_cfg is an uninitialised
+		 * stack local, so continuing here programmed the DDR PLL from
+		 * whatever happened to be on the stack -- and then reported
+		 * the requested rate as if it had been set. The assert() in
+		 * rkclk_set_pll() is the only thing that stood in front of it,
+		 * and asserts are compiled out unless debug is on.
+		 */
 		pr_err("Unsupported SDRAM frequency!,%ld\n", set_rate);
+		return -EINVAL;
 	}
-	rkclk_set_pll(&cru->dpll_con[0], &dpll_cfg);
+	/*
+	 * Propagated, unlike the other seven call sites. A DPLL that does not
+	 * lock leaves the DRAM on the 24 MHz oscillator; returning set_rate
+	 * here would report the requested frequency as achieved and the
+	 * caller would train the PHY for it.
+	 */
+	ret = rkclk_set_pll(&cru->dpll_con[0], &dpll_cfg);
+	if (ret)
+		return ret;
 
 	return set_rate;
 }
@@ -945,13 +1201,168 @@ static ulong rk3399_pciephy_set_clk(struct rockchip_cru *cru, uint hz)
 	return rk3399_pciephy_get_clk(cru);
 }
 
+/**
+ * rk3399_pll_get_rate() - read a PLL's actual output rate from its registers
+ *
+ * Derived rather than assumed, because the DisplayPort core clock's value is
+ * written into the DP controller's SW_CLK_H register and the firmware scales
+ * its AUX bit timing and link-training timers by it. A wrong value is not
+ * rejected there -- only zero is checked -- so it produces AUX deferrals and
+ * flaky training rather than an error. A rate taken from a #define would be a
+ * claim about what we programmed; this is a reading of what the PLL is doing.
+ */
+static ulong rk3399_pll_get_rate(u32 *pll_con)
+{
+	u32 refdiv, fbdiv, postdiv1, postdiv2, con1, con3;
+
+	con3 = readl(&pll_con[3]);
+
+	switch ((con3 & PLL_MODE_MASK) >> PLL_MODE_SHIFT) {
+	case PLL_MODE_SLOW:
+		return OSC_HZ;
+	case PLL_MODE_DEEP:
+		return 32768;
+	}
+
+	/* Fractional mode is not used by anything here. */
+	if (!(con3 & PLL_DSMPD_MASK))
+		return 0;
+
+	fbdiv    = (readl(&pll_con[0]) & PLL_FBDIV_MASK) >> PLL_FBDIV_SHIFT;
+	con1     = readl(&pll_con[1]);
+	refdiv   = (con1 & PLL_REFDIV_MASK) >> PLL_REFDIV_SHIFT;
+	postdiv1 = (con1 & PLL_POSTDIV1_MASK) >> PLL_POSTDIV1_SHIFT;
+	postdiv2 = (con1 & PLL_POSTDIV2_MASK) >> PLL_POSTDIV2_SHIFT;
+
+	if (!refdiv || !postdiv1 || !postdiv2)
+		return 0;
+
+	return (ulong)((u64)OSC_HZ * fbdiv / refdiv / postdiv1 / postdiv2);
+}
+
+static ulong rk3399_dp_get_clk(struct rockchip_cru *cru)
+{
+	u32 con, div, sel;
+	ulong parent;
+
+	con = readl(&cru->clksel_con[46]);
+	sel = (con & DP_CORE_PLL_SEL_MASK) >> DP_CORE_PLL_SEL_SHIFT;
+	div = (con & DP_CORE_DIV_CON_MASK) >> DP_CORE_DIV_CON_SHIFT;
+
+	switch (sel) {
+	case DP_CORE_PLL_SEL_NPLL:
+		parent = rk3399_pll_get_rate(&cru->npll_con[0]);
+		break;
+	case DP_CORE_PLL_SEL_CPLL:
+		parent = CPLL_HZ;
+		break;
+	case DP_CORE_PLL_SEL_GPLL:
+		parent = GPLL_HZ;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return DIV_TO_RATE(parent, div);
+}
+
+static ulong rk3399_dp_set_clk(struct rockchip_cru *cru, ulong hz)
+{
+	u32 div;
+
+	if (!hz)
+		return -EINVAL;
+
+	div = NPLL_HZ / hz;
+	if (!div || div > 32 || div * hz != NPLL_HZ) {
+		log_debug("Cannot derive %lu Hz from NPLL\n", hz);
+		return -EINVAL;
+	}
+
+	/*
+	 * NPLL is the only parent that divides to 100 MHz exactly (1200 / 12);
+	 * brought up on demand, rate-checked -- see rk3399_npll_ensure().
+	 */
+	rk3399_npll_ensure(cru);
+
+	rk_clrsetreg(&cru->clksel_con[46],
+		     DP_CORE_PLL_SEL_MASK | DP_CORE_DIV_CON_MASK,
+		     DP_CORE_PLL_SEL_NPLL << DP_CORE_PLL_SEL_SHIFT |
+		     (div - 1) << DP_CORE_DIV_CON_SHIFT);
+
+	return rk3399_dp_get_clk(cru);
+}
+
+static ulong rk3399_spdif_rec_dptx_get_clk(struct rockchip_cru *cru)
+{
+	u32 con = readl(&cru->clksel_con[32]);
+	u32 div = (con & SPDIF_REC_DPTX_DIV_CON_MASK) >>
+		  SPDIF_REC_DPTX_DIV_CON_SHIFT;
+	ulong parent = (con & SPDIF_REC_DPTX_PLL_SEL_MASK) ? GPLL_HZ : CPLL_HZ;
+
+	return DIV_TO_RATE(parent, div);
+}
+
+static ulong rk3399_spdif_rec_dptx_set_clk(struct rockchip_cru *cru, ulong hz)
+{
+	u32 div = DIV_ROUND_UP(GPLL_HZ, hz);
+
+	/*
+	 * cdn-dp asks for 200 MHz, which is exact from the 800 MHz CPLL Linux
+	 * runs but unreachable from U-Boot's 384 MHz CPLL and 594 MHz GPLL --
+	 * the closest is GPLL/3 = 198 MHz. Program that and RETURN IT, rather
+	 * than reporting the requested rate: this clock feeds only the SPDIF
+	 * audio path (cdn_dp_audio_config()), never EDID, DPCD, HPD or link
+	 * training, so 1% off is harmless -- but a get_rate that lies about it
+	 * would not be.
+	 *
+	 * CPLL is deliberately not moved to 800 MHz for this: it also feeds
+	 * perihp, perilp0 and the VOP aclk arithmetic.
+	 */
+	if (!div || div > 32)
+		return -EINVAL;
+
+	rk_clrsetreg(&cru->clksel_con[32],
+		     SPDIF_REC_DPTX_PLL_SEL_MASK | SPDIF_REC_DPTX_DIV_CON_MASK,
+		     SPDIF_REC_DPTX_PLL_SEL_GPLL <<
+		     SPDIF_REC_DPTX_PLL_SEL_SHIFT |
+		     (div - 1) << SPDIF_REC_DPTX_DIV_CON_SHIFT);
+
+	return rk3399_spdif_rec_dptx_get_clk(cru);
+}
+
 static ulong rk3399_clk_get_rate(struct clk *clk)
 {
 	struct rk3399_clk_priv *priv = dev_get_priv(clk->dev);
 	ulong rate = 0;
 
 	switch (clk->id) {
-	case 0 ... 63:
+	/*
+	 * The PLLs, read rather than asserted. These used to fall into a
+	 * `case 0 ... 63: return 0;` arm that answered ZERO for every PLL --
+	 * so anything asking what GPLL or VPLL was running at got a plausible-
+	 * looking 0 instead of an error, and the one caller that needed a real
+	 * answer (the DisplayPort core clock) had to read the registers
+	 * itself. Reading is nearly free and it is the only answer that
+	 * survives another stage having programmed the PLL differently.
+	 */
+	case PLL_APLLL:
+		return rk3399_pll_get_rate(priv->cru->apll_l_con);
+	case PLL_APLLB:
+		return rk3399_pll_get_rate(priv->cru->apll_b_con);
+	case PLL_DPLL:
+		return rk3399_pll_get_rate(priv->cru->dpll_con);
+	case PLL_CPLL:
+		return rk3399_pll_get_rate(priv->cru->cpll_con);
+	case PLL_GPLL:
+		return rk3399_pll_get_rate(priv->cru->gpll_con);
+	case PLL_NPLL:
+		return rk3399_pll_get_rate(priv->cru->npll_con);
+	case PLL_VPLL:
+		return rk3399_pll_get_rate(priv->cru->vpll_con);
+	/* 0 and ARMCLKL/ARMCLKB (8, 9) upward -- the PLLs are handled above. */
+	case 0:
+	case ARMCLKL ... 63:
 		return 0;
 	case HCLK_SDIO:
 	case SCLK_SDIO:
@@ -959,6 +1370,14 @@ static ulong rk3399_clk_get_rate(struct clk *clk)
 	case SCLK_SDMMC:
 	case SCLK_EMMC:
 		rate = rk3399_mmc_get_clk(priv->cru, clk->id);
+		break;
+	case SCLK_SDMMC_DRV:
+	case SCLK_SDMMC_SAMPLE:
+		rate = rk3399_mmc_get_clk(priv->cru, SCLK_SDMMC);
+		break;
+	case SCLK_SDIO_DRV:
+	case SCLK_SDIO_SAMPLE:
+		rate = rk3399_mmc_get_clk(priv->cru, SCLK_SDIO);
 		break;
 	case SCLK_I2C1:
 	case SCLK_I2C2:
@@ -991,6 +1410,20 @@ static ulong rk3399_clk_get_rate(struct clk *clk)
 	case SCLK_PCIEPHY_REF:
 		rate = rk3399_pciephy_get_clk(priv->cru);
 		break;
+	case SCLK_DP_CORE:
+		rate = rk3399_dp_get_clk(priv->cru);
+		break;
+	case SCLK_SPDIF_REC_DPTX:
+		rate = rk3399_spdif_rec_dptx_get_clk(priv->cru);
+		break;
+	case PCLK_DP_CTRL:
+		/*
+		 * A gate with no divider, whose parent (pclk_hdcp) this
+		 * driver never programs -- so the rate is genuinely unknown
+		 * rather than zero. Nothing asks for it: cdn-dp calls
+		 * clk_get_rate() only on its core clock.
+		 */
+		break;
 	case ACLK_VIO:
 	case ACLK_HDCP:
 	case ACLK_GIC_PRE:
@@ -1015,7 +1448,63 @@ static ulong rk3399_clk_set_rate(struct clk *clk, ulong rate)
 	ulong ret = 0;
 
 	switch (clk->id) {
-	case 0 ... 63:
+	/*
+	 * Accept the request and report where the PLL actually is. We do not
+	 * move it -- see below -- but the answer must be truthful, and it
+	 * must not be an error.
+	 *
+	 * 🔴 RETURNING AN ERROR HERE BREAKS THE BOARD, and not through any
+	 * clock path. rk3399_clk_bind() calls rockchip_reset_bind(), which
+	 * does device_bind_driver_to_node(..., "rockchip_reset", "reset",
+	 * dev_ofnode(pdev), ...) -- so a SECOND udevice, in UCLASS_RESET,
+	 * shares this CRU node, and with it the node's 17
+	 * assigned-clock-rates. When that reset device probes,
+	 * device_probe() runs clk_set_defaults(dev, CLK_DEFAULTS_PRE) on it
+	 * and any failure is fatal. The "skip a provider's own clocks" guard
+	 * does not save us: it tests `clk.dev == dev`, and here clk.dev is
+	 * the CRU while dev is the reset device, so the rates really are
+	 * applied -- by the reset device's probe.
+	 *
+	 * An error here therefore kills the reset provider, and every &cru
+	 * reset consumer dies with it. Measured, returning -ENOSYS:
+	 *     rk3399_vop vop@ff8f0000: failed to get ahb reset (ret=-38)
+	 *     Bus usb@fe900000: probe failed, error -38
+	 * those being merely the two that print -- dwc3_glue_reset_init()
+	 * tolerates only -ENOTSUPP and -ENOENT, and -ENOSYS is neither.
+	 *
+	 * The identical trap is already documented one function down, where
+	 * PLL_PPLL returns PPLL_HZ rather than an error, for a pmucru node
+	 * with the same bind-a-reset-onto-my-own-node structure.
+	 *
+	 * Returning the MEASURED rate rather than a constant is what makes
+	 * this honest. clk_set_rate()'s contract is "the rate you ended up
+	 * at", so this says "I did not move it, here is where it is", and a
+	 * caller can compare that against what it asked for. Which matters:
+	 * the DT asks for CPLL at 800 MHz while this driver runs it at
+	 * 384 MHz with CPLL_HZ hardcoded into every DIV_TO_RATE() consumer,
+	 * and the old `return 0` made that divergence undetectable.
+	 *
+	 * Actually honouring the assignment is a bigger change than wiring up
+	 * rkclk_set_pll(): those DIV_TO_RATE() consumers must read the PLL
+	 * first, or re-rating CPLL silently re-rates i2c, spi and mmc.
+	 */
+	case PLL_APLLL:
+		return rk3399_pll_get_rate(priv->cru->apll_l_con);
+	case PLL_APLLB:
+		return rk3399_pll_get_rate(priv->cru->apll_b_con);
+	case PLL_DPLL:
+		return rk3399_pll_get_rate(priv->cru->dpll_con);
+	case PLL_CPLL:
+		return rk3399_pll_get_rate(priv->cru->cpll_con);
+	case PLL_GPLL:
+		return rk3399_pll_get_rate(priv->cru->gpll_con);
+	case PLL_NPLL:
+		return rk3399_pll_get_rate(priv->cru->npll_con);
+	case PLL_VPLL:
+		return rk3399_pll_get_rate(priv->cru->vpll_con);
+	/* 0 and ARMCLKL/ARMCLKB (8, 9) upward -- the PLLs are handled above. */
+	case 0:
+	case ARMCLKL ... 63:
 		return 0;
 
 	case ACLK_PERIHP:
@@ -1060,18 +1549,55 @@ static ulong rk3399_clk_set_rate(struct clk *clk, ulong rate)
 	case PCLK_VIO_GRF:
 		/* the PCLK gates for video are enabled by default */
 		break;
+	case SCLK_DP_CORE:
+		ret = rk3399_dp_set_clk(priv->cru, rate);
+		break;
+	case SCLK_SPDIF_REC_DPTX:
+		ret = rk3399_spdif_rec_dptx_set_clk(priv->cru, rate);
+		break;
 	case DCLK_VOP0:
 	case DCLK_VOP1:
 		ret = rk3399_vop_set_clk(priv->cru, clk->id, rate);
 		break;
+	case ACLK_VOP0:
+	case HCLK_VOP0:
 	case ACLK_VOP1:
 	case HCLK_VOP1:
 	case HCLK_SD:
 	case SCLK_UPHY0_TCPDCORE:
 	case SCLK_UPHY1_TCPDCORE:
 		/**
-		 * assigned-clocks handling won't require for vopl, so
+		 * assigned-clocks handling is not required for EITHER VOP, so
 		 * return 0 to satisfy clk_set_defaults during device probe.
+		 *
+		 * The VOP0 pair was missing, and its absence stopped VOPB
+		 * probing at all. Both VOP nodes carry assigned-clocks, and
+		 * clk_set_defaults(CLK_DEFAULTS_PRE) runs at the very end of
+		 * device_probe()'s pre-phase -- so ACLK_VOP0/HCLK_VOP0 fell to
+		 * the default arm, returned -ENOENT, and device_probe() failed
+		 * before drv->probe() was ever called. rk_vop_probe() never
+		 * ran, which is why not one of its own error paths printed.
+		 *
+		 * It was silent as well as fatal: the single dev_warn() on that
+		 * path is LOGL_WARNING, and with CONFIG_LOG off and
+		 * CONFIG_LOGLEVEL=4 the `level < LOGLEVEL` test makes 4 < 4
+		 * false. Every error inside rk_vop_probe() uses dev_err
+		 * (LOGL_ERR, 3) and WOULD have printed -- so the total absence
+		 * of output was itself the evidence that the failure was
+		 * upstream of the driver.
+		 *
+		 * Returning 0 is honest rather than a paper-over:
+		 * rk3399_vop_set_clk() already programs aclk_vop's mux and
+		 * divider (clksel_con[47] for VOP0, [48] for VOP1) on every
+		 * DCLK_VOP* set, so the DT's 400 MHz aclk assignment is
+		 * redundant at bring-up, and hclk_vop* is a plain gate handled
+		 * in rk3399_clk_enable(). rk3399_clk_get_rate() has no case for
+		 * any of these four either, so reporting a measured rate is not
+		 * available without new code -- matching VOP1's long-standing
+		 * form is the correct minimal fix.
+		 *
+		 * Upstream gap, not a local regression: only VOPL was ever
+		 * driven on RK3399 upstream.
 		 */
 		return 0;
 	case SCLK_DDRC:
@@ -1261,6 +1787,135 @@ static int rk3399_clk_enable(struct clk *clk)
 		if (readl(&priv->cru->clksel_con[18]) & BIT(10))
 			rk_clrreg(&priv->cru->clkgate_con[12], BIT(6));
 		break;
+	/*
+	 * The DisplayPort controller's four clocks. All are ungated at reset
+	 * (measured: CLKGATE_CON11 and CON29 both read 0), so these writes are
+	 * idempotent -- but "enabled by default" is a claim about reset, not
+	 * about the state U-Boot inherits from TPL, SPL or a prior boot, and
+	 * every other case here does a real write.
+	 */
+	case SCLK_DP_CORE:
+		rk_clrreg(&priv->cru->clkgate_con[11], BIT(8));
+		break;
+	case SCLK_SPDIF_REC_DPTX:
+		rk_clrreg(&priv->cru->clkgate_con[10], BIT(6));
+		break;
+	case PCLK_DP_CTRL:
+		rk_clrreg(&priv->cru->clkgate_con[29], BIT(7));
+		break;
+	case PCLK_VIO_GRF:
+		rk_clrreg(&priv->cru->clkgate_con[29], BIT(12));
+		break;
+	/*
+	 * The power-domain clocks. rk3399-base.dtsi's power-controller names
+	 * 34 distinct clocks across its power-domain@N nodes, and the NoC
+	 * bus-idle handshake a power-domain driver has to drive is itself
+	 * CLOCKED -- assert BUS_IDLE_REQ on a domain whose bus clock is gated
+	 * and the ACK never arrives. So every one of them has to be
+	 * ungatable, or the domain cannot be brought up at all.
+	 *
+	 * Register and bit for each come from Linux's clk-rk3399.c branch
+	 * table. Nothing in this tree calls clk_enable() with any of these
+	 * ids yet, so all of it is unreachable until the power-domain driver
+	 * lands -- which is the point: it is a prerequisite, and it changes
+	 * no register on any current boot path.
+	 */
+	case ACLK_IEP:
+		rk_clrreg(&priv->cru->clkgate_con[16], BIT(0));
+		break;
+	case HCLK_IEP:
+		rk_clrreg(&priv->cru->clkgate_con[16], BIT(2));
+		break;
+	case ACLK_RGA:
+		rk_clrreg(&priv->cru->clkgate_con[16], BIT(8));
+		break;
+	case HCLK_RGA:
+		rk_clrreg(&priv->cru->clkgate_con[16], BIT(10));
+		break;
+	case ACLK_VCODEC:
+		rk_clrreg(&priv->cru->clkgate_con[17], BIT(0));
+		break;
+	case HCLK_VCODEC:
+		rk_clrreg(&priv->cru->clkgate_con[17], BIT(2));
+		break;
+	case ACLK_VDU:
+		rk_clrreg(&priv->cru->clkgate_con[17], BIT(8));
+		break;
+	case HCLK_VDU:
+		rk_clrreg(&priv->cru->clkgate_con[17], BIT(10));
+		break;
+	case SCLK_VDU_CORE:
+		rk_clrreg(&priv->cru->clkgate_con[4], BIT(4));
+		break;
+	case SCLK_VDU_CA:
+		rk_clrreg(&priv->cru->clkgate_con[4], BIT(5));
+		break;
+	case ACLK_GPU:
+		rk_clrreg(&priv->cru->clkgate_con[30], BIT(8));
+		break;
+	case PCLK_EDP_CTRL:
+		rk_clrreg(&priv->cru->clkgate_con[32], BIT(13));
+		break;
+	/*
+	 * aclk_emmc is COMPOSITE_NOGATE upstream -- a mux and a divider with
+	 * no gate bit behind them, so there is nothing to write. PD_EMMC
+	 * names it anyway, and clk_enable_bulk() forgives only -ENOSYS, so
+	 * falling through to default's -ENOENT would fail that domain over a
+	 * clock that is structurally always on.
+	 */
+	case ACLK_EMMC:
+		break;
+	/*
+	 * pclk_wdt's gate is SECURE_GRF_SOC_CON3[8] (Linux models it as an
+	 * SGRF_GATE), not a CRU bit, and the non-secure world cannot write it;
+	 * it is on out of reset. Without a case here designware_wdt_probe()
+	 * fails on -ENOENT, initr_watchdog() drops the device with a debug
+	 * print, and no watchdog is ever started or stopped on RK3399.
+	 */
+	case PCLK_WDT:
+		break;
+	case HCLK_SDMMC:
+		rk_clrreg(&priv->cru->clkgate_con[33], BIT(8));
+		break;
+	case SCLK_SDMMC:
+		rk_clrreg(&priv->cru->clkgate_con[6], BIT(1));
+		break;
+	case HCLK_SDIO:
+		rk_clrreg(&priv->cru->clkgate_con[34], BIT(4));
+		break;
+	case HCLK_HDCP:
+		rk_clrreg(&priv->cru->clkgate_con[11], BIT(3));
+		break;
+	case PCLK_HDCP:
+		rk_clrreg(&priv->cru->clkgate_con[11], BIT(10));
+		break;
+	case ACLK_HDCP:
+		rk_clrreg(&priv->cru->clkgate_con[11], BIT(12));
+		break;
+	case ACLK_ISP0:
+		rk_clrreg(&priv->cru->clkgate_con[12], BIT(8));
+		break;
+	case HCLK_ISP0:
+		rk_clrreg(&priv->cru->clkgate_con[12], BIT(9));
+		break;
+	case ACLK_ISP1:
+		rk_clrreg(&priv->cru->clkgate_con[12], BIT(10));
+		break;
+	case HCLK_ISP1:
+		rk_clrreg(&priv->cru->clkgate_con[12], BIT(11));
+		break;
+	case HCLK_VOP0:
+		rk_clrreg(&priv->cru->clkgate_con[28], BIT(2));
+		break;
+	case ACLK_VOP0:
+		rk_clrreg(&priv->cru->clkgate_con[28], BIT(3));
+		break;
+	case HCLK_VOP1:
+		rk_clrreg(&priv->cru->clkgate_con[28], BIT(6));
+		break;
+	case ACLK_VOP1:
+		rk_clrreg(&priv->cru->clkgate_con[28], BIT(7));
+		break;
 	default:
 		debug("%s: unsupported clk %ld\n", __func__, clk->id);
 		return -ENOENT;
@@ -1356,10 +2011,234 @@ static int rk3399_clk_disable(struct clk *clk)
 		if (readl(&priv->cru->clksel_con[18]) & BIT(10))
 			rk_setreg(&priv->cru->clkgate_con[12], BIT(6));
 		break;
+	/*
+	 * The DisplayPort clocks' disable half. Without these a driver's
+	 * probe-failure unwind hits -ENOENT out of clk_disable_bulk(), which
+	 * forgives only -ENOSYS -- the same failure the enable side was added
+	 * to fix, one direction over. PCLK_VIO_GRF is deliberately absent:
+	 * the TRM annotates it "suggest always on".
+	 */
+	case SCLK_DP_CORE:
+		rk_setreg(&priv->cru->clkgate_con[11], BIT(8));
+		break;
+	case SCLK_SPDIF_REC_DPTX:
+		rk_setreg(&priv->cru->clkgate_con[10], BIT(6));
+		break;
+	case PCLK_DP_CTRL:
+		rk_setreg(&priv->cru->clkgate_con[29], BIT(7));
+		break;
+	/*
+	 * The power-domain clocks' disable half. FOUR of the enable-side ids
+	 * above are deliberately absent here, for the same reason
+	 * PCLK_VIO_GRF is:
+	 *
+	 * ACLK_HDCP, HCLK_HDCP and PCLK_HDCP are the PARENTS of
+	 * aclk_hdcp_noc / hclk_hdcp_noc / pclk_hdcp_noc, which upstream lists
+	 * in rk3399_cru_critical_clocks[]. Those NoC clocks have their own
+	 * gate bits in CLKGATE_CON(29) and would stay "enabled" while their
+	 * source disappeared -- gating the parent takes the VIO fabric down
+	 * with it, and nothing would bring it back. ACLK_EMMC is absent
+	 * because it has no gate bit to write.
+	 *
+	 * The cost of each omission is the one the enable side exists to fix,
+	 * one direction over: a consumer that bulk-disables one of them gets
+	 * -ENOENT, which clk_disable_bulk() does not forgive. That is the
+	 * deliberate trade -- a failed unwind beats a hung fabric.
+	 */
+	case ACLK_IEP:
+		rk_setreg(&priv->cru->clkgate_con[16], BIT(0));
+		break;
+	case HCLK_IEP:
+		rk_setreg(&priv->cru->clkgate_con[16], BIT(2));
+		break;
+	case ACLK_RGA:
+		rk_setreg(&priv->cru->clkgate_con[16], BIT(8));
+		break;
+	case HCLK_RGA:
+		rk_setreg(&priv->cru->clkgate_con[16], BIT(10));
+		break;
+	case ACLK_VCODEC:
+		rk_setreg(&priv->cru->clkgate_con[17], BIT(0));
+		break;
+	case HCLK_VCODEC:
+		rk_setreg(&priv->cru->clkgate_con[17], BIT(2));
+		break;
+	case ACLK_VDU:
+		rk_setreg(&priv->cru->clkgate_con[17], BIT(8));
+		break;
+	case HCLK_VDU:
+		rk_setreg(&priv->cru->clkgate_con[17], BIT(10));
+		break;
+	case SCLK_VDU_CORE:
+		rk_setreg(&priv->cru->clkgate_con[4], BIT(4));
+		break;
+	case SCLK_VDU_CA:
+		rk_setreg(&priv->cru->clkgate_con[4], BIT(5));
+		break;
+	case ACLK_GPU:
+		rk_setreg(&priv->cru->clkgate_con[30], BIT(8));
+		break;
+	case PCLK_EDP_CTRL:
+		rk_setreg(&priv->cru->clkgate_con[32], BIT(13));
+		break;
+	case HCLK_SDMMC:
+		rk_setreg(&priv->cru->clkgate_con[33], BIT(8));
+		break;
+	/*
+	 * SCLK_SDMMC is the SD card clock, and most RK3399 boards boot from
+	 * SD. Nothing in this tree disables it, and this case only fires on an
+	 * explicit request -- but a driver that gates it mid-boot loses its
+	 * boot device, so it is worth saying out loud.
+	 */
+	case SCLK_SDMMC:
+		rk_setreg(&priv->cru->clkgate_con[6], BIT(1));
+		break;
+	case HCLK_SDIO:
+		rk_setreg(&priv->cru->clkgate_con[34], BIT(4));
+		break;
+	case ACLK_ISP0:
+		rk_setreg(&priv->cru->clkgate_con[12], BIT(8));
+		break;
+	case HCLK_ISP0:
+		rk_setreg(&priv->cru->clkgate_con[12], BIT(9));
+		break;
+	case ACLK_ISP1:
+		rk_setreg(&priv->cru->clkgate_con[12], BIT(10));
+		break;
+	case HCLK_ISP1:
+		rk_setreg(&priv->cru->clkgate_con[12], BIT(11));
+		break;
+	case HCLK_VOP0:
+		rk_setreg(&priv->cru->clkgate_con[28], BIT(2));
+		break;
+	case ACLK_VOP0:
+		rk_setreg(&priv->cru->clkgate_con[28], BIT(3));
+		break;
+	case HCLK_VOP1:
+		rk_setreg(&priv->cru->clkgate_con[28], BIT(6));
+		break;
+	case ACLK_VOP1:
+		rk_setreg(&priv->cru->clkgate_con[28], BIT(7));
+		break;
 	default:
 		debug("%s: unsupported clk %ld\n", __func__, clk->id);
 		return -ENOENT;
 	}
+
+	return 0;
+}
+
+/*
+ * MMC drive / sample phase clocks (SDMMC_CON0/1, SDIO_CON0/1), the same
+ * delay line Linux drives through clk-mmc-phase.c: a 90-degree coarse
+ * select plus up to 255 fine delay elements of ~60 ps each, both relative to
+ * the card clock (the CRU source divided by the controller's fixed 2).
+ */
+#define RK3399_MMC_PHASE_SHIFT		1
+#define RK3399_MMC_PHASE_MASK		0x07ff
+#define RK3399_MMC_DELAY_SEL		BIT(10)
+#define RK3399_MMC_DEGREE_MASK		0x3
+#define RK3399_MMC_DELAYNUM_OFFSET	2
+#define RK3399_MMC_DELAYNUM_MASK	(0xff << RK3399_MMC_DELAYNUM_OFFSET)
+#define RK3399_MMC_DELAY_ELEMENT_PSEC	60
+
+static u32 *rk3399_mmc_phase_reg(struct rockchip_cru *cru, ulong clk_id,
+				 ulong *rate_id)
+{
+	switch (clk_id) {
+	case SCLK_SDMMC_DRV:
+		*rate_id = SCLK_SDMMC;
+		return &cru->sdmmc_con[0];
+	case SCLK_SDMMC_SAMPLE:
+		*rate_id = SCLK_SDMMC;
+		return &cru->sdmmc_con[1];
+	case SCLK_SDIO_DRV:
+		*rate_id = SCLK_SDIO;
+		return &cru->sdio0_con[0];
+	case SCLK_SDIO_SAMPLE:
+		*rate_id = SCLK_SDIO;
+		return &cru->sdio0_con[1];
+	default:
+		return NULL;
+	}
+}
+
+static int rk3399_clk_get_phase(struct clk *clk)
+{
+	struct rk3399_clk_priv *priv = dev_get_priv(clk->dev);
+	ulong rate_id, rate;
+	u32 raw, delay_num;
+	u32 *reg;
+	int degrees;
+
+	reg = rk3399_mmc_phase_reg(priv->cru, clk->id, &rate_id);
+	if (!reg)
+		return -ENOSYS;
+
+	rate = rk3399_mmc_get_clk(priv->cru, rate_id);
+	if (!rate)
+		return 0;
+
+	raw = readl(reg) >> RK3399_MMC_PHASE_SHIFT;
+	degrees = (raw & RK3399_MMC_DEGREE_MASK) * 90;
+
+	if (raw & RK3399_MMC_DELAY_SEL) {
+		/* degrees per delay element, scaled by 1000000 */
+		ulong factor = (RK3399_MMC_DELAY_ELEMENT_PSEC / 10) *
+			       36 * (rate / 10000);
+
+		delay_num = (raw & RK3399_MMC_DELAYNUM_MASK) >>
+			    RK3399_MMC_DELAYNUM_OFFSET;
+		degrees += DIV_ROUND_CLOSEST(delay_num * factor, 1000000);
+	}
+
+	return degrees % 360;
+}
+
+static int rk3399_clk_set_phase(struct clk *clk, int degrees)
+{
+	struct rk3399_clk_priv *priv = dev_get_priv(clk->dev);
+	ulong rate_id, rate;
+	u32 nineties, remainder, delay, delay_num, raw;
+	u32 *reg;
+
+	reg = rk3399_mmc_phase_reg(priv->cru, clk->id, &rate_id);
+	if (!reg)
+		return -ENOSYS;
+
+	if (degrees < 0 || degrees >= 360)
+		return -EINVAL;
+
+	rate = rk3399_mmc_get_clk(priv->cru, rate_id);
+	if (!rate)
+		return -EINVAL;
+
+	nineties = degrees / 90;
+	remainder = degrees % 90;
+
+	/*
+	 * Fine delay elements for the remainder, at the current card clock;
+	 * each element is 44..77 ps, so the result can be up to ~25 degrees
+	 * off -- the tuning sweep tolerates that (the same approximation
+	 * Linux makes).
+	 */
+	delay = 10000000; /* PSECS_PER_SEC / 10000 / 10 */
+	delay *= remainder;
+	delay = DIV_ROUND_CLOSEST(delay,
+				  (rate / 1000) * 36 *
+				  (RK3399_MMC_DELAY_ELEMENT_PSEC / 10));
+	delay_num = min_t(u32, delay, 255);
+
+	raw = delay_num ? RK3399_MMC_DELAY_SEL : 0;
+	raw |= delay_num << RK3399_MMC_DELAYNUM_OFFSET;
+	raw |= nineties;
+
+	rk_clrsetreg(reg, RK3399_MMC_PHASE_MASK << RK3399_MMC_PHASE_SHIFT,
+		     raw << RK3399_MMC_PHASE_SHIFT);
+
+	debug("%s: clk %ld set_phase(%d) delay_num=%u reg=0x%08x actual=%d\n",
+	      __func__, clk->id, degrees, delay_num, readl(reg),
+	      rk3399_clk_get_phase(clk));
 
 	return 0;
 }
@@ -1370,6 +2249,8 @@ static struct clk_ops rk3399_clk_ops = {
 #if CONFIG_IS_ENABLED(OF_REAL)
 	.set_parent = rk3399_clk_set_parent,
 #endif
+	.get_phase = rk3399_clk_get_phase,
+	.set_phase = rk3399_clk_set_phase,
 	.enable = rk3399_clk_enable,
 	.disable = rk3399_clk_disable,
 };

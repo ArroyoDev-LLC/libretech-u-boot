@@ -1803,6 +1803,17 @@ config DEFAULT_SPI_MODE
 	depends on CMD_SPI
 	default 0x0
 
+config CMD_TOUCHTEST
+	bool "touchtest - test an XPT2046/ADS7846 SPI touch panel"
+	depends on DM_SPI && DM_GPIO
+	help
+	  Poll an XPT2046 (ADS7846-compatible) resistive touch controller over
+	  SPI, print the raw 12-bit X/Y/Z samples, and map each touch onto a
+	  five-zone cross (top/bottom/left/right/centre) with the key it would
+	  emit. When a video device is present the zone is also painted on the
+	  panel, so a touch hat with the display on one chip select and the
+	  touch controller on another exercises both halves of the bus.
+
 config CMD_TEMPERATURE
 	bool "temperature - display the temperature from thermal sensors"
 	depends on DM_THERMAL
@@ -3211,6 +3222,36 @@ config CMD_MESON
 	default y
 	help
 	  Enable useful commands for the Meson Soc family developed by Amlogic Inc.
+
+config CMD_MESON_DEVID
+	bool "Command: drive the EL3 device credential service (TEST)"
+	depends on CMD_MESON && ARM64 && ARM_SMCCC
+	default n
+	help
+	  BL33 command `devid` (ident / burn / answer) for the TF-A device
+	  credential service built with AML_DEVID=1.  A test instrument for
+	  boards running the emulated eFuse; the product path is a kernel
+	  driver.
+
+config CMD_MESON_G12A_DRAM
+	bool "Command: dump G12A/SM1 trained DRAM centre / eye width"
+	depends on CMD_MESON && MESON_G12A
+	default n
+	help
+	  BL33 (U-Boot proper) command `g12a_dram`.  Dumps the already-
+	  trained PHY centre (MicroContMuxSel, VrefDAC0 csr 0x10040,
+	  TxDqsDlyTg0 csr 0x100D0) and optionally reuses the C6 width
+	  walker (stop at first failing probe, bound 48).
+
+	  Not hooked from board_init() or PREBOOT — prompt only, not
+	  every boot.  Does not reload 1D/2D training firmware (that
+	  is seconds with DRAM offline; not this slice).  Does not
+	  arm DDC.  PHY APB may read zero after BL31 (TPL
+	  MESON_G12A_DRAM_MARGIN measured the window firewalled at
+	  EL2); this command does not invent a mux steal.
+
+	  Bring-up instrumentation.  Default n.  Enable via
+	  configs/cmd-g12a-dram.config.
 
 config CMD_SPAWN
 	bool "spawn and wait commands"

@@ -20,8 +20,12 @@
 #define DFU_BIT_CAN_UPLOAD		(0x1 << 1)
 #define DFU_BIT_CAN_DNLOAD		0x1
 
-/* big enough to hold our biggest descriptor */
+/* one DNLOAD/UPLOAD block (wTransferSize), at least our biggest descriptor */
+#ifdef CONFIG_DFU_TRANSFER_SIZE
+#define DFU_USB_BUFSIZ			CONFIG_DFU_TRANSFER_SIZE
+#else
 #define DFU_USB_BUFSIZ			4096
+#endif
 
 #define USB_REQ_DFU_DETACH		0x00
 #define USB_REQ_DFU_DNLOAD		0x01

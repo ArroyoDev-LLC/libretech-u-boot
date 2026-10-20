@@ -87,7 +87,15 @@ static int mtu3_device_enable(struct mtu3 *mtu)
 
 	mtu3_clrbits(ibase, U3D_SSUSB_IP_PW_CTRL2, SSUSB_IP_DEV_PDN);
 
-	if (mtu->is_u3_ip) {
+	/*
+	 * Only enable + clock-check the U3 (SuperSpeed) port when the board
+	 * actually runs at SuperSpeed. On a high-speed-only board (DT
+	 * maximum-speed = "high-speed") the U3 PHY/clock is never brought up,
+	 * so unconditionally enabling the U3 port made ssusb_check_clocks wait
+	 * for SSUSB_U3_MAC_RST_B_STS forever -> -110 ("clks of sts1 not
+	 * stable"). Mirrors the kernel's `u3_capable && speed >= SUPER` gate.
+	 */
+	if (mtu->is_u3_ip && mtu->max_speed >= USB_SPEED_SUPER) {
 		check_clk = SSUSB_U3_MAC_RST_B_STS;
 		mtu3_clrbits(ibase, SSUSB_U3_CTRL(0),
 			     (SSUSB_U3_PORT_DIS | SSUSB_U3_PORT_PDN |
@@ -569,6 +577,13 @@ static void mtu3_regs_init(struct mtu3 *mtu)
 	mtu3_clrbits(mbase, U3D_LINK_RESET_INFO, WTCHRP_MSK);
 	/* U2/U3 detected by HW */
 	mtu3_writel(mbase, U3D_DEVICE_CONF, 0);
+	/*
+	 * HW trunk >= 0x1003 (this SoC: 0x1006, gen2cp=1): Linux writes
+	 * QFCR=~0 for the new QMU GPD format. Captured on G5 during a 512 B
+	 * UMS TX: QFCR=0. Without this, exact-maxp bulk-IN NAKs.
+	 */
+	if (mtu->gen2cp)
+		mtu3_writel(mbase, U3D_QFCR, ~0x0);
 	/* enable automatical HWRW from L1 */
 	mtu3_setbits(mbase, U3D_POWER_MANAGEMENT, LPM_HRWE);
 

@@ -14,12 +14,14 @@ config MESON64_COMMON
 	select MESON_SM
 	imply SYSRESET
 	imply SYSRESET_PSCI
+	imply OF_LIVE
 	imply CMD_DM
 
 config MESON_GX
 	bool
 	select MESON64_COMMON
 	select SUPPORT_SPL
+	select SUPPORT_TPL
 	select BINMAN if SPL
 
 choice
@@ -57,9 +59,14 @@ config MESON_AXG
 config MESON_G12A
 	bool "G12A"
 	select MESON64_COMMON
+	select SUPPORT_SPL
+	select SUPPORT_TPL
+	select BINMAN if SPL
 	imply OF_UPSTREAM
 	help
-	  Select this if your SoC is an S905X/D2
+	  Select this if your SoC is an S905X/D2 (or SM1 / S905D3, same
+	  boot-firmware class). Enables open first-stage SPL/TPL builds.
+
 
 config MESON_A1
 	bool "A1"
@@ -68,6 +75,1118 @@ config MESON_A1
 	  Select this if your SoC is an A113L
 
 endchoice
+
+config SPL_MESON_USB_BOOT
+	bool "SPL USB boot server (BROM take-over)"
+	depends on MESON_GXL && SPL
+	select SPL_RAM_DEVICE
+	help
+	  After DDR init, take the DWC2 over from the BootROM and serve the
+	  Amlogic vendor protocol from SPL itself, so a host can push a FIT
+	  into DRAM over the OTG cable at USB 2.0 high-speed bulk rates and
+	  boot it -- no serial adapter and no removable media.
+
+	  This is the bring-up and closed-loop development path.  Say N for a
+	  production image that boots from SD/eMMC.
+
+config MESON_G12A_XPL_CHAIN
+	bool "G12A/SM1 TPL -> SPL chain (TPL in AHB SRAM, SPL in DRAM)"
+	depends on MESON_G12A && TPL && SPL
+	help
+	  Split the open first stage like GXL libre (tpl-spl-chain-design).
+	  TPL is the BootROM-loaded AHB stage under the hard 0xf000 amlimage
+	  payload ceiling and owns DDR orchestration (Strategy A train-FW) and
+	  the handoff block; SPL is relinked to run from DRAM and owns FIT /
+	  LZ4/LZMA / SC load / ATF handoff.
+
+	  Say N for the single-stage SRAM stub (L1 pass-1).
+
+config MESON_G12A_SPL_ENTRY
+	hex "DRAM address of the SPL stage"
+	depends on MESON_G12A_XPL_CHAIN
+	default 0x08000000
+	help
+	  Where TPL branches, and where the SPL stage is linked.  Must equal
+	  SPL_TEXT_BASE.  Clears FIT staging 0x05000000 and BL31 0x05100000.
+
+config MESON_G12A_SPL_OFFSET
+	hex "Offset of the SPL stage inside the combined image"
+	depends on MESON_G12A_XPL_CHAIN
+	default 0x10000
+	help
+	  Where binman places the DRAM stage in u-boot-meson-with-spl.bin.
+	  0x10000 is the end of the amlimage-signed SRAM stage (sm1/g12a
+	  0x1000 header + 0xf000 payload) and the LBS_USB_BL2_SIZE split.
+
+config MESON_G12A_SPL_MAX_SIZE
+	hex "Bytes TPL reads for the SPL stage"
+	depends on MESON_G12A_XPL_CHAIN
+	default 0x30000
+	help
+	  How much TPL fetches from MESON_G12A_SPL_OFFSET.  Fixed window, not
+	  a parsed header.  Default fills 0x10000..0x40000 (before FIT).
+
+config MESON_G12A_FIT_OFFSET
+	hex "Offset of the FIT inside the combined image"
+	depends on MESON_G12A && SPL
+	default SPL_PAD_TO
+	help
+	  Where binman places the FIT.  Chain fragment sets 0x40000 so the
+	  DRAM SPL has room in the image; single-stage keeps SPL_PAD_TO.
+
+config MESON_G12A_DRAM_MARGIN
+	bool "TPL G12A/SM1 DRAM margin measurement (trained CSRs, shmoo, stress)"
+	depends on MESON_G12A && TPL
+	default n
+	help
+	  After DRAM bring-up, read the trained per-lane PHY state back out
+	  (VrefDAC, TxDqDly, RxPBDly, RxEnDly, RxClkDly, DFIMRL, ATxDly),
+	  shmoo VrefDAC / TxDqDly / RxClkDly away from the trained centre
+	  until a data test fails, and stress-test with high-toggle
+	  patterns over a large span.
+
+	  This has to live in the TPL: measured on Solitude, the DDR PHY
+	  APB window and the DMC BIST block read back all-zero from U-Boot
+	  proper after BL31, and the TPL runs from SRAM so a deliberately
+	  de-tuned DRAM cannot take the code with it.
+
+	  Bring-up instrumentation, not a product option: it adds minutes
+	  to boot and leaves patterns all over DRAM.  Default n.
+
+config MESON_G12A_DRAM_TXDQS_CENTRE
+	bool "TPL G12A/SM1: centre the write DQS (TxDqsDly) after training"
+	depends on MESON_G12A && TPL
+	default n
+	help
+	  After the vendor PMU training, search each DQ nibble's TxDqsDly
+	  window with a CPU data probe (a lockstep sweep of the decoded
+	  domain) and move the nibble to its window centre, shifting both
+	  timing groups by the same delta.  The vendor values are put back
+	  if the centred state probes bad.  Runs before the DRAM tests, so
+	  they check the centred bus.
+
+	  Measured on AML-S905D3-CC: the vendor-trained write DQS sits 4
+	  steps from the late edge of an 18-step window on both ranks of
+	  one unit, and this takes the worst side to 8; on a second,
+	  single-rank part it takes the worst side from 6/8 to 9.  It
+	  writes test patterns into 512 KiB at 0x30000000.  Default n until
+	  it is soaked on the production image.
+
+	  It is entered two ways (the quick and slow bring-up): a quick
+	  check after training (see ..._THRESH) and, if the DRAM test then
+	  finds a bad word and the centring has not run, as a fallback
+	  before the test is run again.
+
+config MESON_G12A_DRAM_TXDQS_CENTRE_THRESH
+	int "Quick check: centre only if the write DQS fails within +-N steps"
+	depends on MESON_G12A_DRAM_TXDQS_CENTRE
+	default 6
+	help
+	  After training, every nibble's TxDqsDly is moved by +N and -N and
+	  the data probe run at each; the full centring runs only if either
+	  fails, i.e. when the worst-side write margin is below N steps.  0
+	  centres on every boot.  Measured late edges: +5 on both ranks of
+	  one AML-S905D3-CC unit (centres at 6), +7 / +9 on a single-rank
+	  part (does not).
+
+config MESON_G12A_DRAM_TXDQS_CENTRE_SPAN
+	int "Centring: sweep only the trained values +-N decoded codes"
+	depends on MESON_G12A_DRAM_TXDQS_CENTRE
+	default 24
+	help
+	  The centring's window search visits the decoded TxDqsDly codes
+	  from (lowest trained value - N) to (highest trained value + N)
+	  instead of all 256.  If any nibble's best window touches that
+	  range's edge, or a nibble finds no window, it sweeps all 256
+	  before applying anything ("TXS <lo> <hi> full").  0 always sweeps
+	  all 256.  Measured windows: 17-21 steps, the trained point 4-13
+	  steps from each edge, on two parts.
+
+config MESON_G12A_DRAM_OPEN
+	bool "TPL G12A/SM1 open host-side DDR init (transcribed a644 steps)"
+	depends on MESON_G12A && TPL
+	default n
+	help
+	  Perform the host side of the vendor DDR driver_init (a644)
+	  ourselves, from the instruction-by-instruction transcriptions of
+	  the timing engine, the DMC/PCTL program, the PHY static config,
+	  the PMU message block, both pin-mux tables, the IMEM/DMEM loader,
+	  the PIE image load and the DMC bring-up -- and call the vendor
+	  PMU firmware only for training, over the UCT mailbox.
+
+	  Two arms, selected in dram-g12a.c: G12A_OPEN_COMPARE (default)
+	  leaves the blob's own walk in place and judges every open
+	  computation read-only against the state it left; G12A_OPEN_LIVE
+	  replaces the walk.
+
+	  The PMU firmware blob stays either way -- it is what measures the
+	  eye.  Two host-side steps are still the blob because they are not
+	  transcribed: S1 (fffb931c, PLL / DMC address map + geometry) and
+	  T10 (fffb8af0, the DMC<->PHY handshake state machine).
+
+	  Bring-up instrumentation, not a product option.  Default n.
+
+config MESON_G12A_DRAM_OPEN_LIVE
+	bool "TPL G12A/SM1 open DDR init: RUN it instead of comparing"
+	depends on MESON_G12A_DRAM_OPEN
+	default n
+	help
+	  Select the LIVE arm: the open path performs a644's S2..T14 itself
+	  and the blob is called only for S1 and T10.  Without this, the
+	  option builds the compare-only arm, which is read-only and cannot
+	  perturb the boot.  Default n.
+
+config MESON_G12A_DRAM_PROBE
+	bool "TPL G12A/SM1 open DDR: black-box training probe + cfg overlay"
+	depends on MESON_G12A_DRAM_OPEN
+	default n
+	help
+	  Debug-only arms for black-box DRAM bring-up on a part the vendor
+	  12-cfg table does not know (qi:N1294). Three effects, all inert
+	  when this is n:
+
+	  (b) replace the step-9 1D-TRAIN blob call (0xFFFB8D74, whose
+	      mailbox poll has no terminal exit and dead-stops on an
+	      off-table part) with the open UCT mailbox transcribed with a
+	      hard message/wall bound; on every non-OK terminal print a
+	      bounded register dump (DMC window, UCT mailbox state, micro
+	      reset/mux, per-lane harvested vref banks, msg-block head) so
+	      each boot returns a SIGNAL instead of a silent hang.
+
+	  (a) after the built-in ddr_set_t is built, overlay a cfg block
+	      read from a fixed OCRAM address the host uploads each run, so
+	      a geometry sweep is a re-upload, not a rebuild.
+
+	  (c) a MR/geometry dump of the fields the driver actually applies.
+
+	  Ships DEFAULT n: no shipped board config selects it. Default n.
+
+config MESON_G12A_PPT_DDC
+	bool "TPL G12A/SM1 opt-in LPDDR4 PPT/DDC after 1D/2D"
+	depends on MESON_G12A && TPL
+	default n
+	help
+	  After 1D/2D + T7 (which zeros PPTTrainSetup) and T10 (DMC DFI
+	  PHY-Master ack already HW), program PPTTrainSetup PS0/PS1 with
+	  the Synopsys phyinit default packing and restore PptCtlStatic
+	  from the T8 ddr_set_t snapshot (ds+250).
+
+	  Encoding is PUB 2.20a §11.3.227 Table 11-235, not invented:
+	  PhyMstrTrainInterval[3:0] 0xA = 268435456 MEMCLKs, and
+	  PhyMstrMaxReqToAck[6:4] 0x5 = 8192 MEMCLKs; either 0 disables
+	  the PHY Master (DDC off).  Packed value 0x005A
+	  (G12A_DDR_PHY_PPTTRAINSETUP_ST_DDC).  Vendor aml_ddr.fw T7
+	  writes 0 — enabling DDC is opt-in, not copy-from-closed.
+	  No software dfi_phymstr_ack loop (DMC HW, G12-C2).
+
+	  Default n keeps residual-opensc at interval 0.  Enable via
+	  configs/tpl-g12a-ppt-ddc.config for a bring-up boot only.
+
+config MESON_G12A_DRAM_WIDTH
+	bool "TPL G12A/SM1 offline eye-width crumb at trained centre"
+	depends on MESON_G12A && TPL
+	default n
+	help
+	  After 1D/2D, reuse the existing DRAM-margin walker to print
+	  eye WIDTH around the trained centre — SoC RX VrefDAC0/1
+	  (csr 0x10040, VrefDAC0 DBYTE0 lane0) and write DQS
+	  TxDqsDlyTg0 (csr 0x100D0).  Each arm stops at the first
+	  failing probe; the bound is G12A_MRG_SWEEP_MAX.  No soak,
+	  no extremes, no DDC, not a product option.
+
+	  Default n.  Set in the aml-s905d3-cc_libre_*_width defconfigs
+	  for a bring-up residual boot only.
+
+	  The BL33 opt-in command (CMD_MESON_G12A_DRAM, `g12a_dram`)
+	  dumps this centre / reuses this walker from the U-Boot
+	  prompt.  It is not this TPL crumb and is not run from
+	  board_init/PREBOOT.
+
+config MESON_G12B_POWER_INIT
+	bool "G12B Alta dual-cluster power init (VCCK_A/B + VDDEE)"
+	depends on MESON_G12A && TPL
+	default n
+	help
+	  Compile spl-g12b.o, whose strong meson_power_init() raises
+	  VCCK_A (GPIOAO_4), VCCK_B/VCC3V3 (TEST_N AO_GPIO_O[31] +
+	  AO_SEC_REG0[0]) and VDDEE (PWM_AO_B) for AML-A311D-CC.
+
+	  This is the board power half only, and it is deliberately
+	  INDEPENDENT of MESON_G12_OPEN_PLL: the Strategy A orchestrator
+	  in dram-g12a.o supplies dram_init() while this supplies the
+	  G12B power sequence, which is what the SM1 TPL->SPL chain needs
+	  in order to run on Alta.  When it is set, dram-g12a.c's own
+	  meson_power_init() (Solitude PWM tables) is compiled out.
+
+config MESON_G12_OPEN_PLL
+	bool "G12B Alta Strategy B Phase 1: open DDR PLL lock (no train)"
+	depends on MESON_G12A && TPL
+	select MESON_G12B_POWER_INIT
+	default n
+	help
+	  Compile dram-g12.o instead of Strategy A dram-g12a.o, on top of
+	  the MESON_G12B_POWER_INIT power sequence it selects: DDR PLL
+	  lock poll on AM_DDR_PLL_CNTL0 bit 31, then hang.
+	  Does not load PHY FW, does not train, does not enable DDC.
+	  Mutually exclusive with the SM1 residual-opensc orchestrator
+	  (that tree keeps dram-g12a.o when this is n).
+
+config TPL_MESON_G12A_USB_RESIDUAL
+	bool "TPL G12A/SM1 USB residual (re-enum + bulk SPL)"
+	depends on MESON_G12A && TPL && MESON_G12A_XPL_CHAIN
+	default n
+	help
+	  After train stubs, soft-disconnect the BROM USB link and soft-
+	  connect a minimal DWC2 worldcup server so the host can push DRAM
+	  SPL to 0x08000000 (and optional train holds) over USB.  G12 bases
+	  only (0xFF400000 DWC2 / 0xFFE09000 glue) — never GXL 0xc910/0xd007.
+
+	  Option 2 of open-tpl-usb-residual.md.  Default n keeps pass-1
+	  size/behaviour unchanged until residual is measured on Solitude.
+	  Set in the aml-s905d3-cc_libre_* defconfigs, which are the
+	  residual-HW bring-up targets.
+	  UART crumbs: U attach, u fail, R receive start.  Must stay under
+	  TPL 0xf000 payload ceiling.
+
+config TPL_MESON_G12A_USB_W1_HOLD
+	bool "TPL G12A/SM1 USB residual: NAK EP2 after window 1's first frame"
+	depends on TPL_MESON_G12A_USB_RESIDUAL
+	default n
+	help
+	  After the first complete G12R frame in the pre-dram_init window,
+	  stop re-arming EP2 until the post-dram_init window opens, so a
+	  frame the host queues right behind it (the SPL+FIT frame) waits on
+	  the wire instead of being parsed before DRAM exists.  Only for a
+	  host that sends the residual as ONE frame (the --legacy-tail-cut
+	  concat); a host that sends aml/piei/1d/2d as separate frames in
+	  window 1 must leave this n.  Plan: tpl-usb-readiness-plan.md.
+
+config TPL_MESON_G12A_EMMC_REG
+	bool "TPL G12A/SM1 register-level eMMC reader (READ ONLY)"
+	depends on MESON_G12A && TPL && MESON_G12A_XPL_CHAIN
+	default n
+	help
+	  A read-only eMMC reader for the SRAM stage with no driver model,
+	  no OF_CONTROL and no TPL DTB: it drives SD_EMMC_C (0xFFE07000)
+	  through its registers and moves each 512 B block through the
+	  controller's own buffer at base+0x400 by CPU, the path the SM1
+	  BootROM itself uses (FUN_ffff4a6c).  The driver-model reader does
+	  not fit beside the shipping TPL (.sram over by 8208 B).
+
+	  It re-initialises the card (CMD0, CMD1, CMD2, CMD3, CMD7) in 1-bit
+	  mode at the BootROM's own clock words, and keeps the BootROM's pin
+	  mux, pulls and clock gate as they are.  Reading a boot area
+	  selects it with CMD6 in set-bits / clear-bits mode on
+	  PARTITION_CONFIG bits [2:0] (PARTITION_ACCESS) only: that field is
+	  volatile (cleared by CMD0 and power loss), and BOOT_PARTITION_ENABLE
+	  is never written.  No write command is compiled in.
+
+	  With this option the TPL runs a self-test after the second USB
+	  window: crc32 of user sector 0, of user LBA 1..128 (the 64 KiB the
+	  BootROM reads) and of boot0 sector 0, and the elapsed time.  Never
+	  fatal.  Plan: amlogic/software/boot/g12/plan/sm1-resident-chain.md.
+
+config TPL_MESON_G12A_EMMC_FETCH
+	bool "TPL G12A/SM1: fetch both residual windows from eMMC, not USB"
+	depends on TPL_MESON_G12A_EMMC_REG && TPL_MESON_G12A_USB_RESIDUAL
+	default n
+	help
+	  Replace the two USB residual windows with reads from a staged
+	  layout on the eMMC, through the register-level reader.  Window 1
+	  (the DDR residual concat) is read block by block into the SAME
+	  splitter the USB path feeds (bulk_copy_pay() in meson-usb-g12.c),
+	  so the SRAM holds and has_2d come out as a USB delivery leaves
+	  them.  Window 2 (the DRAM stage and the boot FIT, the binman image
+	  from SPL_OFFSET on) is read after dram_init(): [0, 0x30000) to
+	  0x08000000, the rest to 0x02000000, and its length is reported to
+	  the handoff as the USB path reports it.
+
+	  The layout is one header block at TPL_MESON_G12A_EMMC_FETCH_LBA of
+	  hardware partition TPL_MESON_G12A_EMMC_FETCH_PART, written by
+	  amlogic/software/tools/mk-g12a-emmc-stage.py: magic, the LBA,
+	  length and crc32 of each window, and a crc32 of the header.  The
+	  TPL takes offsets and lengths only from that header and checks
+	  every crc, so the TPL constants and the staged file cannot drift.
+
+	  The source is selected by this option, not by the BootROM's boot
+	  device: the TPL itself still arrives over USB.  The USB windows are
+	  not served when it is set.  Read only, as the reader is.
+
+config TPL_MESON_G12A_EMMC_FETCH_PART
+	int "eMMC hardware partition holding the staged layout (1 = boot0)"
+	depends on TPL_MESON_G12A_EMMC_FETCH
+	range 0 2
+	default 1
+
+config TPL_MESON_G12A_EMMC_FETCH_LBA
+	hex "LBA of the staged layout header in that partition"
+	depends on TPL_MESON_G12A_EMMC_FETCH
+	default 0x800
+	help
+	  0x800 = 1 MiB into the partition, far from LBA 1..128, the only
+	  window the SM1 BootROM reads, so a staged layout leaves the
+	  BootROM's view of the medium unchanged.
+
+config MESON_G12A_RESIDENT
+	bool "G12A/SM1 resident chain: boot-device dispatch, FIT from the TPL, USB fallback"
+	depends on MESON_G12A_XPL_CHAIN && TPL_MESON_G12A_EMMC_FETCH
+	default n
+	help
+	  The chain for a TPL the BootROM loads from eMMC (LBA 1 of a
+	  hardware partition) rather than over USB.  One symbol for all
+	  three phases:
+
+	  TPL: the residual windows come from the staged eMMC layout when
+	  the BootROM's boot device is eMMC and from USB otherwise (both
+	  paths are linked).  On any boot device but USB the TPL's first act
+	  arms the USB fallback: AO_RTI_STATUS_REG2 = 0x4f5244b1, which
+	  makes the BootROM enter USB before any storage and wait for the
+	  host with no timeout on the next reset, and the EE watchdog, which
+	  supplies that reset if anything up to U-Boot proper hangs.  While
+	  armed, the TPL pets the watchdog where it used to stop it (USB
+	  window, eMMC window 1, DRAM PLL init, training).  A power cycle
+	  clears the word.
+
+	  SPL (DRAM stage): when the handoff says the TPL delivered the
+	  boot FIT to DRAM, spl_boot_device() answers BOOT_DEVICE_RAM on any
+	  boot device, instead of raw MMC sector reads.
+
+	  U-Boot proper: at EVT_DM_POST_INIT_R, if the word is armed or the
+	  TPL armed the EE watchdog (MESON_G12A_RESIDENT_OVERRIDE=n arms it
+	  without the word), the
+	  driver-model watchdog takes the EE watchdog over (petted every
+	  second while U-Boot runs) and the word stays armed; at the last
+	  step before the OS (board_quiesce_devices(), booti/bootm and
+	  UEFI) it is cleared through SiP SET_USB_BOOT_FUNC (0x82000043,
+	  CLEAR) -- a non-secure write to it faults.  A reset or panic in
+	  U-Boot before that goes to the rig; `usbfb clear` clears it by
+	  hand.  Needs a TF-A built with AML_USB_FALLBACK=1, which answers
+	  that call with the register write; a TF-A without it forwards the
+	  call to an SCP over SCPI.
+
+	  Plan: amlogic/software/boot/g12/plan/sm1-resident-chain.md
+	  "USB fallback" and "Recovery gaps".
+
+config MESON_G12A_RESIDENT_WDT_MS
+	int "EE watchdog timeout the resident TPL arms (ms)"
+	depends on MESON_G12A_RESIDENT
+	range 1000 65535
+	default 60000
+	help
+	  1 ms ticks, so 65535 is the register's ceiling.  One window from
+	  the TPL's first act to U-Boot proper's EVT_DM_POST_INIT_R, petted
+	  only by the TPL's own loops (USB window, training); U-Boot proper
+	  then restarts it with this timeout and pets it.
+
+config MESON_G12A_RESIDENT_OVERRIDE
+	bool "Resident chain: arm the BootROM USB-override word with the watchdog"
+	depends on MESON_G12A_RESIDENT
+	default y
+	help
+	  y (the "rig" mode): the TPL writes AO_RTI_STATUS_REG2 = 0x4f5244b1
+	  beside the EE watchdog, so a hang up to the OS resets into an
+	  endless BootROM USB wait -- right for a board with a USB-BootROM
+	  host attached.
+
+	  n (the "standalone" mode): the TPL arms the EE watchdog alone, so a
+	  hang resets and runs the normal boot again -- for a board with no
+	  USB host, where an endless USB wait would strand it.  U-Boot proper
+	  then takes the watchdog over on the TPL's own arm (EN set and the
+	  timeout equal to MESON_G12A_RESIDENT_WDT_MS), not on the word.
+
+	  Plan: amlogic/software/boot/g12/plan/sm1-two-stage-watchdog.md 1a.
+
+config MESON_G12A_RESIDENT_ARM_ON_USB
+	bool "Resident chain: TEST ONLY -- arm the watchdog on a USB boot too"
+	depends on MESON_G12A_RESIDENT
+	default n
+	help
+	  A USB-delivered (DRAM-boot) TPL normally does not arm, because the
+	  USB path is already where the fallback leads.  This makes it arm
+	  anyway, so the watchdog stages can be gated from a USB-delivered
+	  image without writing boot media.  Never set in a shipping
+	  defconfig.
+
+config MESON_G12A_RESIDENT_M20_PROBE
+	bool "Resident chain: TEST ONLY -- TPL samples the SC and both watchdogs"
+	depends on MESON_G12A_RESIDENT
+	default n
+	help
+	  The TPL prints the EE watchdog as the reset left it, then two
+	  samples 0.5 s apart of the SC heartbeat tick, the SC's AO-watchdog
+	  pet count and the AO watchdog CNTL, before any SC is loaded on
+	  this boot.  Answers whether the SC survives an EE watchdog reset
+	  (plan sm1-two-stage-watchdog.md M2.0).  Never set in a shipping
+	  defconfig.
+
+config MESON_G12A_RESIDENT_M21_AO_SPIN
+	bool "Resident chain: TEST ONLY -- TPL stops the EE watchdog and spins"
+	depends on MESON_G12A_RESIDENT
+	default n
+	help
+	  As its first act the TPL prints the AO and EE watchdog CNTL, clears
+	  the EE watchdog's enable (the BootROM's own arm included), and spins
+	  forever, with no SC loaded on this boot.  Only the AO watchdog can
+	  then reset the chip: answers whether it backstops a wedge before the
+	  SC loads (plan sm1-two-stage-watchdog.md M2.1).  The board never
+	  boots with it set.  Never set in a shipping defconfig.
+
+config TPL_MESON_USB_REENUM
+	bool "TPL re-enumerates as its own USB device, chip id as serial"
+	depends on TPL_MESON_USB_BOOT || TPL_MESON_G12A_USB_RESIDUAL
+	default n
+	help
+	  Instead of continuing the BootROM's USB session, the TPL drops off
+	  the bus for 10 ms after DRAM init and comes back as its own device,
+	  whose iSerialNumber is the chip id (include/chip_serial.h) -- so a
+	  host sees the board's identity from the TPL on.  The host must follow
+	  the device by its port (tools/meson-usb-boot.py and the G12 harness
+	  do); the re-enumeration costs about 0.5 s.
+
+	  Only for the USB flashing (DFU) targets the Libre Computer Android
+	  app uses (*_libre_dfu_defconfig).  Product targets keep the BootROM
+	  session.
+	  GXL: PHY power-on reset restart with U-Boot's GUSBCFG and the
+	  BootROM's FIFO map.  G12: a soft disconnect before the take-over,
+	  keeping the BootROM's configuration.
+
+config SPL_MESON_USBFLASH_WRITE
+	bool "SPL USB flash session writes MMC storage"
+	depends on SPL_USBFLASH && SPL_MMC_WRITE
+	select SPL_USBFLASH_WRITE
+	default n
+	help
+	  The SPL flash session (common/spl/spl_usbflash.c) is
+	  read-only by default.  With this, its eMMC/SD alternates take DFU
+	  downloads and `usbflash ums mmc <n>` serves a read-write LUN.  SPI
+	  NOR stays read-only.  Only for the USB flashing (DFU) targets
+	  (*_libre_dfu_defconfig); product targets keep the read-only session.
+
+config TPL_MESON_USB_BOOT
+	bool "TPL USB boot server (BROM take-over)"
+	depends on MESON_GXL && TPL
+	help
+	  The same DWC2 device server, built into the TPL stage instead.
+
+	  In the TPL->SPL->FIT chain the SRAM stage owns DDR init AND the
+	  receive path: it takes the DWC2 over from the BootROM, pulls the
+	  whole session into DRAM, fills the handoff block and only then tears
+	  the device down and jumps.  Carrying a live enumerated link across a
+	  stage boundary is the one thing this stack must not do, so SPL never
+	  touches USB and there is no "SPL takes over the link" option here.
+
+	  Enable this together with SPL_MESON_USB_BOOT only while the single
+	  stage SPL is still the shipping path; they build the same sources
+	  into two independent binaries.
+
+config MESON_GX_XPL_CHAIN
+	bool "GX TPL -> SPL chain (TPL in SRAM, SPL in DRAM)"
+	depends on MESON_GXL && TPL && SPL
+	help
+	  Split the loader in two.  TPL is the BootROM-loaded SRAM stage under
+	  the hard 0xb000 amlimage payload ceiling and owns DDR init, the boot
+	  source and the handoff block; SPL is relinked to run from DRAM, where
+	  no comparable ceiling exists, and owns the FIT and the decompressors.
+
+	  This is a global symbol on purpose: it is read in BOTH phases, because
+	  it is what tells the SPL phase that it is the DRAM stage and must not
+	  re-run any of the SRAM stage's work.
+
+	  Say N for the single-stage SPL, which is still the shipping path and
+	  is built byte-identically when this is off.
+
+config MESON_GX_SPL_ENTRY
+	hex "DRAM address of the SPL stage"
+	depends on MESON_GX_XPL_CHAIN
+	default 0x08000000
+	help
+	  Where TPL branches, and where the SPL stage is linked.  It must equal
+	  SPL_TEXT_BASE -- the DRAM stage checks the two against each other via
+	  the handoff block rather than hanging if they ever drift apart.
+
+	  The default clears every address the FIT path uses, on both layouts:
+
+	    vendor           BL33 0x01000000, SCP 0x013c0000, BL31 0x05100000
+	    LIBRE_SECURE     BL33 0x04000000, SCP 0x00001000, BL31 0x00100000
+
+	  FIT staging is not a property of the layout -- SPL_LOAD_FIT_ADDRESS is
+	  set per board: 0x02000000 on libretech-cc_libre_defconfig, 0x0c000000
+	  on libretech-cc_v2_libre_defconfig and libretech-ac_libre_defconfig.
+	  0x08000000 sits between them and clears both.
+
+	  Distinct again from MESON_SPL_FIT_BUFFER_ADDR 0x05000000 (spl.c), the
+	  FIT WORKING buffer under MESON_GX_LIBRE_SECURE_LAYOUT, which no board
+	  uses as a staging address.
+
+config TPL_MESON_GX_BOOTLOG
+	bool "GX chain: keep the TPL's UART output in the boot log"
+	depends on MESON_GX_XPL_CHAIN && TPL_SERIAL
+	default y
+	help
+	  Copy every byte the TPL writes to the AO UART into the boot log
+	  (arch-meson/gx-bootlog.h): in SRAM until DDR is up, then at
+	  MESON_GX_BOOTLOG_ADDR in DRAM.  A host can read it over the TPL's USB
+	  protocol, and the DRAM stage replays it on its USB console.
+
+config SPL_MESON_GX_BOOTLOG
+	bool "GX chain: keep the SPL's UART output and replay the boot log on USB"
+	depends on MESON_GX_XPL_CHAIN && SPL_SERIAL
+	default y
+	help
+	  The DRAM stage appends its own UART output to the boot log the TPL
+	  started, and its USB flash session replays the whole log into the
+	  CDC ACM console when that console starts (SPL_USB_GADGET_DNL_ACM), so
+	  a host with no serial cable sees the boot from the TPL's first line.
+
+config MESON_GX_BOOTLOG_ADDR
+	hex "DRAM address of the GX boot log"
+	depends on TPL_MESON_GX_BOOTLOG || SPL_MESON_GX_BOOTLOG
+	default 0x07f00000
+	help
+	  Header plus data, MESON_GX_BOOTLOG_SIZE bytes.  The default sits below
+	  the DRAM stage (MESON_GX_SPL_ENTRY 0x08000000) and above every other
+	  address the chain writes before U-Boot proper: FIT staging 0x02000000
+	  and 0x0c000000, BL33 0x04000000, the FIT working buffer 0x05000000
+	  (1 MiB), the SPL stack below 0x09000000 and its heap at 0x0a000000.
+
+config MESON_GX_BOOTLOG_SIZE
+	hex "Size of the GX boot log in DRAM, header included"
+	depends on TPL_MESON_GX_BOOTLOG || SPL_MESON_GX_BOOTLOG
+	default 0x10000
+
+config MESON_GX_SPL_OFFSET
+	hex "Offset of the SPL stage inside the combined image"
+	depends on MESON_GX_XPL_CHAIN
+	default 0xc000
+	help
+	  Where binman places the DRAM stage in u-boot-meson-with-spl.bin, and
+	  therefore where TPL looks for it on every medium.
+
+	  0xc000 is the end of the amlimage-signed SRAM stage and the start of
+	  the padding that runs to the FIT (MESON_GX_FIT_OFFSET: 0x1fe00 in the
+	  original layout, 0x4c000 on the libretech -libre boards since the
+	  window was widened for the SPL flash session).  It is also the LBS split point
+	  (build.sh: dd bs=49152), so the second protocol file begins exactly
+	  with SPL.
+
+	  Must be a multiple of 512: the MMC loader reads whole sectors.
+
+config MESON_GX_SPL_MAX_SIZE
+	hex "Bytes TPL reads for the SPL stage"
+	depends on MESON_GX_XPL_CHAIN
+	default 0x13e00
+	help
+	  How much TPL fetches from MESON_GX_SPL_OFFSET.  It is a fixed length,
+	  not a parsed one: the raw stage carries no header, so TPL reads a
+	  window and says in the handoff block exactly how many bytes it read
+	  rather than claiming to know the image's true size.
+
+	  The default is the whole gap of the original layout (0xc000..0x1fe00).
+	  A board that moves the FIT sets this to MESON_GX_FIT_OFFSET -
+	  MESON_GX_SPL_OFFSET (the libretech -libre boards: 0x40000, FIT at
+	  0x4c000); gx-handoff.h asserts it covers SPL_SIZE_LIMIT and stops at the
+	  FIT.  Must be a multiple of 512.
+
+config TPL_MESON_GX_LOAD_MMC
+	bool "TPL fetches SPL from SD/eMMC"
+	depends on MESON_GX_XPL_CHAIN && TPL_MMC && TPL_BLK && TPL_DM_MMC
+	help
+	  Teach the SRAM stage to read the DRAM stage off the medium it booted
+	  from, when that medium is an SD card or eMMC.
+
+	  This is a raw block read of MESON_GX_SPL_MAX_SIZE bytes from
+	  MESON_GX_SPL_OFFSET inside the combined image -- not a call into
+	  common/spl/spl_mmc.c.  That file is written around an image FORMAT
+	  (it parses a FIT or a legacy header and fills a struct spl_image_info)
+	  and around the generic board_init_r() flow, and the DRAM stage is a
+	  raw blob loaded by a stage that never returns from board_init_f().
+	  Reusing blk_dread() and blk_dselect_hwpart() gets the block layer
+	  without inheriting either assumption.
+
+	  Says nothing about USB, which is a push and needs no loader, nor
+	  about SPI NOR, which is its own arm and its own Kconfig symbol.
+
+	  Needs no CLK uclass, and deliberately does not enable one.  The probe
+	  used to die on clk_get_bulk()'s -ENOSYS stub; meson_mmc_probe() now
+	  treats that as non-fatal in the TPL phase, because the BootROM has
+	  already driven this controller to fetch TPL itself and the only
+	  register that has to move afterwards, SD_EMMC_CLOCK, is programmed by
+	  a plain meson_write() (measured on AML-S905X-CC 2026-08-07: the HHI
+	  gates read on, SD_EMMC_CLOCK read 0, and writing it directly took
+	  SD_EMMC_CFG from a bus fault to 0x00004890).  Turning TPL_CLK on
+	  instead would cost at least 23864 bytes of .sram overflow.
+
+	  BUILD-VERIFIED ONLY: no board has run this.  A successful probe is a
+	  runtime property, and pin muxing is likewise inherited from the ROM
+	  (there is no TPL_PINCTRL either).  A failure still reports a
+	  GX_TPL_LOAD_* code rather than reading garbage.
+
+config MESON_GX_MMC_IMAGE_OFFSET
+	hex "Byte offset of the combined image in the MMC user area"
+	depends on TPL_MESON_GX_LOAD_MMC
+	default 0x200
+	help
+	  Where u-boot-meson-with-spl.bin starts on an SD card or in the eMMC
+	  user area.  512 is the Amlogic convention -- sector 0 is left to the
+	  partition table -- and it is the value that makes the existing
+	  SYS_MMCSD_RAW_MODE_U_BOOT_SECTOR of 0x100 agree with the FIT at
+	  0x1fe00 in the image: 0x1fe00 + 0x200 = 0x20000 = sector 0x100.
+
+config MESON_GX_MMC_BOOT_IMAGE_OFFSET
+	hex "Byte offset of the combined image in an eMMC boot partition"
+	depends on TPL_MESON_GX_LOAD_MMC
+	default 0x0
+	help
+	  Same, for boot0/boot1.  A hardware boot partition has no partition
+	  table to step over, so the image starts at zero.
+
+config MESON_GX_MMC_HWPART
+	int "eMMC hardware partition holding SPL (-1 = ask the card)"
+	depends on TPL_MESON_GX_LOAD_MMC
+	default -1
+	range -1 2
+	help
+	  0 = user area, 1 = boot0, 2 = boot1.
+
+	  -1 reads EXT_CSD_PART_CONF's BOOT_PARTITION_ENABLE, which is the
+	  card's own record of where the ROM was told to boot from, and uses
+	  that: 1 -> boot0, 2 -> boot1, anything else -> the user area.  Pin it
+	  only for a board whose flashing layout disagrees with its eMMC.
+
+	  SD cards have no hardware partitions and ignore this entirely.
+
+config MESON_GX_DMC_DUMP
+	bool "Print the programmed DMC geometry after meson_dram_dmc_init()"
+	depends on MESON_GX
+	help
+	  Print DMC_DDR_CTRL and DDR0_ADDRMAP_0..4 as READ BACK off the
+	  controller, at the end of meson_dram_dmc_init() -- i.e. after
+	  meson_dram_dmc_set_addrmap() has written them and BEFORE the first
+	  DRAM access.  One printf, no register writes, nothing else.
+
+	  READ ONLY, and by construction: the only statement it adds is a
+	  printf() of six readl()s.
+
+	  The printf itself already existed, guarded on the DRAM alias test and
+	  the DRAM fault classifier -- neither of which is a Kconfig symbol on
+	  this branch, so the block was dead code here and the only way to read
+	  a programmed ADDRMAP word back was to build an instrument branch that
+	  carries a DIFFERENT map.  That is exactly the wrong instrument for
+	  the question "did the map this branch programs land?".
+
+	  Same argument, and same answer, as TPL_MESON_GX_NOR_PROBE and
+	  TPL_MESON_GX_MMC_PROBE: it runs inside board_init_f, so in the
+	  TPL->SPL chain it lands in PASS 1, on a rig that cannot complete a
+	  pass-2 FIT transfer at all.  Say Y on a bring-up rig; it costs code
+	  in a stage with a hard ceiling and buys a diagnostic.
+
+config TPL_MESON_GX_NOR_PROBE
+	bool "TPL reads the SPI NOR JEDEC ID and one block (READ ONLY)"
+	depends on MESON_GX_XPL_CHAIN && TPL_DM_SPI && MESON_SPIFC
+	help
+	  Issue two commands to the onboard SPI NOR from the SRAM stage --
+	  0x9F (read identification) and 0x03 (read data) -- and print what
+	  comes back.  Nothing else.
+
+	  It exists because a clock fix is worth exactly what a transaction
+	  proves.  meson_spifc could not get a rate in a phase without the CLK
+	  uclass; spifc-clk-gx.c now reads clk81 out of the HIU registers
+	  instead, and the cheapest end-to-end check of pinmux, controller,
+	  divider, chip select and both data directions is a JEDEC ID.
+
+	  READ ONLY, and by construction rather than by intent: this path binds
+	  a generic SPI slave, not the spi-nor core, so no erase or write
+	  callback and no WREN opcode is compiled into the stage at all.  Say Y
+	  on a bring-up rig; it costs code in a stage with a hard ceiling and
+	  buys a diagnostic, not a boot source.
+
+	  Runs on every boot device, including USB -- otherwise a board that
+	  boots over the cable never exercises the path being tested.
+
+config MESON_GX_MMC_SD_DEVNUM
+	int "u-boot MMC device number of the SD card slot"
+	depends on TPL_MESON_GX_LOAD_MMC
+	default 1
+	help
+	  Which /aliases mmcN the SD card slot is, so gx_tpl_fetch_spl() can
+	  turn BOOT_DEVICE_SD into a device number.
+
+	  ONE, not zero, and this is a correction rather than a preference.
+	  meson-gx.dtsi annotates `mmc0 = &sd_emmc_c` as "SD card", but both
+	  AML-S905X-CC and AML-S905X-CC-V2 put the SD card on sd_emmc_b and
+	  eMMC on sd_emmc_c -- their .dts files label the two nodes in exactly
+	  those words, and the SD node is the one carrying cd-gpios and the
+	  sd-uhs-* modes.  So on our GXL boards mmc0 is eMMC and mmc1 is SD,
+	  the opposite of what the SoC dtsi's comment says.
+
+	  The dispatch used to spell this `bd == BOOT_DEVICE_EMMC ? 1 : 0`,
+	  which is inverted on both boards.  It could not be observed before
+	  2026-08-30 because the mmc nodes carried no bootph-* mark, so no
+	  controller ever bound and the wrong devnum was never reached.
+
+config MESON_GX_MMC_EMMC_DEVNUM
+	int "u-boot MMC device number of the eMMC"
+	depends on TPL_MESON_GX_LOAD_MMC
+	default 0
+	help
+	  Which /aliases mmcN the eMMC is.  Zero on both GXL boards -- see
+	  MESON_GX_MMC_SD_DEVNUM for why that is not a typo.
+
+config TPL_MESON_GX_MMC_PROBE
+	bool "TPL binds SD/eMMC and reads sector 0 (READ ONLY)"
+	depends on MESON_GX_XPL_CHAIN && TPL_MMC && TPL_BLK && TPL_DM_MMC
+	help
+	  Bind both boot-capable MMC controllers from the SRAM stage, initialise
+	  whatever card answers, and print the block size, capacity, EXT_CSD
+	  boot-partition config and the first 16 bytes of sector 0.  Nothing
+	  else.
+
+	  READ ONLY, and by construction rather than by intent: the only block
+	  entry point compiled in is blk_dread().  No blk_dwrite, no erase, no
+	  mmc_switch of a write-protect or boot-config field.
+
+	  It exists because TPL_MESON_GX_LOAD_MMC cannot be exercised on the
+	  bring-up rig at all.  The loader is reached only from
+	  gx_tpl_fetch_spl()'s BOOT_DEVICE_SD/EMMC cases, and
+	  meson_get_boot_device() reports what the BootROM actually booted
+	  from -- BOOT_DEVICE_USB on every run the USB dev loop can perform.
+	  So the loader is dead code until an image is flashed to a card, and
+	  flashing a card is the step nobody should take before the path has
+	  read one byte.  Same argument, and same answer, as
+	  TPL_MESON_GX_NOR_PROBE: runs on every boot device, including USB.
+
+	  Say Y on a bring-up rig.  It costs code in a stage with a hard
+	  ceiling and buys a diagnostic, not a boot source.
+
+config MESON_GX_FIT_OFFSET
+	hex "Offset of the FIT inside the combined image"
+	depends on MESON_GX && SPL
+	default SPL_PAD_TO
+	help
+	  Where binman places the FIT.  This used to be spelled CONFIG_SPL_PAD_TO
+	  directly, which conflated two unrelated things: SPL_PAD_TO is a linker
+	  pad for the SRAM stage and include/config_fallbacks.h forbids it from
+	  dropping below SPL_MAX_SIZE, while this is a position in an on-media
+	  image.  Defaulting to SPL_PAD_TO keeps every existing board where it is.
+
+config MESON_GXL_SCP_BOARD_ID
+	hex "Board id of the open SC payload this build pairs with"
+	depends on MESON_GXL
+	default 0
+	help
+	  The G5/D3 pairing contract (N54 stage). The open SC firmware is
+	  built ONE BOARD AT A TIME (scp-firmware GXL_BOARD=<slug>, ledger
+	  N339/G5): its .bin carries the board id as its LAST word --
+	  0xB0A4 << 16 | contract-version << 8 | id, never the first, the M3
+	  vector table lives there -- and the boot FIT's scp image node carries
+	  the same id as `board-id` (binman feeds it from this symbol).
+	  arch/arm/mach-meson/spl-gxl-scp.c reads the staged payload's last
+	  word BEFORE the SC-ROM 0xd3 fetch and refuses a mismatch
+	  ("SCP: board mismatch, refusing fetch"), degrading to a boot without
+	  the SC -- because in a per-board-binary world a mispaired slice is
+	  otherwise SILENT: the ROM never verifies BL30 and the FIT's SHA-256
+	  covers corruption, not the wrong board.
+
+	  The numbers are the registry in scp-firmware
+	  product/amlogic/gxl/include/gxl_board.h: 1 aml-s905x-cc,
+	  2 aml-s905x-cc-v2, 3 aml-s805x-ac, 4 aml-s905d-pc. Never renumber;
+	  append. 0 (the default) = this defconfig declares no pairing and the
+	  SPL check prints that it skipped -- set it in every *_libre board
+	  config that ships an scp slice.
+
+config MESON_GX_LIBRE_SECURE_LAYOUT
+	bool "Open TF-A secure world in the first 16 MiB of DRAM"
+	depends on MESON_GX
+	help
+	  Say Y on a board that boots OUR open TF-A, whose BL31 lives at
+	  0x00100000 and whose SMC mailboxes live at 0x00200000 -- i.e. the
+	  16 MiB block at DRAM start, with an optional OP-TEE band at its top:
+
+	    0x00000000 +  1 MiB  NOT MEMORY     read-only ROM mirror (hwrom@0)
+	    0x00100000 +  1 MiB  S-only, EL3    BL31 768K + SCP staging 256K
+	    0x00200000 +  1 MiB  S<->NS shared  SMC shared mem + storage mailboxes
+	    0x00300000 +  1 MiB  NS reserved    ramoops
+	    0x00400000 + 12 MiB  OP-TEE band    when OP-TEE runs, else Linux
+	    0x01000000 ->        NS free        Linux
+
+	  This is a compile-time symbol rather than a device-tree property
+	  because the LIBRE and the VENDOR build of a board share one board DTS
+	  and one kernel DTB: libretech-cc_v2_defconfig takes the vendor
+	  bl31.img, which loads at 0x05100000, while libretech-cc_v2_libre_-
+	  defconfig runs the open TF-A at 0x00100000.  The DTB cannot tell which
+	  firmware is flashed, so the FIRMWARE DESCRIBES ITSELF: U-Boot patches
+	  the blob it hands Linux in ft_board_setup(), which runs on whatever
+	  DTB is actually being booted (PXE-supplied, kernel-package or
+	  built-in), not merely on U-Boot's own control FDT.
+
+	  Say Y and this build will, in meson_init_reserved_memory():
+	    - add /reserved-memory nodes for BL31 and the mailbox MiB (no-map)
+	      and ramoops (mapped, compatible "ramoops"), keeping the SoC's own
+	      hwrom@0,
+	    - drop secmon@5000000, because BL31 is not there in this build,
+	    - add the OP-TEE band and /firmware/optee only when OP-TEE answers
+	      OPTEE_SMC_CALLS_UID, so one DTB serves both firmware builds.
+	  The -libre board DTS already carries the always-present nodes; this
+	  is defence in depth for a foreign DTB.  It also moves BL33 and the
+	  FIT's BL31 load address out of the block -- see CONFIG_TEXT_BASE in
+	  the *_libre defconfigs and the atf node in
+	  arch/arm/dts/meson-gxl-u-boot.dtsi.
+	  Design: amlogic/software/boot/design/libre-secure-block-and-optee.md.
+
+	  Say N (the default) for the shipping vendor-firmware build, which is
+	  left byte-identical.
+
+	  Design: amlogic/software/boot/design/dram-reservations.md sections 9,
+	  10a and 10b (D1).
+
+config MESON_GX_LIBRE_SCMI_FIXUP
+	bool "Hand Linux the open SC as SCMI: enable the DT carrier at boot"
+	depends on MESON_GX && SCMI_FIRMWARE
+	select OF_BOARD_FIXUP
+	default n
+	help
+	  Say Y on a board whose open SC (SCP-firmware product amlogic/gxl)
+	  answers SCMI on MHU channel 2 / cpu_scp_hpri -- the same SC this
+	  U-Boot's own SCMI agent talks to.  The vendor build of the SAME
+	  board runs the vendor BL30, which speaks SCPI on that mailbox, and
+	  both builds boot the SAME kernel DTB.  So the DTB cannot say which
+	  protocol the mailbox carries: the FIRMWARE DESCRIBES ITSELF, exactly
+	  as MESON_GX_LIBRE_SECURE_LAYOUT does for the memory map.
+
+	  The shipping kernel DTS carries the SCMI package DISABLED --
+	  /firmware/scmi with protocol@11/@14/@12/@13 in that order, and the
+	  always-on watchdog node -- and leaves /scpi enabled for the vendor
+	  firmware.  Say Y and ft_board_setup() flips it on the blob it hands
+	  Linux (PXE-supplied, kernel-package or built-in, not merely U-Boot's
+	  control FDT).
+
+	  It ASKS THE SC FIRST.  Enabling /firmware/scmi is an assertion about
+	  hardware, so ft_board_setup() earns it: it sends one SCMI BASE
+	  PROTOCOL_VERSION on the non-secure OSPM channel -- the same protocol,
+	  channel and first message Linux's scmi_base_protocol_init() sends --
+	  and requires a SUCCESS reply composed by the SC on this boot.  The AO
+	  ready bits are checked first, but only as a safety interlock: they
+	  survive a warm reset, so they can answer for the previous boot, and a
+	  write into a window the SC has not opened raises an SError that resets
+	  the board.  Bounded at 85 ms worst case, and 0 ms when no SC ran.
+
+	  SC-DEPENDENT flips, made only when the SC answered:
+	    - /firmware/scmi                 status -> "okay"
+	    - /cpus/cpu@N  clocks            -> <&scmi protocol@14 0>
+	                   power-domains     -> <&scmi protocol@13 0>
+	                   power-domain-names = "perf"
+	  These are load-bearing together (measured on AML-S905X-CC-V2): the
+	  clock repoint is what lets the OPP core resolve a usable clock.  When
+	  the SC does NOT answer, one line says so and both are left as the DTB
+	  had them -- scmi disabled, no repoint -- so cpufreq simply does not
+	  come up.  Without that guard, a build whose chain never starts an SC
+	  still told Linux the mailbox was live, and scmi_probe() took a
+	  synchronous external abort in shmem_tx_prepare() and never reached
+	  userspace (measured 2026-08-30 on v2026.07/lc-master, which has the
+	  fixup and not the DRAM SPL's SC loader).
+
+	  SC-INDEPENDENT flips, made either way:
+	    - /scpi                          status -> "disabled"
+	      (it describes the VENDOR BL30's SCPI service on this mailbox, and
+	      a -libre image never loads a vendor BL30, so the node is false on
+	      this build whatever the SC did.  Left enabled with no SC at all,
+	      Linux's SCPI driver reaches the same closed shared-memory window
+	      the SCMI one does and takes the same synchronous external abort,
+	      in scpi_process_cmd() -- measured 2026-08-30.  Guarding only the
+	      SCMI half moves the fault, it does not remove it)
+	    - amlogic,meson-gxl-ao-wdt       status -> "okay"
+	      (the ROM arms this watchdog before it loads anything and
+	      MESON_GXL_AO_WDT_HANDOFF refreshes it while U-Boot runs and, by
+	      default, stops it before the OS; wdt_handoff=1 hands it over
+	      running, for a kernel known to carry the driver.  The node is
+	      enabled either way and involves no SC)
+	  Two more, optional (a blob without the nodes is still whole), retire
+	  descriptions of what the VENDOR BL31 offers and this one does not --
+	  which BL31 is running is settled by the image, not by the SC:
+	    - amlogic,meson-gx-pm            status -> "disabled"
+	      (its suspend_ops out-rank psci's and turn `echo mem` into a raw
+	      CPU_SUSPEND(0x0010000) whose refusal leaks to userspace as
+	      ENOENT; measured 2026-08-29)
+	    - arm,idle-state                 status -> "disabled"
+	      (CPU_SLEEP_0 is a POWERDOWN idle with no wake path on the open
+	      SC; refused, Linux retries it every ~18 us and never idles in
+	      wfi; measured 2026-08-29)
+
+	  It only FLIPS.  No node is created, no phandle is generated, nothing
+	  is deleted: a blob that does not carry the disabled package (an old
+	  DTB) is left untouched, one line names what is missing, and the boot
+	  continues.  Every flip is printed so the console is the evidence.
+
+	  IT ALSO GUARDS U-BOOT'S OWN CONTROL FDT, which is why it selects
+	  OF_BOARD_FIXUP.  This U-Boot has an SCMI agent of its own, and the
+	  /firmware/scmi node that binds it makes the same assertion about the
+	  same hardware two stages before ft_board_setup() runs.  With no SC the
+	  agent does not merely fail: UCLASS_SCMI_AGENT probes the base protocol
+	  at DM BIND time and scmi_dt_get_smt_buffer() reads the shared-memory
+	  window before it has sent anything, which on a window the SC never
+	  opened is a synchronous external abort at 0xC8013410 and a reset
+	  (measured 2026-08-30, N57).  So board_fix_fdt() asks the same question
+	  in board_init_f -- one query per boot, cached, shared with the flips
+	  above -- and on a mute SC REMOVES /firmware/scmi from U-Boot's own
+	  control FDT, so the agent is never bound.  With a live SC it changes
+	  nothing.  The node is deleted rather than disabled because the control
+	  DTB has no slack to grow "okay" into "disabled", and because there is
+	  no point in the agent's path at which it could decline instead.
+
+	  This is deliberately a separate symbol from SCMI_FIRMWARE: that one
+	  says U-Boot HAS an SCMI agent, which is also true on boards where
+	  Linux must keep talking SCPI to a vendor SC.  Say N (the default)
+	  for the shipping vendor-firmware build, which is left byte-identical.
+
+	  Design: amlogic/software/boot/gxl/design/open-sc-architecture.md
+	  sections 3 and 4.
+
+config MESON_GX_SCMI_AP_AGENT
+	bool "Bind an SCMI agent in U-Boot proper when the open SC is live"
+	depends on MESON_GX_LIBRE_SCMI_FIXUP
+	default n
+	help
+	  Say Y on the open-chain boot shell to make U-Boot's OWN control-FDT
+	  /firmware/scmi node "okay" so DM binds the SCMI agent and the `scmi`
+	  command can drive the open SC from the "=> " prompt (perf subscribe
+	  + trigger, for the SCP->AP notification proof).
+
+	  Boot is unchanged on every other build: this is default N, the node
+	  stays "disabled", and no shipping DTB grows.  On a target that says Y
+	  but boots a mute SC the MESON_GX_LIBRE_SCMI_FIXUP self-guard still
+	  deletes the node in board_init_f before DM scans it, so the agent is
+	  never bound and the SMT-window read that would abort never runs.  It
+	  is a diagnostic enabler, not a boot path.
+
+config MESON_GXL_AO_WDT_HANDOFF
+	bool "Refresh the ROM's AO boot watchdog and hand it to the OS"
+	depends on MESON_GXL && WDT
+	default n
+	help
+	  The GXL BootROM arms the always-on watchdog at 0xC8100120 with a
+	  5000 ms budget before it loads anything, and hands the board over
+	  with it counting.  Nothing in the chain drives it: the only watchdog
+	  DT node describes the EE/CBUS block at 0xC11098D0, a different device
+	  that the ROM leaves stopped.  Measured on AML-S905X-CC-V2 with the
+	  open chain: the kernel is entered at ~3.95 s of that budget, so an OS
+	  whose watchdog driver probes at normal device-init time is reset
+	  mid-init -- SMP bring-up alone reached 4.43 s.
+
+	  Say Y and this build will
+	    - pet the AO watchdog once its board init runs, and register a
+	      cyclic pet so U-Boot's own duration stops mattering, and
+	    - at the platform's last step before the OS (wdt_handoff_to_os(),
+	      which needs CONFIG_WDT), STOP it by default (clear the enable
+	      bit in the control register, GXBB_WDT_CTRL_EN = BIT(18)), so a
+	      kernel without the watchdog driver is not reset 5 s in; or, with
+	      the environment variable wdt_handoff=1, pet it a final time and
+	      hand it over running with the FULL budget.
+
+	  U-Boot refreshes the ROM watchdog while it runs and, by default,
+	  stops it before the OS.  wdt_handoff=1 is for a kernel known to
+	  carry the driver: it must then take ownership (Linux: a DT node for
+	  the AO block plus CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED) or it will
+	  still be reset 5 s later, and for the right reason.  The refresh does
+	  not extend the ROM's 5000 ms period.
+
+	  Say N (the default) for the shipping vendor-firmware build, whose
+	  earlier boot stages handle the block themselves.
+
+	  Note for anyone extending this: the AO reset register at 0xC810012C
+	  must never be READ -- a read stalls both masters on GXL.  Write only.
+
+config MESON_G12A_LIBRE_SCMI_FIXUP
+	bool "Hand Linux the SM1 open SC as SCMI: enable the DT carrier at boot"
+	depends on MESON_G12A && SCMI_FIRMWARE
+	select OF_BOARD_FIXUP
+	default n
+	help
+	  The SM1 twin of MESON_GX_LIBRE_SCMI_FIXUP, same contract.  The -libre
+	  DTB carries the open SC's SCMI package DISABLED
+	  (meson-sm1-libre-scmi.dtsi: /firmware/scmi with protocol@11 @14 @13
+	  @15, the MHU at 0xFF63C404, one HP channel at 0xFFFE7600) and CPUs
+	  with no OPP table.  ft_board_setup() first checks the SC's ready
+	  paint (AO_RTI_SCP_STAT[21:20], a safety interlock only, because it
+	  survives a warm reset), then sends ONE SCMI BASE PROTOCOL_VERSION on
+	  the NS HP channel.  Only a SUCCESS reply composed by the SC on this
+	  boot earns the flips, on the blob handed to Linux:
+	    - /firmware/scmi and /soc/mailbox@ff63c404  status -> "okay"
+	    - /cpus/cpu@N  clocks -> <protocol@14 0>, power-domains ->
+	      <protocol@13 0>, power-domain-names = "perf"
+	  Otherwise one line names the reason and the blob is untouched, so
+	  Linux runs with no cpufreq at the clock the SPL left.  A blob without
+	  the package (the vendor-leaf DTB) is left as it is.  Nothing is
+	  created and no phandle is minted.
+
+	  It also guards U-Boot's OWN control FDT from board_fix_fdt(): with no
+	  SC it deletes /firmware/scmi before DM binds U-Boot's SCMI agent.
+	  One query per boot, cached and shared by both call sites.
+
+	  Say N (the default) for every build whose BL30 is not the open SC: a
+	  BASE probe into a vendor SCPI BL30 is an untested message to foreign
+	  firmware.
+
+	  Design: amlogic/software/boot/g12/sm1-linux-scmi-design.md section 3.
+
+config MESON_G12A_LIBRE_SECURE_LAYOUT
+	bool "Open TF-A secure world in the first 16 MiB of DRAM (G12A/G12B/SM1)"
+	depends on MESON_G12A
+	help
+	  Say Y on a G12A / G12B / SM1 board that boots OUR open TF-A, whose
+	  BL31 lives at 0x00100000 and whose SMC mailboxes live at 0x00200000:
+
+	    0x00000000 +  1 MiB  NS reserved    empty (see below)
+	    0x00100000 +  1 MiB  S-only, EL3    BL31
+	    0x00200000 +  1 MiB  S<->NS shared  SMC shared mem + storage mailboxes
+	    0x00300000 +  1 MiB  NS reserved    ramoops
+	    0x00400000 + 12 MiB  OP-TEE band    when OP-TEE runs, else Linux
+	    0x01000000 ->        NS free        BL33, then Linux
+
+	  This is the GXL block of CONFIG_MESON_GX_LIBRE_SECURE_LAYOUT exactly
+	  (operator decisions 2026-09-26 and 2026-10-17).  On GXL the first megabyte
+	  is a read-only ROM mirror (hwrom@0) that neither EL3 nor Linux can
+	  use, so its reservation costs nothing.  G12A/G12B/SM1 have no mirror
+	  -- the low megabyte is ordinary, allocator-owned DRAM, measured 2026-
+	  08-21 on A311D and S905D3 -- so reserving it costs one megabyte per
+	  board.  That price buys back decision A5's property, which the brief
+	  bottom-megabyte divergence had given up: ramoops has ONE address,
+	  0x00300000, across all families, and no pstore-aware tool needs a
+	  family test.
+
+	  Like the GXL symbol this is compile-time rather than a device-tree
+	  property, because the LIBRE and the VENDOR build of a board share one
+	  board DTS and one kernel DTB: aml-a311d-cc_defconfig takes the vendor
+	  bl31.img, which loads at 0x05100000, while the -libre build runs the
+	  open TF-A at 0x00100000.  The DTB cannot tell which firmware is
+	  flashed, so the FIRMWARE DESCRIBES ITSELF -- U-Boot patches the blob
+	  it hands Linux in ft_board_setup(), which runs on whatever DTB is
+	  actually being booted, not merely on U-Boot's own control FDT.
+
+	  Say Y and this build will, in meson_init_reserved_memory():
+	    - add /reserved-memory nodes for ramoops (MAPPED, compatible
+	      "ramoops"), the 2 MiB secure band and the mailbox MiB (both
+	      no-map),
+	    - drop secmon@5000000 and secmon@5300000, because BL31 and a BL32
+	      are not there in this build,
+	    - drop any OTHER ramoops node, because pstore binds exactly one,
+	    - add the OP-TEE band and /firmware/optee only when OP-TEE answers
+	      OPTEE_SMC_CALLS_UID.
+	  It also moves the FIT's BL31 load address out of 0x05100000 -- see
+	  the atf node in arch/arm/dts/meson-g12-common-u-boot.dtsi.
+
+	  BL33 does NOT move on this family.  CONFIG_TEXT_BASE stays
+	  0x01000000, which is now the first byte ABOVE the block -- the same
+	  geometry GXL has, except GXL's vendor BL33 had to be moved there
+	  while this family's already sat at it.  The OP-TEE band now abuts
+	  BL33 with zero clearance: growing OP-TEE past 12 MiB would grow the
+	  block into BL33, and is a constants-and-rebuild change, not a
+	  one-property edit.
+
+	  Say N (the default) for the shipping vendor-firmware build, which is
+	  left byte-identical.
+
+	  Design: amlogic/software/boot/design/libre-secure-block-and-optee.md;
+	  history in dram-reservations.md sections 9, 10a, 10b (A4/A5) and 10i.
 
 config SYS_SOC
 	default "meson"
@@ -97,17 +1216,79 @@ config SYS_BOARD
 	  Based on this option board/<CONFIG_SYS_VENDOR>/<CONFIG_SYS_BOARD> will
 	  be used.
 
-if MESON_GX && SPL
+if SPL
 config SPL_SYS_MALLOC_F_LEN
 	default 0x2000
 
+if MESON_GX
+
+config MESON_TIMER_RATE_FIXUP
+	bool "Publish a known CNTPCT_EL0 rate to get_tbclk()"
+	depends on ARM64 && SYS_ARCH_TIMER
+	default y if MESON_GXL
+	select ARMV8_CNTFRQ_BROKEN
+	help
+	  udelay() computes its target as usec * get_tbclk() / 1000000, and
+	  get_tbclk() reads CNTFRQ_EL0.  On this SPL that register reads ZERO:
+	  CONFIG_COUNTER_FREQUENCY is 0, and the only msr that would consume it
+	  (arch/arm/cpu/armv8/start.S) sits behind branch_if_not_highest_el
+	  while this stage runs at EL1, where CNTFRQ_EL0 is read-only.  With a
+	  zero rate the target is start + 1 tick, so the first get_ticks()
+	  comparison already passes and EVERY udelay() returns after the cost
+	  of two counter reads -- measured on AML-S905X-CC as ~4.09 us for
+	  udelay(1), udelay(100) and udelay(1000) alike.  Every settle in DRAM
+	  bring-up collapses to that one value.
+
+	  Say Y to measure the counter against ISA_TIMERE (the BootROM's 1 MHz
+	  counter) over 10 ms at the top of board_init_f(), before any udelay()
+	  can run, write the result into gd->arch.timer_rate_hz, and select
+	  ARMV8_CNTFRQ_BROKEN so get_tbclk() prefers it.  The rate is not one
+	  constant: the dram-bench stage measured 333.33 MHz on AML-S905X-CC,
+	  and the DRAM SPL counts 600 MHz on AML-S805X-AC-V2 and
+	  AML-S905X-CC-V2.  MESON_TIMER_RATE_HZ is used only if ISA_TIMERE
+	  does not advance.  The preference
+	  is conditional on the field being non-zero, so a build that does not
+	  set it keeps the old mrs behaviour exactly.
+
+config MESON_TIMER_RATE_HZ
+	int "CNTPCT_EL0 tick rate in Hz"
+	depends on MESON_TIMER_RATE_FIXUP
+	default 333333333 if MESON_GXL
+	default 0
+	help
+	  The rate the generic counter actually ticks at, which is a property
+	  of the SoC and NOT of anything this tree configures.
+
+	  333333333 is the GXL figure and it is a MEASUREMENT, not a databook
+	  value: the dram-bench clock stage counted 33333978 CNTPCT ticks
+	  against 100002 ISA_TIMERE ticks on AML-S905X-CC, giving 333332563 Hz,
+	  which is 1000/3 MHz to within 0.00007%.  Do not read that agreement
+	  as more than it is -- the derivation assumes ISA_TIMERE's input
+	  select 1 really is 1 us, and nothing in this tree proves the decade.
+	  What it does exclude is 24000000, the value an arch timer is usually
+	  given and which the dead benchmark used to assume: that is wrong here
+	  by 13.9x.
+
+	  Erring HIGH is the safe direction -- delays come out proportionally
+	  long, and a gross overestimate trips the SPL's 8 s watchdog, which is
+	  loud.  Erring low shortens every settle silently, which is the defect
+	  this symbol exists to fix.  Leave it 0 to keep the old behaviour.
+
 choice
 	prompt "DRAM rank mode"
+	default DRAM_ONE_RANK
 	help
-	  Choose rank mode. This heavily depends on the board and you should
-	  leave the board default set if you don't know what this is.
-	  If you choose the wrong rank mode DRAM init in SPL may either fail
-	  or in rare occasions require multiple resets before it succeeds.
+	  How many ranks the fitted part has.  This depends on the board; a
+	  board config fragment should state it rather than leave it to the
+	  default.
+
+	  The default is deliberate and is the safe end of the choice, not a
+	  guess: one rank programs one DMC range, so a two-rank board built
+	  without a fragment loses its upper rank and reports the smaller size
+	  correctly.  It can no longer fold the window -- the address map is
+	  the same either way and it is sized to one rank, and dram_init()
+	  narrows the range decode to whatever detection actually found.  The
+	  wrong choice therefore costs capacity, never correctness.
 
 config DRAM_ONE_RANK
 	bool "One rank"
@@ -142,6 +1323,205 @@ config DRAM_DDR4
 endif
 endchoice
 
+config MESON_DRAM_DETECT_REF_OFFSET
+	hex "Size-detect reference cell, as an offset into DRAM"
+	default 0x1000000
+	help
+	  Offset of the size detector's reference cell from CFG_SYS_SDRAM_BASE.
+	  The default 16 MB is inside rank 0 for every size this DMC can be
+	  programmed with, and -- crucially -- is at offset 0 within its MB,
+	  while every marker the detector writes sits at 0xffffc within its own.
+	  No power-of-2 fold can therefore map a marker onto the reference, so
+	  under the default the reference cell is the one word in the detector
+	  that only the detector itself writes.
+
+	  Moving it ONTO a marker address is what makes the bail path reachable
+	  on healthy silicon.  The marker loop then clobbers the reference with
+	  `nonce ^ size_mb`, the reference check fails against a real readback
+	  rather than an injected constant, and dram_init() refuses:
+
+	    (128 << 20) - 4   the LAST marker written  -> why=3 (bus-echo arm)
+	    any other marker                           -> why=1 (size/map arm)
+
+	  This is a broken WINDOW, not a fault injection: every write, readback
+	  and compare on the path is the shipping one.  It exists so N178's
+	  "DDR: size detect REFUSED why=" can be observed on hardware, which no
+	  healthy board can otherwise produce.  Do not ship a non-default value
+	  -- a board that boots with one has no size detection at all.
+
+config MESON_DRAM_PGSR0_TIMEOUT_US
+	int "PGSR0 all-done wait, in microseconds (0 = the built-in 500000)"
+	default 0
+	help
+	  Bound on the wait for the PHY to report every done bit in PGSR0.  The
+	  built-in 500000 (0.5 s) is ~3 orders of magnitude over what this
+	  hardware takes, so on a healthy board the wait never expires and
+	  `PGSR0 timeout!` -- with the whole retry ladder behind it -- cannot be
+	  observed.
+
+	  Set it to something the PHY cannot possibly meet (100 works) and the
+	  wait genuinely expires: the attempt fails with err=-1, the ladder
+	  prints `DDR attempt n/3 failed`, re-enters from reset, and finally
+	  gives up with `DDR init FAILED after 3 attempts`.  Every one of those
+	  lines is shipping code taking a real timeout -- nothing is injected.
+
+	  This is N27's residual (a): that failure path has never printed on a
+	  production image.  Leave it at 0 for anything that boots a board for
+	  real; a short bound means DRAM never trains.
+
+config MESON_DRAM_PCTL_STATE_TIMEOUT_US
+	int "PCTL state wait, in microseconds (0 = the built-in 100000)"
+	default 0
+	help
+	  Bound shared by every PCTL state wait -- the GO->ACCESS transition in
+	  meson_dram_finalise_init() and the bit-0 waits behind WAIT_FOR().
+
+	  Shortened, it reaches the other two messages N27 left unexercised:
+	  `PCTL ACCESS timeout! STAT=%08x` and
+	  `DDR wait <who>: bit0 never set, val=%08x (raw)`.  Same reasoning and
+	  same caveat as MESON_DRAM_PGSR0_TIMEOUT_US above: a compile-time
+	  constant, inert at 0, and not something to ship.
+
+config MESON_DRAM_PCTL_ACCESS_TIMEOUT_US
+	int "PCTL GO->ACCESS wait, in microseconds (0 = follow the shared bound)"
+	default 0
+	help
+	  The GO->ACCESS wait in meson_dram_finalise_init() only.  Inert at 0,
+	  where it follows the shared bound exactly as before.
+
+	  It exists because of two measurements, 2026-08-30, and it does NOT do
+	  what it was added to do:
+
+	  1. Shortening the shared MESON_DRAM_PCTL_STATE_TIMEOUT_US never
+	     reaches this wait at all -- the bit-0 waits earlier in the sequence
+	     take the same bound and fail first every time, so
+	     `PCTL ACCESS timeout!` is MASKED by `bit0 never set`.  Separating
+	     the bounds is necessary to reach it.
+	  2. Necessary, but not sufficient: with this symbol at 100 AND at 1,
+	     the board boots normally, 1024 MB, try 1.  The controller is
+	     already in ACCESS on the FIRST read, so the loop never iterates and
+	     no bound, however small, can make it expire.
+
+	  So `PCTL ACCESS timeout!` is NOT provocable by timing on a healthy
+	  board.  It is a real guard for a real wedge -- the one that held the
+	  console dark before it was bounded -- and only a controller that
+	  genuinely never reaches ACCESS will print it.  Do not read its silence
+	  as the guard being untested; read it as the transition being fast.
+
+config MESON_DRAM_DETECT_MIN_MB
+	int "Smallest size-detect marker, in MB (0 = the built-in 128)"
+	default 0
+	help
+	  The smallest marker the size detector writes, and so the LAST word its
+	  marker loop stores.
+
+	  Set ABOVE the detect maximum (rank0 + rank1) and both marker loops get
+	  an empty range: nothing is written, nothing is read back, the
+	  reference still holds the nonce, and no cell holds its own marker.
+	  That is exactly the state why=2 names, and it is the only way to reach
+	  it -- a misordered window is a real configuration fault, not an
+	  injected value, and refusing is the correct response.
+
+	  Leave at 0 for anything real.  Inert there.
+
+config MESON_DRAM_FAIL_FIRST_ATTEMPTS
+	int "Apply the short PGSR0 bound to only the first N attempts (0 = all)"
+	default 0
+	help
+	  The recovery instrument.  With MESON_DRAM_PGSR0_TIMEOUT_US shortened,
+	  a single constant bound fails EVERY attempt identically, so the ladder
+	  can only ever reach the give-up line.  Set this to 1 and only attempt
+	  1 gets the short bound; attempt 2 gets the built-in 0.5 s and
+	  succeeds, which is the only way to print `try 2` on a production
+	  image -- the recovery half of N27, previously seen only on the
+	  instrument lineage.
+
+	  At 0 the entire arm, including the attempt counter it reads, is
+	  compiled out, so the shipping stage carries none of it.
+
+config MESON_DRAM_PHY_RESET_ASSERT
+	bool "Assert DMC_SOFT_RST before releasing it (GXL)"
+	default y
+	help
+	  The GXL vendor BL2 asserts DMC_SOFT_RST/RST1 before releasing them, so
+	  a retry re-enters DRAM init from reset rather than from the wreckage
+	  of the attempt that just failed.  N27 restored that assert; whether it
+	  is what makes the ladder RECOVER, as opposed to the bounded waits that
+	  landed alongside it, was never separated.
+
+	  Turning this off is that separation, and nothing else: with the
+	  recovery instrument armed, does attempt 2 still come up?
+
+	  MEASURED 2026-08-30: it does.  With the assert off, the board recovers
+	  at `try 2` exactly as with it on, and a no-induced-failure control with
+	  the assert off boots normally on try 1.  So the BOUNDED WAITS are what
+	  recover; re-entry from reset is not load-bearing for a retry entered
+	  after a timeout.  It says nothing about a retry entered from genuinely
+	  wedged state, which this arm cannot construct.
+
+	  Say y -- it matches the GXL vendor BL2.  n is a measurement arm, not a
+	  configuration.
+
+config MESON_DRAM_ZQ_REPORT
+	bool "Print the PHY's ZQ calibration result after training"
+	default n
+	help
+	  Reads back DDR0_PUB_ZQCR, ZQ0PR/ZQ0SR and ZQ1PR/ZQ1SR after training
+	  and memtest, and prints the programmed value beside the calibrated
+	  one.
+
+	  Nothing in this tree has ever read the SR side, which is why the PHY
+	  drive/ODT/ZQ settings are on record as never measured (N46).  The
+	  programmed value alone cannot distinguish "calibration converged on
+	  what we asked for" from "it railed" or "it was overridden" -- only the
+	  result register separates those.
+
+	  Costs one printf, so it is off by default and the shipping stage is
+	  unchanged.  Turn it on for a measurement boot.
+
+config MESON_DRAM_ZQ0PR_OVERRIDE
+	hex "Override PUB_ZQ0PR (0 = the board's own value)"
+	default 0x0
+	help
+	  Measurement arm for N46, not a configuration.  The first ZQ readback
+	  found ZQ0 and ZQ1 programmed identically and reporting differently
+	  (sr0 = 0x30, sr1 = 0), and no vendor authority we hold defines the
+	  ZQnSR fields -- secure_apb.h and cmd_ddr_test.c both give the address
+	  only -- so the result cannot be decoded into ohms.
+
+	  What can be established without a decode is whether each SR RESPONDS
+	  to its PR.  Changing ZQ0's program value and watching sr0 is the
+	  positive control for that; it is the arm that says the readback is a
+	  live calibration result rather than a constant.
+
+	  Changes the PHY's drive/ODT impedance, so a wrong value can cost
+	  training.  Leave at 0.
+
+config MESON_DRAM_ZQ1PR_OVERRIDE
+	hex "Override PUB_ZQ1PR (0 = the board's own value)"
+	default 0x0
+	help
+	  The other half of the N46 arm above.  If sr1 stays 0 while ZQ1's
+	  program value changes, ZQ1's calibration does not run on this board --
+	  which would explain the asymmetry without any field decode at all.
+
+	  Leave at 0.
+
+config MESON_GXL_VDDEE_PWM_B
+	hex "GXL VDDEE PWM_B duty word (0 = do not program VDDEE)"
+	depends on MESON_GXL
+	default 0x0
+	help
+	  {high, low} duty pair written to PWM_PWM_B by meson_power_init()
+	  immediately before dram_init().  On boards where PWM_B carries
+	  VDDEE, the DDR PHY's digital logic and its master delay lines run
+	  on this rail, so leaving it at the PWM reset default calibrates the
+	  PHY against the wrong reference.
+
+	  This is a PER-BOARD value taken from that board's own vendor BL2
+	  voltage table -- do not copy it between boards.  0 leaves the rail
+	  alone, which is what the SPL did before this option existed.
+
 config DRAM_DQS_CORR
 	bool "Enable DQS correction"
 
@@ -151,11 +1531,56 @@ config DRAM_CLK
 	help
 	  This option contains the DRAM clock to use in MHz.
 
-config DRAM_SIZE
-	int "DRAM size"
-	default 1024
+config DRAM_CLK_FALLBACK1
+	int "DDR3: first fallback DRAM clock (0 = none)"
+	depends on MESON_GXL && DRAM_DDR3
+	default 0
 	help
-	  This option contains the DRAM size. Units in MB.
+	  The clock dram_init() retries at when an attempt at DRAM_CLK fails
+	  training, detects less than it trained, or fails the memtest.  The
+	  ladder puts memory before clock: every clock is tried with both
+	  ranks before any is tried with one, and a board that ends below
+	  DRAM_CLK, or below its two-rank size after rank 1 trained, boots
+	  with a WARNING line.  Must be below DRAM_CLK, at least 800 (the
+	  slowest sourced speed bin in dram-timings-gx.h) and a multiple of
+	  24 (the DDR PLL step above 800 MHz).
+
+config DRAM_CLK_FALLBACK2
+	int "DDR3: second fallback DRAM clock (0 = none)"
+	depends on MESON_GXL && DRAM_DDR3
+	default 0
+	help
+	  The next rung below DRAM_CLK_FALLBACK1, with the same rules; only
+	  used when DRAM_CLK_FALLBACK1 is set.
+
+config DRAM_DDR3_N831_FLOORS
+	bool "DDR3: floor tMOD, tZQCS and tZQoper at their datasheet minimums"
+	depends on MESON_GXL && DRAM_DDR3
+	default y
+	help
+	  The vendor's mod 12, zqcs 64 and zqcl 136 are short at 912 MHz
+	  against tMOD max(12tCK, 15 ns), tZQCS max(64tCK, 80 ns) and tZQoper
+	  max(256tCK, 320 ns); this programs 14 / 73 / 292 there, and the
+	  clock-scaled values at other clocks.  Say n only to reproduce the
+	  vendor literals.  Measured on one AML-S905X-CC unit at 912 MHz: 3 of
+	  3 clean boots, generator bandwidth equal to the literals (gxl:N831,
+	  round n869).
+
+config DRAM_DDR3_ABOVE_2133
+	bool "DDR3: allow 1067..1498 MHz with every time-bound field clock-scaled"
+	depends on MESON_GXL && DRAM_DDR3
+	help
+	  Off by default.  Lifts the tFAW guard's 1066 MHz limit (DDR3-2133 is
+	  the fastest DDR3 bin; no bin is defined above it) and holds each
+	  time-bound field at no less than its DDR3-2133 minimum: tRP/tRCD
+	  13.09 ns, tRAS 33 ns, tRC 46.09 ns, tRRD 6 ns, tMOD 15 ns, tZQCS
+	  80 ns, tZQoper max(256 nCK, 320 ns), on top of the always-on floors
+	  (tRTP/tWTR/tWR/tRFC/tXP/tCKE/tXPDLL).  CL stays 14 and CWL 10 (CL
+	  15/16 are Reserved in the MR0 table) and the MR0 WR code clamps at
+	  16, so both run below spec by construction.  An extrapolation, not
+	  a qualified operating point: on one unit at room temperature 1080
+	  to 1296 MHz passed (rounds n830, n833) and 1392 failed after
+	  training (n833).
 
 choice
 	prompt "Enable DRAM 2T mode"
@@ -204,5 +1629,6 @@ config SPL_MESON_GX_VCCK_1120MV
 
 endchoice
 
-endif
-endif
+endif # MESON_GX
+endif # SPL
+endif # ARCH_MESON

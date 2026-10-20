@@ -738,6 +738,13 @@ static int do_read(struct fsg_common *common)
 		 * If this means reading 0 then we were asked to read past
 		 *	the end of file. */
 		amount = min(amount_left, FSG_BUFLEN);
+		/*
+		 * L43: fill at most READ_FILL per call (16 KiB by default, as
+		 * Linux's FSG_BUFLEN, measured on MT8188 MTU3) from the 128 KiB
+		 * buffer (a 16 KiB allocation hung, L42).
+		 */
+		amount = min(amount,
+			     (unsigned int)CONFIG_USB_GADGET_MASS_STORAGE_READ_FILL);
 		partial_page = file_offset & (PAGE_CACHE_SIZE - 1);
 		if (partial_page > 0)
 			amount = min(amount, (unsigned int) PAGE_CACHE_SIZE -
@@ -1180,6 +1187,175 @@ static int do_read_capacity(struct fsg_common *common, struct fsg_buffhd *bh)
 						/* Max logical block */
 	put_unaligned_be32(curlun->blksize, &buf[4]);	/* Block length */
 	return 8;
+}
+
+/*
+ * Logical block provisioning (SBC-3): a LUN whose ums has erase_sector and
+ * is writable serves UNMAP, and says so in READ CAPACITY(16) (LBPME) and in
+ * the Block Limits and Logical Block Provisioning VPD pages. Every other LUN
+ * answers exactly as before.
+ */
+#define FSG_UNMAP_MAX_LBAS	0x400000	/* per command: mmc_berase's largest chunk */
+#define FSG_UNMAP_MAX_DESC	64		/* 8 + 64 * 16 bytes of parameter list */
+
+static bool fsg_can_unmap(struct fsg_common *common)
+{
+	return common->lun < common->nluns && !common->luns[common->lun].ro &&
+	       ums[common->lun].erase_sector;
+}
+
+static int do_read_capacity_16(struct fsg_common *common, struct fsg_buffhd *bh)
+{
+	struct fsg_lun	*curlun = &common->luns[common->lun];
+	u8		*buf = (u8 *)bh->buf;
+
+	/* Only READ CAPACITY(16), with the obsolete LBA field zero */
+	if ((common->cmnd[1] & 0x1f) != SAI_READ_CAPACITY_16 ||
+	    get_unaligned_be32(&common->cmnd[2]) || get_unaligned_be32(&common->cmnd[6])) {
+		curlun->sense_data = SS_INVALID_FIELD_IN_CDB;
+		return -EINVAL;
+	}
+
+	memset(buf, 0, 32);
+	put_unaligned_be32(0, &buf[0]);			/* Max logical block, high */
+	put_unaligned_be32(curlun->num_sectors - 1, &buf[4]);
+	put_unaligned_be32(curlun->blksize, &buf[8]);	/* Block length */
+	if (fsg_can_unmap(common))
+		buf[14] = 0x80;		/* LBPME; LBPRZ 0: an unmapped block reads back unspecified */
+	return 32;
+}
+
+/* INQUIRY with EVPD: the supported list, and the two provisioning pages when the LUN can unmap. */
+static int do_inquiry_vpd(struct fsg_common *common, struct fsg_buffhd *bh)
+{
+	struct fsg_lun	*curlun = &common->luns[common->lun];
+	u8		*buf = (u8 *)bh->buf;
+	bool		unmap = fsg_can_unmap(common);
+
+	memset(buf, 0, 64);
+	buf[0] = TYPE_DISK;
+	buf[1] = common->cmnd[2];
+	switch (common->cmnd[2]) {
+	case 0x00:			/* Supported VPD pages */
+		buf[3] = unmap ? 3 : 1;
+		buf[4] = 0x00;
+		buf[5] = 0xb0;
+		buf[6] = 0xb2;
+		return 4 + buf[3];
+	case 0xb0:			/* Block Limits */
+		if (!unmap)
+			break;
+		buf[3] = 0x3c;
+		put_unaligned_be32(FSG_UNMAP_MAX_LBAS, &buf[20]);
+		put_unaligned_be32(FSG_UNMAP_MAX_DESC, &buf[24]);
+		return 4 + 0x3c;
+	case 0xb2:			/* Logical Block Provisioning */
+		if (!unmap)
+			break;
+		buf[3] = 4;
+		buf[5] = 0x80;		/* LBPU: UNMAP is supported */
+		return 8;
+	}
+	curlun->sense_data = SS_INVALID_FIELD_IN_CDB;
+	return -EINVAL;
+}
+
+/*
+ * UNMAP: receive the parameter list, check every block descriptor, then
+ * discard each range through ums erase_sector. Nothing is discarded unless
+ * the whole list is valid.
+ */
+static int do_unmap(struct fsg_common *common)
+{
+	struct fsg_lun		*curlun = &common->luns[common->lun];
+	struct fsg_buffhd	*bh = common->next_buffhd_to_fill;
+	u32			len = common->data_size_from_cmnd;
+	u32			n, i, actual;
+	u64			lba, total = 0;
+	u32			cnt;
+	u8			*p;
+	int			rc;
+
+	if (curlun->ro) {
+		curlun->sense_data = SS_WRITE_PROTECTED;
+		return -EINVAL;
+	}
+	if (!ums[common->lun].erase_sector) {
+		curlun->sense_data = SS_INVALID_COMMAND;
+		return -EINVAL;
+	}
+	if (common->cmnd[1] & 0x01) {		/* ANCHOR: not supported */
+		curlun->sense_data = SS_INVALID_FIELD_IN_CDB;
+		return -EINVAL;
+	}
+	if (len == 0)
+		return 0;			/* No list: nothing to unmap */
+	if (len < 8 || len > 8 + 16 * FSG_UNMAP_MAX_DESC) {
+		curlun->sense_data = SS_PARAMETER_LIST_LENGTH_ERROR;
+		return -EINVAL;
+	}
+
+	/* One short bulk-out transfer; the request is rounded up to whole packets */
+	bh->outreq->length = roundup(len, 512);
+	bh->bulk_out_intended_length = len;
+	bh->outreq->short_not_ok = 0;
+	START_TRANSFER_OR(common, bulk_out, bh->outreq,
+			  &bh->outreq_busy, &bh->state)
+		return -EIO;
+	common->next_buffhd_to_fill = bh->next;
+	while (bh->state != BUF_STATE_FULL) {
+		rc = sleep_thread(common);
+		if (rc)
+			return rc;
+	}
+	common->next_buffhd_to_drain = bh->next;
+	bh->state = BUF_STATE_EMPTY;
+	if (bh->outreq->status) {
+		curlun->sense_data = SS_COMMUNICATION_FAILURE;
+		return -EIO;
+	}
+	actual = bh->outreq->actual;
+	common->usb_amount_left -= min(actual, common->usb_amount_left);
+	common->residue -= min(actual, common->residue);
+	if (actual < len) {
+		common->short_packet_received = 1;
+		curlun->sense_data = SS_PARAMETER_LIST_LENGTH_ERROR;
+		return -EIO;
+	}
+
+	p = (u8 *)bh->buf;
+	n = get_unaligned_be16(&p[2]);		/* Block descriptor data length */
+	if (n % 16 || 8 + n > len || n / 16 > FSG_UNMAP_MAX_DESC) {
+		curlun->sense_data = SS_INVALID_FIELD_IN_PARAMETER_LIST;
+		return -EIO;
+	}
+	n /= 16;
+	for (i = 0; i < n; i++) {
+		lba = ((u64)get_unaligned_be32(&p[8 + 16 * i]) << 32) |
+		      get_unaligned_be32(&p[12 + 16 * i]);
+		cnt = get_unaligned_be32(&p[16 + 16 * i]);
+		if (lba > curlun->num_sectors || cnt > curlun->num_sectors - lba) {
+			curlun->sense_data = SS_LOGICAL_BLOCK_ADDRESS_OUT_OF_RANGE;
+			return -EIO;
+		}
+		total += cnt;
+	}
+	if (total > FSG_UNMAP_MAX_LBAS) {
+		curlun->sense_data = SS_INVALID_FIELD_IN_PARAMETER_LIST;
+		return -EIO;
+	}
+	for (i = 0; i < n; i++) {
+		lba = get_unaligned_be32(&p[12 + 16 * i]);	/* < num_sectors, checked above */
+		cnt = get_unaligned_be32(&p[16 + 16 * i]);
+		if (!cnt)
+			continue;
+		rc = ums[common->lun].erase_sector(&ums[common->lun], lba, cnt);
+		if (rc) {
+			curlun->sense_data = SS_WRITE_ERROR;
+			return -EIO;
+		}
+	}
+	return 0;
 }
 
 static int do_read_header(struct fsg_common *common, struct fsg_buffhd *bh)
@@ -1804,11 +1980,20 @@ static int do_scsi_command(struct fsg_common *common)
 	switch (common->cmnd[0]) {
 
 	case SC_INQUIRY:
-		common->data_size_from_cmnd = common->cmnd[4];
+		/* SPC-3: a 16-bit allocation length in bytes 3-4 (byte 3 was reserved in SCSI-2) */
+		common->data_size_from_cmnd = get_unaligned_be16(&common->cmnd[3]);
 		reply = check_command(common, 6, DATA_DIR_TO_HOST,
-				      (1<<4), 0,
+				      (1<<1) | (1<<2) | (3<<3), 0,
 				      "INQUIRY");
-		if (reply == 0)
+		if (reply == 0 && (common->cmnd[1] & 0x01) &&
+		    common->lun < common->nluns)
+			reply = do_inquiry_vpd(common, bh);
+		else if (reply == 0 && (common->cmnd[1] || common->cmnd[2])) {
+			/* EVPD for an unsupported LUN, CmdDt, or a page code without EVPD */
+			if (common->lun < common->nluns)
+				curlun->sense_data = SS_INVALID_FIELD_IN_CDB;
+			reply = -EINVAL;
+		} else if (reply == 0)
 			reply = do_inquiry(common, bh);
 		break;
 
@@ -1896,6 +2081,26 @@ static int do_scsi_command(struct fsg_common *common)
 				      "READ CAPACITY");
 		if (reply == 0)
 			reply = do_read_capacity(common, bh);
+		break;
+
+	case SC_SERVICE_ACTION_IN_16:
+		common->data_size_from_cmnd =
+				get_unaligned_be32(&common->cmnd[10]);
+		reply = check_command(common, 16, DATA_DIR_TO_HOST,
+				      (1<<1) | (0xff<<2) | (0xf<<10) | (1<<14), 1,
+				      "SERVICE ACTION IN(16)");
+		if (reply == 0)
+			reply = do_read_capacity_16(common, bh);
+		break;
+
+	case SC_UNMAP:
+		common->data_size_from_cmnd =
+				get_unaligned_be16(&common->cmnd[7]);
+		reply = check_command(common, 10, DATA_DIR_FROM_HOST,
+				      (1<<1) | (1<<6) | (3<<7), 1,
+				      "UNMAP");
+		if (reply == 0)
+			reply = do_unmap(common);
 		break;
 
 	case SC_READ_HEADER:
@@ -2225,14 +2430,16 @@ reset:
 
 	/* Enable the endpoints */
 	d = fsg_ep_desc(common->gadget,
-			&fsg_fs_bulk_in_desc, &fsg_hs_bulk_in_desc);
+			&fsg_fs_bulk_in_desc, &fsg_hs_bulk_in_desc,
+			&fsg_ss_bulk_in_desc);
 	rc = enable_endpoint(common, fsg->bulk_in, d);
 	if (rc)
 		goto reset;
 	fsg->bulk_in_enabled = 1;
 
 	d = fsg_ep_desc(common->gadget,
-			&fsg_fs_bulk_out_desc, &fsg_hs_bulk_out_desc);
+			&fsg_fs_bulk_out_desc, &fsg_hs_bulk_out_desc,
+			&fsg_ss_bulk_out_desc);
 	rc = enable_endpoint(common, fsg->bulk_out, d);
 	if (rc)
 		goto reset;
@@ -2443,6 +2650,16 @@ static struct fsg_common *fsg_common_init(struct fsg_common *common,
 	struct fsg_lun *curlun;
 	int nluns, i, rc;
 
+	/*
+	 * Every block-device call moves whole 512-byte blocks: a buffer or a
+	 * READ fill that is not a non-zero multiple of 512 would make a call
+	 * move 0 blocks, and every READ fail with -EIO.
+	 */
+	BUILD_BUG_ON(!FSG_BUFLEN || FSG_BUFLEN % 512);
+	BUILD_BUG_ON(!CONFIG_USB_GADGET_MASS_STORAGE_READ_FILL ||
+		     CONFIG_USB_GADGET_MASS_STORAGE_READ_FILL % 512 ||
+		     CONFIG_USB_GADGET_MASS_STORAGE_READ_FILL > FSG_BUFLEN);
+
 	/* Find out how many LUNs there should be */
 	nluns = ums_count;
 	if (nluns < 1 || nluns > FSG_MAX_LUNS) {
@@ -2488,6 +2705,8 @@ static struct fsg_common *fsg_common_init(struct fsg_common *common,
 
 	for (i = 0; i < nluns; i++) {
 		common->luns[i].removable = 1;
+		/* fsg_lun_open() takes ->ro from ->initially_ro */
+		common->luns[i].initially_ro = ums[i].ro;
 
 		rc = fsg_lun_open(&common->luns[i], ums[i].num_sectors, ums->block_dev.blksz, "");
 		if (rc)
@@ -2551,10 +2770,24 @@ error_release:
 
 static void fsg_common_release(struct fsg_common *common)
 {
-	/* If the thread isn't already dead, tell it to exit now */
+	/*
+	 * If the thread isn't already dead, tell it to exit now.
+	 *
+	 * There is no fsg thread here: fsg_main_thread() only runs inside the
+	 * ums command's loop, which has returned by the time the gadget is
+	 * unbound, and wait_for_completion() is a no-op. So run the exit the
+	 * thread would have run -- cancel the transfers and disable the bulk
+	 * endpoints (do_set_interface(common, NULL)) -- before the buffers and
+	 * the common go away. Without it the endpoints stay enabled in the
+	 * gadget API (usb_ep->enabled), so the next gadget's usb_ep_enable() on
+	 * them returns 0 without reaching the UDC and every request it queues
+	 * there fails; and udc_stop() later completes the stale requests into
+	 * the freed common.
+	 */
 	if (common->state != FSG_STATE_TERMINATED) {
 		raise_exception(common, FSG_STATE_EXIT);
 		wait_for_completion(&common->thread_notifier);
+		handle_exception(common);
 	}
 
 	if (likely(common->luns)) {
@@ -2642,6 +2875,7 @@ static void fsg_unbind(struct usb_configuration *c, struct usb_function *f)
 	fsg_common_release(fsg->common);
 	free(fsg->function.descriptors);
 	free(fsg->function.hs_descriptors);
+	free(fsg->function.ss_descriptors);
 	kfree(fsg);
 }
 
@@ -2686,6 +2920,18 @@ static int fsg_bind(struct usb_configuration *c, struct usb_function *f)
 			fsg_fs_bulk_out_desc.bEndpointAddress;
 		f->hs_descriptors = usb_copy_descriptors(fsg_hs_function);
 		if (unlikely(!f->hs_descriptors)) {
+			free(f->descriptors);
+			return -ENOMEM;
+		}
+	}
+	if (gadget_is_superspeed(gadget)) {
+		fsg_ss_bulk_in_desc.bEndpointAddress =
+			fsg_fs_bulk_in_desc.bEndpointAddress;
+		fsg_ss_bulk_out_desc.bEndpointAddress =
+			fsg_fs_bulk_out_desc.bEndpointAddress;
+		f->ss_descriptors = usb_copy_descriptors(fsg_ss_function);
+		if (unlikely(!f->ss_descriptors)) {
+			free(f->hs_descriptors);
 			free(f->descriptors);
 			return -ENOMEM;
 		}

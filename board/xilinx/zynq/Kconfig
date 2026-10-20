@@ -4,6 +4,37 @@
 
 if ARCH_ZYNQ
 
+config ZYNQ_ADRV9009
+	bool "HamGeek/RIGUKE XC7Z100 + ADRV9009 board-specific code"
+	select BINMAN
+	help
+	  Build board/xilinx/zynq/zynq-adrv9009/board.c into U-Boot proper. It
+	  supplies misc_init_r(), which derives a deterministic ethaddr and
+	  serial# from the QSPI NOR factory unique ID (see the file header for
+	  the full fallback chain), and set_dfu_alt_info(), the QSPI NOR DFU
+	  alternate-setting map. Without it the board takes a fresh random MAC
+	  on every boot and Linux loses its permanent MAC.
+
+	  Also selects BINMAN, which packs spl/boot.bin + u-boot.img into the
+	  single SPI NOR bootloader blob u-boot-zynq-nor.bin described by
+	  arch/arm/dts/zynq-adrv9009-u-boot.dtsi. ARCH_ZYNQ does not select
+	  BINMAN (only ARCH_ZYNQMP does), so without this the binman node is
+	  never processed and the build silently emits two loose artifacts.
+
+config ZYNQ_E310
+	bool "HamGeek/ANTSDR E310 board-specific code"
+	select BINMAN
+	help
+	  Build board/xilinx/zynq/zynq-e310/board.c into U-Boot proper. It
+	  supplies misc_init_r(), which derives a deterministic ethaddr from
+	  the QSPI NOR factory unique ID (see the file header for the full
+	  fallback chain). Without it the board takes a fresh random MAC on
+	  every boot.
+
+	  Also selects BINMAN, which packs spl/boot.bin + u-boot.img into the
+	  single SPI NOR bootloader blob u-boot-e310-nor.bin described by
+	  arch/arm/dts/zynq-e310-u-boot.dtsi.
+
 config CMD_ZYNQ
 	bool "Enable Zynq specific commands"
 	default y

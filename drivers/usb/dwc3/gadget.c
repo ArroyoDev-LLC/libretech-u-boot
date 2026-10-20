@@ -16,6 +16,7 @@
 #include <cpu_func.h>
 #include <log.h>
 #include <malloc.h>
+#include <time.h>
 #include <dm.h>
 #include <dm/device_compat.h>
 #include <dm/devres.h>
@@ -1413,6 +1414,12 @@ static int dwc3_gadget_run_stop(struct dwc3 *dwc, int is_on, int suspend)
 			reg |= DWC3_DCTL_KEEP_CONNECT;
 
 		dwc->pullups_connected = true;
+
+		/* Started at SuperSpeed: arm the high-speed fallback */
+		dwc->ss_fallback_armed = CONFIG_VAL(USB_DWC3_SS_FALLBACK_MS) > 0 &&
+			(dwc3_readl(dwc->regs, DWC3_DCFG) & DWC3_DCFG_SPEED_MASK) ==
+			DWC3_DCFG_SUPERSPEED;
+		dwc->ss_fallback_start = get_timer(0);
 	} else {
 		reg &= ~DWC3_DCTL_RUN_STOP;
 
@@ -1420,6 +1427,7 @@ static int dwc3_gadget_run_stop(struct dwc3 *dwc, int is_on, int suspend)
 			reg &= ~DWC3_DCTL_KEEP_CONNECT;
 
 		dwc->pullups_connected = false;
+		dwc->ss_fallback_armed = false;
 	}
 
 	dwc3_gadget_dctl_write_safe(dwc, reg);
@@ -2755,9 +2763,47 @@ void dwc3_gadget_exit(struct dwc3 *dwc)
  *
  * Should be called from dwc3 core.
  */
+/*
+ * USB_DWC3_SS_FALLBACK_MS: a gadget started at SuperSpeed that the host has
+ * not sent a SETUP to in time restarts at high speed, over the USB 2 PHY.
+ * The first SETUP disarms it (dwc3_ep0_inspect_setup()), not Connect Done:
+ * a link can report connected well before the host enumerates it. A SuperSpeed
+ * link that never trains (wrong lane orientation, Compliance mode, a host
+ * port that does not train) otherwise leaves the host seeing no device at
+ * all, where USB 2 would have worked.
+ */
+static void dwc3_gadget_ss_fallback(struct dwc3 *dwc)
+{
+	u32 reg;
+
+	if (!dwc->ss_fallback_armed ||
+	    get_timer(dwc->ss_fallback_start) < CONFIG_VAL(USB_DWC3_SS_FALLBACK_MS))
+		return;
+
+	reg = dwc3_readl(dwc->regs, DWC3_DSTS);
+	/* link state 10 = Compliance; short, for the RK3399 maskrom SPL's budget */
+	printf("dwc3: no SuperSpeed in %d ms (link %u), high speed\n",
+	       CONFIG_VAL(USB_DWC3_SS_FALLBACK_MS), DWC3_DSTS_USBLNKST(reg));
+
+	dwc3_gadget_run_stop(dwc, false, false);
+	reg = dwc3_readl(dwc->regs, DWC3_DCFG);
+	reg &= ~DWC3_DCFG_SPEED_MASK;
+	dwc3_writel(dwc->regs, DWC3_DCFG, reg | DWC3_DCFG_HIGHSPEED);
+	/*
+	 * maximum_speed is left as it is: the next gadget start on this core
+	 * tries SuperSpeed again. An SPL has no device removal, so a lowered
+	 * maximum_speed outlived this gadget and every later start in the
+	 * session (the flash session's "DFU again") ran at high speed only.
+	 */
+	dwc3_gadget_run_stop(dwc, true, false);
+}
+
 void dwc3_gadget_uboot_handle_interrupt(struct dwc3 *dwc)
 {
 	int ret = dwc3_interrupt(0, dwc);
+
+	if (CONFIG_VAL(USB_DWC3_SS_FALLBACK_MS) > 0)
+		dwc3_gadget_ss_fallback(dwc);
 
 	if (ret == IRQ_WAKE_THREAD) {
 		int i;

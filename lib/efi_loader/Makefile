@@ -90,7 +90,12 @@ $(objtree)/capsule_esl_file: FORCE
 	fi
 	$(call cmd,capsule_esl_gen)
 
-$(obj)/efi_capsule.o: $(objtree)/capsule_esl_file FORCE
+# efi_capsule_key.S is what .incbin's the generated ESL; efi_capsule.c only
+# references the __efi_capsule_sig_{begin,end} linker symbols it defines.
+# Declaring the prerequisite on efi_capsule.o left the assembler free to run
+# before the generator under -j, so a cold tree failed with
+# "efi_capsule_key.S:14: Error: file not found".
+$(obj)/efi_capsule_key.o: $(objtree)/capsule_esl_file FORCE
 asflags-y += -DCAPSULE_ESL_PATH=\"$(objtree)/capsule_esl_file\"
 endif
 

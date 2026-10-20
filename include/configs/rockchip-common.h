@@ -14,7 +14,14 @@
 #ifndef CONFIG_XPL_BUILD
 
 #ifndef BOOT_TARGETS
-#define BOOT_TARGETS	"mmc1 mmc0 nvme scsi usb pxe dhcp spi"
+/*
+ * Network boot is deliberately NOT a default target: a board with no bootable
+ * media would otherwise net-boot unattended and run whatever a DHCP/PXE server
+ * on the LAN offers it. PXE/DHCP stay compiled in and are enabled per-site by
+ * appending them to boot_targets from the NOR config sector or boot.ini.
+ * Matches meson64.h, which defines BOOT_TARGET_PXE/_DHCP but omits them here.
+ */
+#define BOOT_TARGETS	"mmc1 mmc0 nvme scsi usb spi"
 #endif
 
 #ifdef CONFIG_ARM64

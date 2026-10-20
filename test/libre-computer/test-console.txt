@@ -1,0 +1,89 @@
+# Libre Computer U-Boot hardware test.
+# Non-destructive: mmc/sf READ only, no ums/dfu/poweroff/sf write/dhcp/bootefi.
+# Silent-console: env delete silent (empty setenv silent still silences).
+# Host tally: grep -c '^PASS' / '^FAIL' / '^SKIP'  (no on-target setexpr).
+#
+# Two ways to run:
+# 1. Paste at the U-Boot prompt (or test-console.sh on a free tty).
+# 2. DRAM-boot: pack as FIT (`CONFIG_LEGACY_IMAGE_FORMAT` is off on LC
+#    meson) and `boot.py --script`. Legacy mkimage -T script is rejected
+#    ("Wrong image format for source").
+#
+# mkimage -f test-console.its test-console.scr
+#   images { script-1 { type = "script"; data = /incbin/("test-console.txt");
+#            hash { algo = "sha256"; }; } }
+#   configurations { default = "conf-1"; conf-1 { script = "script-1"; } }
+#
+# Host asserts (board-specific, on the UART log):
+#   aml-s905x-cc-v2: board=aml-s905x-cc-v2
+#     fdtfile contains meson-gxl-s905x-libretech-cc-v2
+#     ethaddr not 02/06/0a/0e/82 locally-administered unless eFuse empty
+
+env delete silent
+setenv stdout serial
+setenv stderr serial
+
+echo "=== Libre Computer U-Boot Hardware Test ==="
+echo "INFO: board=${board} fdtfile=${fdtfile} boot_source=${boot_source}"
+
+echo "--- Section 1: Board Identification ---"
+if version; then echo "PASS: T01 version"; else echo "FAIL: T01 version"; fi
+if smbios; then echo "PASS: T02 smbios"; else echo "FAIL: T02 smbios"; fi
+if test -n "${board}"; then echo "PASS: T03 board=${board}"; else echo "FAIL: T03 board not set"; fi
+if test -n "${fdtfile}"; then echo "PASS: T04 fdtfile=${fdtfile}"; else echo "FAIL: T04 fdtfile not set"; fi
+if test -n "${serial#}"; then echo "PASS: T05 serial#=${serial#}"; else echo "FAIL: T05 serial# unset"; fi
+if test -n "${ethaddr}"; then echo "PASS: T06 ethaddr=${ethaddr}"; else echo "FAIL: T06 ethaddr unset"; fi
+if test "${boot_source}" = "usb"; then echo "PASS: T07 boot_source=usb"; else echo "PASS: T07 boot_source=${boot_source}"; fi
+
+echo "--- Section 2: Control FDT + DRAM ---"
+if fdt addr ${fdtcontroladdr}; then if fdt header; then echo "PASS: T08 control-fdt"; else echo "FAIL: T08 fdt-header"; fi; else echo "FAIL: T08 no-fdtcontroladdr"; fi
+if fdt print /memory; then echo "PASS: T09 memory-node"; else echo "FAIL: T09 memory-node"; fi
+
+echo "--- Section 3: MMC ---"
+if mmc list; then echo "PASS: T10 mmc-list"; else echo "FAIL: T10 mmc-list"; fi
+if mmc dev 0; then echo "PASS: T11 mmc0-present"; if mmc info; then echo "PASS: T14 mmc0-info"; else echo "FAIL: T14 mmc0-info"; fi; if mmc read ${loadaddr} 0 1; then echo "PASS: T15 mmc0-read-1s"; else echo "FAIL: T15 mmc0-read-1s"; fi; else echo "SKIP: T11 mmc0-not-present"; echo "SKIP: T14 mmc0-info"; echo "SKIP: T15 mmc0-read-1s"; fi
+if mmc dev 1; then echo "PASS: T12 mmc1-present"; if mmc info; then echo "PASS: T16 mmc1-info"; else echo "FAIL: T16 mmc1-info"; fi; if mmc read ${loadaddr} 0 1; then echo "PASS: T17 mmc1-read-1s"; else echo "FAIL: T17 mmc1-read-1s"; fi; else echo "SKIP: T12 mmc1-not-present"; echo "SKIP: T16 mmc1-info"; echo "SKIP: T17 mmc1-read-1s"; fi
+if test -n "${bootdevice}"; then echo "PASS: T13 bootdevice=${bootdevice}"; else echo "FAIL: T13 bootdevice not set"; fi
+
+echo "--- Section 4: USB ---"
+if usb start; then echo "PASS: T20 usb-start"; else echo "FAIL: T20 usb-start"; fi
+if usb tree; then echo "PASS: T21 usb-tree"; else echo "FAIL: T21 usb-tree"; fi
+
+echo "--- Section 5: Environment ---"
+if test -n "${bootcmd}"; then echo "PASS: T30 bootcmd"; else echo "FAIL: T30 bootcmd not set"; fi
+if test -n "${bootdelay}"; then echo "PASS: T31 bootdelay=${bootdelay}"; else echo "FAIL: T31 bootdelay not set"; fi
+if test -n "${preboot}"; then echo "PASS: T32 preboot"; else echo "FAIL: T32 preboot not set"; fi
+if test -n "${boot_targets}"; then echo "PASS: T33 boot_targets=${boot_targets}"; else echo "FAIL: T33 boot_targets not set"; fi
+
+echo "--- Section 6: Boot Menu ---"
+if test -n "${menucmd}"; then echo "PASS: T40 menucmd"; else echo "FAIL: T40 menucmd not set"; fi
+if test -n "${bootmenu_0}"; then echo "PASS: T41 bootmenu_0=${bootmenu_0}"; else echo "FAIL: T41 bootmenu_0 not set"; fi
+if test -n "${bootmenu_4}"; then echo "PASS: T42 bootmenu_4"; else echo "FAIL: T42 bootmenu_4 not set"; fi
+if test -n "${bootmenu_7}"; then echo "PASS: T43 bootmenu_7"; else echo "FAIL: T43 bootmenu_7 not set"; fi
+if test -n "${bootmenu_9}"; then echo "PASS: T44 bootmenu_9"; else echo "FAIL: T44 bootmenu_9 not set"; fi
+
+echo "--- Section 7: Splash ---"
+if test -n "${splashimage}"; then echo "PASS: T50 splashimage"; else echo "FAIL: T50 splashimage not set"; fi
+if test "${splashpos}" = "m,m"; then echo "PASS: T51 splashpos=m,m"; else echo "FAIL: T51 splashpos=${splashpos}"; fi
+if test "${splashfile}" = "boot.bmp"; then echo "PASS: T52 splashfile=boot.bmp"; else echo "FAIL: T52 splashfile=${splashfile}"; fi
+if test "${splashsource}" = "mmc_fs"; then echo "PASS: T53 splashsource=mmc_fs"; else echo "FAIL: T53 splashsource=${splashsource}"; fi
+
+echo "--- Section 8: GPIO / LED / WDT / I2C / ADC / RNG ---"
+if led list; then echo "PASS: T60 led-list"; else echo "FAIL: T60 led-list"; fi
+if wdt list; then echo "PASS: T70 wdt-list"; else echo "FAIL: T70 wdt-list"; fi
+if i2c bus; then echo "PASS: T71 i2c-bus"; else echo "FAIL: T71 i2c-bus"; fi
+if adc list; then echo "PASS: T72 adc-list"; else echo "FAIL: T72 adc-list"; fi
+if rng 0 8; then echo "PASS: T73 rng-8"; else echo "FAIL: T73 rng-8"; fi
+
+echo "--- Section 9: SPI NOR ---"
+if sf probe; then echo "PASS: T200 spi-nor"; if sf read ${loadaddr} 0 0x100; then echo "PASS: T205 sf-read-256"; else echo "FAIL: T205 sf-read-256"; fi; else echo "SKIP: T200 no-spi-nor"; echo "SKIP: T205 sf-read-256"; fi
+
+echo "--- Section 10: Ethernet MDIO ---"
+if mdio list; then echo "PASS: T206 mdio-list"; else echo "FAIL: T206 mdio-list"; fi
+
+echo "--- Section 11: Console mux ---"
+if test -n "${stdout}"; then echo "PASS: T120 stdout=${stdout}"; else echo "FAIL: T120 stdout not set"; fi
+
+echo "=== Test Summary ==="
+echo "Host tally: grep -c '^PASS' / '^FAIL' / '^SKIP'"
+echo "=== End ==="

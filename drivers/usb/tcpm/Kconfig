@@ -7,6 +7,28 @@ config TYPEC_TCPM
 	  The Type-C Port Controller Manager provides a USB PD and USB Type-C
 	  state machine for use with Type-C Port Controllers.
 
+config TYPEC_DISPLAYPORT
+	bool "DisplayPort Alt Mode on USB Type-C"
+	depends on TYPEC_TCPM
+	help
+	  DisplayPort Alt Mode, source side: discover the partner's alt
+	  modes, enter DisplayPort, and negotiate a pin assignment. Uses the
+	  Type-C Port Controller Manager's VDM transport; the negotiated pin
+	  assignment then has to be handed to the board's Type-C PHY.
+
+	  Needed to drive a display over a USB-C connector. Say N if the
+	  board's DisplayPort output is a dedicated connector.
+
+config SPL_TYPEC_FUSB302_CC
+	bool "FUSB302 plug orientation in SPL"
+	depends on SPL_DM_I2C
+	help
+	  Measure the CC lines of an FUSB302 once in SPL to learn which way
+	  round the Type-C plug is, without the port manager. A Type-C PHY
+	  that carries SuperSpeed in SPL needs it to map its lanes; without
+	  it the PHY assumes a normal plug and a reversed one links at high
+	  speed only.
+
 config TYPEC_FUSB302
 	tristate "Fairchild FUSB302 Type-C chip driver"
 	depends on DM && DM_I2C && TYPEC_TCPM

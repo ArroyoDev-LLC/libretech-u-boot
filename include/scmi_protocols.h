@@ -739,11 +739,41 @@ int scmi_pwd_name_get(struct udevice *dev, u32 domain_id, u8 **name);
 
 enum scmi_clock_message_id {
 	SCMI_CLOCK_ATTRIBUTES = 0x3,
+	SCMI_CLOCK_DESCRIBE_RATES = 0x4,
 	SCMI_CLOCK_RATE_SET = 0x5,
 	SCMI_CLOCK_RATE_GET = 0x6,
 	SCMI_CLOCK_CONFIG_SET = 0x7,
 	SCMI_CLOCK_PARENT_SET = 0xD,
 	SCMI_CLOCK_GET_PERMISSIONS = 0xF,
+};
+
+/*
+ * SCMI Sensor Protocol (DEN 0056 v1.0 READING_GET — residual print)
+ */
+enum scmi_sensor_message_id {
+	SCMI_SENSOR_READING_GET = 0x6,
+};
+
+/**
+ * struct scmi_sensor_reading_get_in - SENSOR_READING_GET request
+ * @sensor_id:	Sensor index (0 = first advertised)
+ * @flags:	Bit 0 = async; residual uses 0 (sync)
+ */
+struct scmi_sensor_reading_get_in {
+	u32 sensor_id;
+	u32 flags;
+};
+
+/**
+ * struct scmi_sensor_reading_get_out - SENSOR_READING_GET v1 response
+ * @status:	SCMI status
+ * @value_low:	32-bit LSB of the reading
+ * @value_high:	32-bit MSB of the reading
+ */
+struct scmi_sensor_reading_get_out {
+	s32 status;
+	u32 value_low;
+	u32 value_high;
 };
 
 #define SCMI_CLK_PROTO_ATTR_COUNT_MASK	GENMASK(15, 0)
@@ -836,6 +866,36 @@ struct scmi_clk_state_out {
  * @clock_id:	SCMI clock ID
  * @attributes:	Attributes of the targets clock state
  */
+/**
+ * struct scmi_clk_describe_rates_in - CLOCK_DESCRIBE_RATES request
+ * @clock_id:	SCMI clock ID
+ * @rate_index:	First rate to return (later pages are empty on this server)
+ */
+struct scmi_clk_describe_rates_in {
+	u32 clock_id;
+	u32 rate_index;
+};
+
+#define SCMI_CLK_DESC_RATES_NRET_MASK	GENMASK(11, 0)
+#define SCMI_CLK_DESC_RATES_RANGE	BIT(12)
+#define SCMI_CLK_DESC_RATES_NREM_SHIFT	16
+#define SCMI_CLK_DESC_RATES_MAX		3
+
+/**
+ * struct scmi_clk_describe_rates_out - CLOCK_DESCRIBE_RATES response
+ * @status:		SCMI command status
+ * @num_rates_flags:	[11:0] returned, bit12 range, [31:16] remaining
+ * @rate:		lsb/msb pairs: discrete list, or min/max/step
+ */
+struct scmi_clk_describe_rates_out {
+	s32 status;
+	u32 num_rates_flags;
+	struct {
+		u32 rate_lsb;
+		u32 rate_msb;
+	} rate[SCMI_CLK_DESC_RATES_MAX];
+};
+
 struct scmi_clk_rate_get_in {
 	u32 clock_id;
 };
@@ -1136,7 +1196,15 @@ enum scmi_perf_message_id {
 	SCMI_PERF_LIMITS_SET = 0x5,
 	SCMI_PERF_LIMITS_GET = 0x6,
 	SCMI_PERF_LEVEL_SET = 0x7,
-	SCMI_PERF_LEVEL_GET = 0x8
+	SCMI_PERF_LEVEL_GET = 0x8,
+	/*
+	 * Notification subscribe (SCMI v2.0/v3.0 PERF_LEVELS_NOTIFY family).
+	 * The open SC's scmi_perf_protocol_ops dispatches these same two ids;
+	 * PERF_NOTIFY_LEVEL is the LEVEL_CHANGED subscription that arms the
+	 * per-domain subscriber list mod_dvfs then emits into.
+	 */
+	SCMI_PERF_NOTIFY_LIMITS = 0x9,
+	SCMI_PERF_NOTIFY_LEVEL = 0xa
 };
 
 struct scmi_perf_in {
@@ -1146,6 +1214,17 @@ struct scmi_perf_in {
 
 struct scmi_perf_out {
 	s32 status;
+};
+
+/*
+ * struct scmi_perf_notify_in - PERF_NOTIFY_{LIMITS,LEVEL} payload.
+ * @domain_id:	performance domain to (un)subscribe.
+ * @notify_enable: bit0 = enable the matching notification, else disable.
+ * Matches the SC's struct scmi_perf_notify_{limits,level}_a2p.
+ */
+struct scmi_perf_notify_in {
+	u32 domain_id;
+	u32 notify_enable;
 };
 
 #define SCMI_PIN_NAME_LEN 16

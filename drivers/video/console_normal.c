@@ -121,14 +121,16 @@ static int console_set_cursor_visible(struct udevice *dev, bool visible,
 		return -ENOSYS;
 
 	x += index * fontdata->width;
-	start = vid_priv->fb + y * vid_priv->line_length + x * pbytes;
 
 	/* place the cursor 1 pixel before the start of the next char */
 	x -= 1;
 
+	start = vid_priv->fb + y * vid_priv->line_length + x * pbytes;
 	line = start;
 	draw_cursor_vertically(&line, vid_priv, vc_priv->y_charsize,
 			       NORMAL_DIRECTION);
+
+	video_damage(vid, x, y, VIDCONSOLE_CURSOR_WIDTH, vc_priv->y_charsize);
 
 	return 0;
 }

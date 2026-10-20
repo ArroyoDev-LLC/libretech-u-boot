@@ -147,6 +147,14 @@ static struct mmc *__init_mmc_device(int dev, bool force_init,
 	if (!mmc_getcd(mmc))
 		force_init = true;
 
+	if (force_init && mmc->has_init &&
+	    (mmc->selected_mode == MMC_HS_200 ||
+	     mmc->selected_mode == MMC_HS_400 ||
+	     mmc->selected_mode == MMC_HS_400_ES)) {
+		/* HS200/HS400 GO_IDLE fails CID; mmc rescan still needs pwrseq. */
+		return mmc;
+	}
+
 	if (force_init)
 		mmc->has_init = 0;
 

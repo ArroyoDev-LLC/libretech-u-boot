@@ -5,3 +5,30 @@
  */
 
 #include "meson-gxl-u-boot.dtsi"
+
+#if defined(CONFIG_SPL_DFU)
+#include "meson-gxl-libretech-spl-usbflash-u-boot.dtsi"
+#endif
+
+/ {
+	smbios {
+		compatible = "u-boot,sysinfo-smbios";
+
+		smbios {
+			system {
+				manufacturer = "libre-computer";
+				product = "aml-s805x-ac";
+			};
+
+			baseboard {
+				manufacturer = "libre-computer";
+				product = "aml-s805x-ac";
+			};
+
+			chassis {
+				manufacturer = "libre-computer";
+				product = "aml-s805x-ac";
+			};
+		};
+	};
+};

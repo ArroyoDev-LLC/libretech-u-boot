@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: GPL-2.0 OR MIT
+/*
+ * U-Boot-only overlay for MED-MT88-MX-G7 (MT8390 SKU of the MED-MT88-MX).
+ * Board DTS is dts/upstream/.../mt8390-med-mt88-mx-g7.dts (Linux KEEP).
+ * Same content as mt8370-med-mt88-mx-g5-u-boot.dtsi with the SKU swapped.
+ */
+
+#include "mt8188-u-boot.dtsi"
+#include "smbios.dtsi"
+
+/ {
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	smbios {
+		smbios {
+			system {
+				product = "MED-MT88-MX-G7";
+				family = "Libre Computer";
+			};
+			baseboard {
+				manufacturer = "libre-computer";
+				product = "med-mt88-mx-g7";
+			};
+		};
+	};
+};
+
+/* UMS/fastboot gadget: U-Boot mtu3 wants forced VBUS and a peripheral role. */
+&ssusb0 {
+	mediatek,force-vbus;
+	dr_mode = "peripheral";
+};

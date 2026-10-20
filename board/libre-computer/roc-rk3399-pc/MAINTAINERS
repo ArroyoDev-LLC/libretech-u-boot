@@ -1,0 +1,10 @@
+LIBRE-COMPUTER ROC-RK3399-PC
+M:	Levin Du <djw@t-chip.com.cn>
+M:	Suniel Mahesh <sunil@amarulasolutions.com>
+S:	Maintained
+F:	board/libre-computer/roc-rk3399-pc/
+F:	include/configs/roc-rk3399-pc.h
+F:	configs/roc-rk3399-pc_defconfig
+F:	configs/roc-rk3399-pc-mezzanine_defconfig
+F:	arch/arm/dts/rk3399-roc-pc*
+F:	dts/upstream/src/arm64/rockchip/rk3399-roc-pc*

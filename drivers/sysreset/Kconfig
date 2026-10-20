@@ -244,6 +244,17 @@ config SYSRESET_SYSCON
 	help
 	  Reboot support for generic SYSCON mapped register reset.
 
+config SYSRESET_ZYNQ
+	bool "Enable support for the Zynq-7000 SLCR system reset"
+	depends on ARCH_ZYNQ
+	default y if SYSRESET
+	help
+	  Reset the PS through SLCR PSS_RST_CTRL, taking the SLCR write-protect
+	  unlock first. This is the SYSRESET-uclass form of the sequence
+	  arch/arm/mach-zynq/cpu.c previously reached through an arch-specific
+	  reset_cpu(); the generic syscon-reboot driver cannot be used because it
+	  performs a single register write and has nowhere to place the unlock.
+
 config SYSRESET_WATCHDOG
 	bool "Enable support for watchdog reboot driver"
 	select WDT

@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: GPL-2.0 OR MIT
+/*
+ * Copyright (C) 2025 MediaTek Inc.
+ * Author: Macpaul Lin <macpaul.lin@mediatek.com>
+ */
+
+#include "smbios.dtsi"
+
+/ {
+	/*
+	 * Gadget 0 is the BootROM download port (Type-C P0, ssusb@112b0000), as
+	 * on every MT8188 board (mt8188-u-boot.dtsi). This legacy DT has no
+	 * ssusb0 label, and ssusb1 (0x11200000) would bind first.
+	 */
+	aliases {
+		usb_gadget0 = &ssusb;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	smbios {
+		smbios {
+			system {
+				product = "Genio 510 EVK P1V2 (eMMC Boot)";
+				version = "P1V2";
+				sku = "mtk-g510evk-p1v2";
+				family = "MediaTek Genio";
+			};
+			baseboard {
+				product = "Genio 510 EVK P1V2";
+			};
+		};
+	};
+};

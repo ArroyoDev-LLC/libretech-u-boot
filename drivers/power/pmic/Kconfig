@@ -441,6 +441,21 @@ config DM_PMIC_MTK_PWRAP
 	  on different MediaTek SoCs. The PMIC wrapper is a proprietary
 	  hardware to connect the PMIC.
 
+config MTK_PMIC_WRAP
+	bool "Enable the Libre Computer MediaTek PMIC Wrapper driver"
+	depends on !DM_PMIC_MTK_PWRAP
+	help
+	  Say yes here to add support for the MediaTek PMIC Wrapper using
+	  the Libre Computer driver (drivers/power/pmic/mtk-pmic-wrap.c),
+	  which maps mt8188-pwrap onto the mt8189 register layout. This is
+	  the combination validated end-to-end on the Genio 510 EVK.
+
+	  Mutually exclusive with DM_PMIC_MTK_PWRAP: both drivers register
+	  U_BOOT_DRIVER(mtk_pwrap), so enabling both would be a link error.
+	  The dependency is one-directional on purpose -- making it mutual
+	  is a Kconfig recursive dependency. If a config sets both, this one
+	  loses and DM_PMIC_MTK_PWRAP is the driver that gets built.
+
 endif
 
 config PMIC_TPS65217

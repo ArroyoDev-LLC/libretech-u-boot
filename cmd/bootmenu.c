@@ -115,26 +115,27 @@ static char *bootmenu_choice_entry(void *data)
 			/* no menu key selected, regenerate menu */
 			return NULL;
 		case BKEY_SHORTCUT:
-			/* invalid shortcut, regenerate menu */
-			if (cch->shortcut_key >= menu->count - 1)
+			/*
+			 * Every entry is a real entry: 200332b6592 removed the
+			 * synthesised trailing "0. Console" / "0. Quit" row, so
+			 * menu->count no longer includes one. The bound is
+			 * therefore count, not count - 1 -- with count - 1 the
+			 * LAST entry of every menu was unreachable by shortcut,
+			 * and bootmenu_conv_shortcut_key()'s -1 ("Exit") no
+			 * longer names anything, so it is now simply invalid.
+			 */
+			if (cch->shortcut_key < 0 ||
+			    cch->shortcut_key >= menu->count)
 				return NULL;
-			/* shortcut_key value for Exit is is -1 */
-			menu->active = cch->shortcut_key < 0 ? menu->count - 1 :
-							       cch->shortcut_key;
+			menu->active = cch->shortcut_key;
 			fallthrough;
 		case BKEY_SELECT:
 			iter = menu->first;
 			for (i = 0; i < menu->active; ++i)
 				iter = iter->next;
 			return iter->key;
-		case BKEY_QUIT:
-			/* Quit by choosing the last entry */
-			iter = menu->first;
-			while (iter->next)
-				iter = iter->next;
-			return iter->key;
 		default:
-			break;
+			continue;
 		}
 	}
 
@@ -169,8 +170,45 @@ static void bootmenu_destroy(struct bootmenu_data *menu)
 	free(menu);
 }
 
-static char bootmenu_entry_shortcut_key(int index)
+/* "bootmenu_key_<n>": the shortcut key entry n names, or NULL */
+static const char *bootmenu_named_key(int index)
 {
+	char name[32];
+
+	snprintf(name, sizeof(name), "bootmenu_key_%d", index);
+
+	return env_get(name);
+}
+
+/* Any entry names its own key: then every entry uses only the key it names */
+static bool bootmenu_has_named_keys(void)
+{
+	int i;
+
+	for (i = 0; i < BOOTMENU_MAX_SHORTCUTS; i++)
+		if (bootmenu_named_key(i))
+			return true;
+
+	return false;
+}
+
+/*
+ * The entry's key, or a negative errno for none. int, not char: char is unsigned on
+ * arm/arm64, where -ENOENT came back as 0xfe, passed "> 0", and was printed as the key.
+ */
+static int bootmenu_entry_shortcut_key(struct bootmenu_data *menu, int index)
+{
+	if (menu->named_keys) {
+		const char *k = bootmenu_named_key(index);
+
+		/* One lower-case letter or digit 1-9; anything else is no key */
+		if (k && k[0] && !k[1] &&
+		    ((k[0] >= 'a' && k[0] <= 'z') || (k[0] >= '1' && k[0] <= '9')))
+			return k[0];
+
+		return -ENOENT;
+	}
+
 	switch (index) {
 	/* 1-9 shortcut key (0 reserved) */
 	case 0 ... 8:
@@ -207,7 +245,7 @@ static int prepare_bootmenu_entry(struct bootmenu_data *menu,
 	struct bootmenu_entry *iter = *current;
 
 	while ((option = bootmenu_getoption(i))) {
-		char shortcut_key;
+		int shortcut_key;
 		int len;
 
 		/* bootmenu_[num] format is "[title]=[commands]" */
@@ -230,7 +268,9 @@ static int prepare_bootmenu_entry(struct bootmenu_data *menu,
 			return -ENOMEM;
 		}
 
-		shortcut_key = bootmenu_entry_shortcut_key(i);
+		shortcut_key = bootmenu_entry_shortcut_key(menu, i);
+		if (shortcut_key > 0 && i < BOOTMENU_MAX_SHORTCUTS)
+			menu->shortcut[i] = shortcut_key;
 		/* Use emtpy space if entry doesn't support shortcut key */
 		snprintf(entry->title, len, "%c%c %s",
 			 shortcut_key > 0 ? shortcut_key : ' ',
@@ -377,7 +417,6 @@ static struct bootmenu_data *bootmenu_create(int uefi, int delay)
 	unsigned short int i = 0;
 	struct bootmenu_data *menu;
 	struct bootmenu_entry *iter = NULL;
-	struct bootmenu_entry *entry;
 	char *default_str;
 
 	menu = malloc(sizeof(struct bootmenu_data));
@@ -388,6 +427,8 @@ static struct bootmenu_data *bootmenu_create(int uefi, int delay)
 	menu->active = 0;
 	menu->last_active = -1;
 	menu->first = NULL;
+	menu->named_keys = bootmenu_has_named_keys();
+	memset(menu->shortcut, 0, sizeof(menu->shortcut));
 
 	default_str = env_get("bootmenu_default");
 	if (default_str)
@@ -415,46 +456,6 @@ static struct bootmenu_data *bootmenu_create(int uefi, int delay)
 	}
 #endif
 
-	/* Add Exit entry at the end */
-	if (i <= MAX_COUNT - 1) {
-		entry = malloc(sizeof(struct bootmenu_entry));
-		if (!entry)
-			goto cleanup;
-
-		/* Add Quit entry if exiting bootmenu is disabled */
-		if (!IS_ENABLED(CONFIG_BOOTMENU_DISABLE_UBOOT_CONSOLE))
-			entry->title = strdup("0. Exit");
-		else
-			entry->title = strdup("0. Quit");
-
-		if (!entry->title) {
-			free(entry);
-			goto cleanup;
-		}
-
-		entry->command = strdup("");
-		if (!entry->command) {
-			free(entry->title);
-			free(entry);
-			goto cleanup;
-		}
-
-		sprintf(entry->key, "%d", i);
-
-		entry->num = i;
-		entry->menu = menu;
-		entry->type = BOOTMENU_TYPE_NONE;
-		entry->next = NULL;
-
-		if (!iter)
-			menu->first = entry;
-		else
-			iter->next = entry;
-
-		iter = entry;
-		++i;
-	}
-
 	menu->count = i;
 
 	if ((menu->active >= menu->count)||(menu->active < 0)) { //ensure active menuitem is inside menu
@@ -479,22 +480,13 @@ static void menu_display_statusline(struct menu *m)
 
 	menu = entry->menu;
 
-	printf(ANSI_CURSOR_POSITION, 1, 1);
-	puts(ANSI_CLEAR_LINE);
-	printf(ANSI_CURSOR_POSITION, 2, 3);
-	puts("*** U-Boot Boot Menu ***");
-	puts(ANSI_CLEAR_LINE_TO_END);
-	printf(ANSI_CURSOR_POSITION, 3, 1);
-	puts(ANSI_CLEAR_LINE);
-
-	/* First 3 lines are bootmenu header + 2 empty lines between entries */
-	printf(ANSI_CURSOR_POSITION, menu->count + 5, 1);
-	puts(ANSI_CLEAR_LINE);
-	printf(ANSI_CURSOR_POSITION, menu->count + 6, 3);
-	puts("Press UP/DOWN to move, ENTER to select, ESC to quit");
-	puts(ANSI_CLEAR_LINE_TO_END);
-	printf(ANSI_CURSOR_POSITION, menu->count + 7, 1);
-	puts(ANSI_CLEAR_LINE);
+	printf(ANSI_CURSOR_POSITION
+		"\n%s\n"
+		ANSI_CURSOR_POSITION ANSI_CLEAR_LINE ANSI_CURSOR_POSITION
+		"%s"
+		ANSI_CLEAR_LINE_TO_END,
+		1, 1, "  *** Main Menu ***", menu->count + 4, 1,
+		menu->count + 5, 1, "Press UP/DOWN to move, ENTER to select, ESC to quit");
 }
 
 static void handle_uefi_bootnext(void)
@@ -588,11 +580,12 @@ static enum bootmenu_ret bootmenu_show(int uefi, int delay)
 		title = strdup(iter->title);
 		command = strdup(iter->command);
 
-		/* last entry exits bootmenu */
-		if (iter->num == iter->menu->count - 1) {
-			ret = BOOTMENU_RET_QUIT;
-			goto cleanup;
-		}
+		/*
+		 * There is no synthesised Exit entry any more (200332b6592), so
+		 * the last entry is an ordinary one and must RUN, not quit.
+		 * Quitting here silently discarded the command of whatever row
+		 * happened to be last in bootmenu_<n>.
+		 */
 	} else {
 		goto cleanup;
 	}

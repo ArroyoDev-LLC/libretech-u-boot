@@ -6,6 +6,8 @@
 #ifndef _WDT_H_
 #define _WDT_H_
 
+#include <linux/types.h>
+
 struct udevice;
 
 /*
@@ -53,6 +55,29 @@ int wdt_stop(struct udevice *dev);
  * is still called on following devices)
  */
 int wdt_stop_all(void);
+
+#if defined(CONFIG_WDT) && !defined(CONFIG_XPL_BUILD)
+/**
+ * wdt_handoff_to_os() - platform watchdog hand-off, last step before the OS
+ *
+ * Called once on every OS entry path (booti/bootm and UEFI ExitBootServices).
+ * If env wdt_handoff reads true, every running DM watchdog is fed a final time
+ * and handed over running; otherwise every one is stopped.  board_wdt_handoff()
+ * is then called with the same decision for a watchdog DM does not own, and one
+ * line is printed if any watchdog was handled.
+ */
+void wdt_handoff_to_os(void);
+
+/**
+ * board_wdt_handoff() - board hook for a non-DM watchdog (weak, default no-op)
+ *
+ * @run: true to feed it a final time and leave it running, false to stop it
+ * Return: true if the board owns a watchdog it handled (so the line prints)
+ */
+bool board_wdt_handoff(bool run);
+#else
+static inline void wdt_handoff_to_os(void) {}
+#endif
 
 /*
  * Reset the timer, typically restoring the counter to

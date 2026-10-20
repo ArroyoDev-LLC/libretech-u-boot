@@ -1,0 +1,430 @@
+# Open-chain TPL->SPL boot for AML-S905X-CC (Le Potato). Product is
+# libretech-cc_defconfig (vendor BL2, no open SPL). This defconfig is product +
+# USB TPL + the TPL/SPL chain + DDR3 @ 912, ranks auto-detected like vendor
+# CHL_AUTO (1 GB = one rank, 2 GB = two 1024 MB ranks). Used by LBS
+# aml-s905x-cc-libre.
+#
+# This file used to be SINGLE-STAGE: one SPL in SRAM at CONFIG_SPL_TEXT_BASE
+# 0xd9001000 under the 0xb000 amlimage ceiling, which is where every hardware
+# result on this board through 2026-08-30 was measured. It is now the TPL->SPL
+# chain, the same architecture libretech-cc_v2_libre_defconfig and
+# libretech-ac_libre_defconfig already carry, so all three GXL -libre targets
+# have ONE shape.
+#
+# The chain is NOT required here. With CONFIG_SPL_LZ4 the single stage fit the
+# 1 MiB image budget with >160 KB spare. The chain is kept by operator decision
+# (2026-08-31) for architectural consistency across the three boards, not
+# because a size wall forced it.
+#
+# The chain half (CONFIG_TPL*, CONFIG_MESON_GX_XPL_CHAIN,
+# CONFIG_TPL_MESON_USB_BOOT, CONFIG_SPL_TEXT_BASE=0x08000000,
+# CONFIG_SPL_PAYLOAD, CONFIG_SPL_MAX_SIZE=0x1fe00) came from
+# configs/tpl-spl-chain.config, generated with
+#
+#   make libretech-cc_libre_defconfig tpl-spl-chain.config olddefconfig
+#   make savedefconfig
+#
+# and folded in here: a defconfig is the only config home this tree keeps, and
+# a fragment stack is a second one that drifts. The fragment file itself stays
+# on this branch only for the three aml-s905x-cc-libre-eye* bench targets.
+#
+# The DRAM stage sits in the image between the signed SRAM stage and the FIT,
+# so its ceiling is MESON_GX_SPL_OFFSET (0xc000) -> MESON_GX_FIT_OFFSET. That
+# window is 0x40000 (operator decision 2026-10-06, SPL USB flasher M5: the
+# flash session's gadget, DFU, UMS and MMC do not fit the old 0x13e00), so the
+# FIT is at 0x4c000: CONFIG_SPL_MAX_SIZE=0x4c000 (FIT_OFFSET defaults to
+# SPL_PAD_TO, which defaults to it), CONFIG_SPL_SIZE_LIMIT and
+# MESON_GX_SPL_MAX_SIZE (what TPL reads) both 0x40000. gx-handoff.h
+# static_asserts SPL_SIZE_LIMIT <= SPL_MAX_SIZE - MESON_GX_SPL_OFFSET. Same
+# values on the other two boards.
+#
+# The FIT's u-boot and atf images are LZMA-compressed (CONFIG_SPL_LZMA, LZ4
+# off: the binman ladder takes LZ4 first). LZMA's decoder draws a 14080 B
+# probability table from the pre-relocation arena, so that arena is 0x8000,
+# and it sits under CONFIG_SPL_STACK. In SRAM (0xd900ff00) a 0x8000 arena
+# covered the SPL BSS at 0xd900d000 and the 0xd900c000 block below it, which
+# is the SPL link delta N24 bisected to (2026-09-13, reverted then). The stack
+# is therefore in DRAM at 0x09000000, above the DRAM stage (0x08000000) and
+# below the v2's FIT staging (0x0c000000), as on G12/SM1. The TPL keeps its
+# 4 KiB SRAM arena explicitly: its default is the SPL's value.
+#
+# CONFIG_SPL_LOAD_FIT_ADDRESS stays 0x02000000 (this is the DDR3 board; the
+# DDR4 v2 stages at 0x0c000000). Both clear CONFIG_SPL_TEXT_BASE 0x08000000 --
+# this one by 96 MiB below it.
+#
+# No MMC boot source is configured. The chain here boots over USB BROM; the
+# product boot source is an open decision and configs/tpl-mmc.config is
+# deliberately NOT folded in.
+#
+# CONFIG_MESON_GX_LIBRE_SCMI_FIXUP=y, with the CONFIG_SCMI_FIRMWARE /
+# CONFIG_DM_MAILBOX / CONFIG_MESON_MHU its Kconfig depends on, is the same
+# stanza libretech-cc_v2_libre_defconfig has carried since df5a382e80d. It was
+# missing here, and that is why every Linux boot on this board needed
+# `fdt set /scpi status disabled` typed at the prompt: with the fixup compiled
+# out, ft_board_setup() never disabled the vendor SCPI node, Linux probed a
+# mailbox with no BL30 behind it, and the abort inside deferred_probe_work_func
+# stranded the boot (measured 2026-09-03).
+#
+# The v1 kernel DTS now carries the open-chain SCMI package and its AO-watchdog
+# node, both disabled and BASE-answered. Against a kernel DTB whose SC is mute,
+# the fixup applies only the SC-INDEPENDENT set: /scpi off,
+# amlogic,meson-gx-pm off, arm,idle-state off. When BASE answers, the
+# cc-u-boot.dtsi merge under CONFIG_SCMI_FIRMWARE gives U-Boot's control FDT
+# `/firmware/scmi`, lets the fixup turn it okay, and lets the AO-wdt flip below
+# take Linux-side ownership. The N30 boot-2 read that path green on `nyc-b`
+# (`SC answered BASE` -> `/firmware/scmi okay` -> cpufreq `scmi` six rates);
+# board_fix_fdt()'s self-guard removes the node when the SC is mute, the v2's
+# measured path (fdc89c91f81).
+#
+# CONFIG_MESON_GXL_AO_WDT_HANDOFF completes the v1 answer to the question
+# this file used to call "separate": every v1 open-chain boot with the SC
+# fetch prints `SCP: enter ... (AO wdt ctrl 0x3245dbf)` -- the ROM left the
+# AO watchdog armed with its 5000 ms budget counting -- and N11/N27/N28
+# measured the consequence on three builds and both nyc units: budget
+# expiry resets the board seconds after the bl2 jump, ≤19 s after `=>`,
+# because v1 had no writer of 0xC810012C anywhere (the petter lived in the
+# v2 board file only). The refresh itself is address-fixed and asks no DT;
+# what the node dependency governs is LINUX-side ownership: the fixup's
+# AO-wdt flip below can only fire on a kernel DTB that carries the
+# `&aobus watchdog@120` node ("Optional by presence"), which landed on
+# `linux-6.18.y-lc` with N345. Without the node this build keeps the
+# U-Boot stage alive and still resets ~5 s after "Starting kernel ...".
+#
+# CONFIG_DRAM_DQS_CORR=y is here, and not in configs/dram-libretech-cc.config
+# where its old objection comment lives, for three reasons.  Policy: a target is
+# ONE defconfig (boot-chain-policy.md 3b), and aml-s905x-cc-libre is exactly
+# `UBOOT_TARGET=libretech-cc_libre_defconfig`, so this file is where its
+# configuration is stated.  House style: both DDR4 siblings state it the same
+# way -- libretech-cc_v2_libre_defconfig and libretech-ac_libre_defconfig each
+# carry CONFIG_DRAM_DQS_CORR=y in the defconfig, not in a fragment.  Function:
+# the fragment is not in this target's stack at all, so a line added there would
+# not have enabled anything on the shipping open chain.
+#
+# WHY it is on.  Vendor BL2 runs the post-train per-lane correction on this
+# board ("DQS-corr enabled" on its console) and both our own DDR4 -libre boards
+# run it; the DDR3 open chain was the only one of the four paths that did not.
+# Under the standing rule that our open SPL must match or exceed the vendor BL2
+# in capability, that is a gap to close, not a configuration difference to
+# justify.  The table it consumes is Le Potato's OWN vendor table -- boot-lite
+# board/aml-s905x-cc/firmware/timing.c non-LPDDR3 arm is wr {100,100,95,95,95,
+# 95} / rd {100,100,88,95,95,100}, byte-for-byte the #else arm of
+# dram-settings-gx.h that a DDR3 board compiles -- so nothing is copied from
+# another board.  Full position, the two objections it closes, and the boot
+# gate: amlogic/software/boot/gxl/dram/design/dqs-corr-enable-decision.md.
+#
+CONFIG_ARM=y
+CONFIG_SYS_VENDOR="libre-computer"
+CONFIG_SYS_BOARD="aml-s905x-cc"
+CONFIG_ARCH_MESON=y
+CONFIG_TEXT_BASE=0x04000000
+CONFIG_SYS_MALLOC_LEN=0x8000000
+CONFIG_SPL_GPIO=y
+CONFIG_SPL_LIBCOMMON_SUPPORT=y
+CONFIG_ENV_SOURCE_FILE="../common/boot"
+CONFIG_NR_DRAM_BANKS=1
+CONFIG_HAS_CUSTOM_SYS_INIT_SP_ADDR=y
+CONFIG_CUSTOM_SYS_INIT_SP_ADDR=0x20000000
+CONFIG_ENV_SIZE=0x2000
+CONFIG_DM_GPIO=y
+CONFIG_DEFAULT_DEVICE_TREE="amlogic/meson-gxl-s905x-libretech-cc-libre"
+CONFIG_OF_LIBFDT_OVERLAY=y
+CONFIG_DM_RESET=y
+CONFIG_MESON_GXL=y
+CONFIG_TPL_MESON_USB_BOOT=y
+CONFIG_MESON_GX_XPL_CHAIN=y
+CONFIG_MESON_GX_SPL_MAX_SIZE=0x40000
+CONFIG_MESON_GX_LIBRE_SECURE_LAYOUT=y
+# G5/D3 pairing ACTIVE (was the N54 landing interim 0x0, u-boot be165435a3d):
+# N340's cells are sourced (scp-firmware boards/aml-s905x-cc.c, N30 round --
+# every rail/OPP/wake cell from this board's own V1.1-A/V1.0 sheets) and the
+# v1-built contract bin carries trailer 0xb0a40101, so this board now NAMES
+# its payload: spl-gxl-scp.c compares the staged trailer word against this id
+# BEFORE the 0xd3 fetch and refuses a foreign one by name (the interim existed
+# while the only bootable v1 payload was the cc-v2-described bin; N27 measured
+# what the zero-cell v1 bin compiled to, and N28/N29 priced the interim's
+# DVFS-pin hazard on the shipped one). Registry: gxl_board.h; the host-side
+# twin of this claim is the board-id gate in the docs tree.
+CONFIG_MESON_GXL_SCP_BOARD_ID=0x1
+CONFIG_MESON_GX_LIBRE_SCMI_FIXUP=y
+CONFIG_MESON_GXL_AO_WDT_HANDOFF=y
+CONFIG_SPL_SYS_MALLOC_F_LEN=0x8000
+CONFIG_DRAM_TWO_IDENTICAL_RANKS=y
+# VDDEE 1000 mV on PWM_B, the same word as AML-S905X-CC-V2: the V1.1-A sheet's
+# VDDEE divider is V2's (1R22 100K / 1R23 120K / 1R35 1M + 1R1 100K from
+# GPIODV_29), so 0x000e000e is 1005 mV here too; left unprogrammed, GPIODV_29
+# is undriven and 1R6 (10K to VDD_EE) sets about 1.06-1.16 V. Copper check:
+# tools/pcb_power_path.py in the docs tree.
+CONFIG_MESON_GXL_VDDEE_PWM_B=0xe000e
+CONFIG_DRAM_DQS_CORR=y
+CONFIG_DRAM_2T_MODE=y
+# Clock fallback ladder (operator 2026-10-09: memory before frequency, warn
+# and boot): two ranks at 912, 864, 816, then one rank at each.  All three
+# sit in the DDR3-1866 tCK band (CL 13 / CWL 9 unchanged); 816 is the lowest
+# PLL-exact clock (x24) in the sourced >= 800 MHz range.
+CONFIG_DRAM_CLK_FALLBACK1=864
+CONFIG_DRAM_CLK_FALLBACK2=816
+CONFIG_SPL_SERIAL=y
+CONFIG_TPL_TEXT_BASE=0xd9001000
+CONFIG_TPL_STACK=0xd900ff00
+CONFIG_TPL_SYS_MALLOC_F_LEN=0x1000
+CONFIG_TPL_LIBCOMMON_SUPPORT=y
+CONFIG_TPL_LIBGENERIC_SUPPORT=y
+CONFIG_TPL_SERIAL=y
+CONFIG_SPL_STACK=0x9000000
+CONFIG_SPL_TEXT_BASE=0x08000000
+CONFIG_SPL_HAS_BSS_LINKER_SECTION=y
+CONFIG_SPL_BSS_START_ADDR=0xd900d000
+CONFIG_SPL_BSS_MAX_SIZE=0x1000
+CONFIG_SYS_LOAD_ADDR=0x4000000
+CONFIG_SPL_SIZE_LIMIT=0x40000
+CONFIG_SPL=y
+CONFIG_DEBUG_UART_BASE=0xc81004c0
+CONFIG_DEBUG_UART_CLOCK=24000000
+CONFIG_IDENT_STRING=" Libre Computer AML-S905X-CC Le Potato"
+CONFIG_ARMV8_UDELAY_EVENT_STREAM=y
+CONFIG_ARMV8_CRYPTO=y
+CONFIG_TPL_MAX_SIZE=0xb000
+CONFIG_SPL_PAYLOAD="u-boot.bin"
+CONFIG_TPL_SIZE_LIMIT=0xb000
+CONFIG_DEBUG_UART=y
+# CONFIG_LOCALVERSION_AUTO is not set
+CONFIG_LTO=y
+CONFIG_REMAKE_ELF=y
+CONFIG_EFI_RUNTIME_UPDATE_CAPSULE=y
+CONFIG_EFI_CAPSULE_ON_DISK=y
+CONFIG_EFI_CAPSULE_FIRMWARE_RAW=y
+CONFIG_EFI_CAPSULE_AUTHENTICATE=y
+CONFIG_EFI_CAPSULE_CRT_FILE="board/libre-computer/common/eficapsule.pub.pem"
+CONFIG_EFI_IP4_CONFIG2_PROTOCOL=y
+CONFIG_EFI_HTTP_PROTOCOL=y
+CONFIG_EFI_SCROLL_ON_CLEAR_SCREEN=y
+CONFIG_EFI_HTTP_BOOT=y
+# CONFIG_BOOTEFI_HELLO_COMPILE is not set
+# CONFIG_BOOTEFI_TESTAPP_COMPILE is not set
+CONFIG_FIT=y
+CONFIG_FIT_VERBOSE=y
+CONFIG_SPL_FIT_SIGNATURE=y
+CONFIG_SPL_LOAD_FIT=y
+CONFIG_SPL_LOAD_FIT_ADDRESS=0x02000000
+# DRAM SPL: ask the on-chip SC-ROM to fetch the FIT "scp" node (aml_scpi
+# send=0: 0xd3 DRAM pointer + 0xd2 size + 0xd0/0xd1/0xd5 hash), which is what
+# starts the open SC.  arch/arm/mach-meson/spl-gxl-scp.c is #if'd on this, so
+# without it the loader compiles to nothing and the SPL carries no "SCP: "
+# string at all.  SPL phase only -- TPL never runs it.
+CONFIG_SPL_FIT_IMAGE_POST_PROCESS=y
+CONFIG_BOOTSTD_FULL=y
+# CONFIG_DISTRO_DEFAULTS is not set
+CONFIG_BOOTDELAY=1
+CONFIG_AUTOBOOT_USE_MENUKEY=y
+CONFIG_AUTOBOOT_MENUKEY=27
+CONFIG_OF_BOARD_SETUP=y
+CONFIG_BOOTCOMMAND="bootflow scan -lb; pause \"No bootable device found. Press any key for menu...\"; run menucmd"
+CONFIG_USE_PREBOOT=y
+CONFIG_PREBOOT="run bootcmd_romusb; run bootcmd_usbdfu; usb start;"
+CONFIG_BOARD_CONFIG=y
+CONFIG_BOARD_CONFIG_DRAM=y
+CONFIG_BOARD_EARLY_INIT_R=y
+CONFIG_SILENT_CONSOLE=y
+# CONFIG_SPL_SILENT_CONSOLE is not set
+# CONFIG_TPL_SILENT_CONSOLE is not set
+CONFIG_SILENT_U_BOOT_ONLY=y
+CONFIG_SILENT_CONSOLE_UNTIL_ENV=y
+CONFIG_SYS_CONSOLE_INFO_QUIET=y
+# CONFIG_DISPLAY_CPUINFO is not set
+# CONFIG_DISPLAY_BOARDINFO is not set
+# CONFIG_SPL_CYCLIC is not set
+CONFIG_MISC_INIT_R=y
+CONFIG_SPL_MAX_SIZE=0x4c000
+# CONFIG_SPL_RAW_IMAGE_SUPPORT is not set
+CONFIG_SPL_LEGACY_IMAGE_FORMAT=y
+# The SPL USB flash session (SPL USB flasher plan M5, spl-usbflash.c): DFU,
+# read-only UMS and the ACM console, served by dwc2_udc_otg in the DRAM stage
+# on a USB boot. Full SPL malloc for the DFU and UMS buffers, 32 MiB at
+# 0x0a000000 (below the v2's FIT staging at 0x0c000000); SPL MMC without
+# MMC_TINY (its EXT_CSD buffer would be SRAM BSS, where SD_EMMC DMA does not
+# land); the SPL DT carries the USB/MMC nodes
+# (meson-gxl-libretech-spl-usbflash-u-boot.dtsi). No SPL_DFU_VIRT: this
+# board has no SPI NOR.
+CONFIG_SPL_BOARD_INIT=y
+CONFIG_SPL_SYS_MALLOC=y
+CONFIG_SPL_HAS_CUSTOM_MALLOC_START=y
+CONFIG_SPL_CUSTOM_SYS_MALLOC_ADDR=0xa000000
+CONFIG_SPL_SYS_MALLOC_SIZE=0x2000000
+CONFIG_SPL_MMC=y
+# CONFIG_SPL_MMC_TINY is not set
+CONFIG_SPL_DM_RESET=y
+CONFIG_SPL_DM_SEQ_ALIAS=y
+CONFIG_SPL_SYSCON=y
+CONFIG_SPL_CLK=y
+CONFIG_SPL_PHY=y
+CONFIG_SPL_PINCTRL=y
+CONFIG_SPL_PINCONF=y
+CONFIG_SPL_DM_USB_GADGET=y
+CONFIG_SPL_USB_GADGET=y
+CONFIG_SPL_DFU=y
+CONFIG_SPL_DFU_MMC=y
+CONFIG_SPL_USB_FUNCTION_MASS_STORAGE=y
+CONFIG_SPL_USB_GADGET_DNL_ACM=y
+# CONFIG_SPL_SHARES_INIT_SP_ADDR is not set
+CONFIG_SPL_HAVE_INIT_STACK=y
+CONFIG_SPL_RAM_DEVICE=y
+CONFIG_SPL_ATF=y
+CONFIG_TPL=y
+CONFIG_TPL_SYS_MALLOC_SIMPLE=y
+CONFIG_TPL_HAVE_INIT_STACK=y
+CONFIG_SYS_MAXARGS=32
+# CONFIG_CMD_BDI is not set
+CONFIG_CMD_SMBIOS=y
+# CONFIG_BOOTM_PLAN9 is not set
+# CONFIG_BOOTM_RTEMS is not set
+# CONFIG_BOOTM_VXWORKS is not set
+CONFIG_CMD_BOOTMENU=y
+# CONFIG_CMD_IMI is not set
+CONFIG_CMD_NVEDIT_EFI=y
+CONFIG_CMD_BINOP=y
+CONFIG_CRC32_VERIFY=y
+CONFIG_CMD_MD5SUM=y
+CONFIG_MD5SUM_VERIFY=y
+CONFIG_CMD_SHA1SUM=y
+CONFIG_SHA1SUM_VERIFY=y
+CONFIG_CMD_ADC=y
+CONFIG_CMD_DFU=y
+CONFIG_CMD_GPIO=y
+CONFIG_CMD_GPIO_READ=y
+CONFIG_CMD_GPT=y
+CONFIG_CMD_I2C=y
+# CONFIG_CMD_LOADS is not set
+CONFIG_CMD_LSBLK=y
+CONFIG_CMD_MBR=y
+CONFIG_CMD_MMC=y
+CONFIG_CMD_MMC_REG=y
+CONFIG_MMC_SPEED_MODE_SET=y
+CONFIG_MMC_IO_VOLTAGE=y
+CONFIG_MMC_UHS_SUPPORT=y
+CONFIG_DM_REGULATOR_GPIO=y
+CONFIG_CMD_POWEROFF=y
+CONFIG_CMD_READ=y
+CONFIG_CMD_SPI=y
+CONFIG_CMD_TOUCHTEST=y
+CONFIG_CMD_USB=y
+CONFIG_CMD_USB_MASS_STORAGE=y
+CONFIG_CMD_UMS_ABORT_KEYED=y
+CONFIG_CMD_WDT=y
+CONFIG_CMD_WRITE=y
+CONFIG_CMD_CAT=y
+CONFIG_CMD_SETEXPR_FMT=y
+CONFIG_CMD_BMP=y
+CONFIG_CMD_EFIDEBUG=y
+CONFIG_CMD_INI=y
+CONFIG_CMD_PAUSE=y
+CONFIG_CMD_RNG=y
+CONFIG_CMD_KASLRSEED=y
+CONFIG_CMD_SYSBOOT=y
+CONFIG_CMD_REGULATOR=y
+CONFIG_CMD_HASH=y
+CONFIG_HASH_VERIFY=y
+# CONFIG_SPL_EFI_PARTITION is not set
+CONFIG_PARTITION_TYPE_GUID=y
+CONFIG_OF_CONTROL=y
+CONFIG_SPL_OF_CONTROL=y
+CONFIG_SCMI_FIRMWARE=y
+CONFIG_ENV_IS_NOWHERE=y
+CONFIG_ENV_IS_IN_FAT=y
+CONFIG_ENV_FAT_DEVICE_AND_PART=":auto"
+CONFIG_ENV_RELOC_GD_ENV_ADDR=y
+CONFIG_NET_LWIP=y
+CONFIG_NET_RANDOM_ETHADDR=y
+CONFIG_DM_MAILBOX=y
+CONFIG_MESON_MHU=y
+CONFIG_SPL_DM=y
+CONFIG_SPL_OF_TRANSLATE=y
+# CONFIG_OFNODE_MULTI_TREE is not set
+CONFIG_SARADC_MESON=y
+CONFIG_LBA48=y
+CONFIG_SYS_64BIT_LBA=y
+CONFIG_BUTTON=y
+CONFIG_BUTTON_ADC=y
+CONFIG_DFU_TIMEOUT=y
+CONFIG_DFU_MMC=y
+CONFIG_DFU_RAM=y
+CONFIG_SET_DFU_ALT_INFO=y
+CONFIG_DM_I2C=y
+# CONFIG_SPL_DM_I2C is not set
+CONFIG_SYS_I2C_MESON=y
+CONFIG_TOUCH_KEYBOARD=y
+CONFIG_LED=y
+CONFIG_LED_GPIO=y
+CONFIG_SUPPORT_EMMC_RPMB=y
+CONFIG_SUPPORT_EMMC_BOOT=y
+CONFIG_MMC_MESON_GX=y
+CONFIG_DM_MDIO=y
+CONFIG_DM_MDIO_MUX=y
+CONFIG_ETH_DESIGNWARE_MESON8B=y
+CONFIG_MDIO_MUX_MESON_GXL=y
+CONFIG_PHY_MESON_GXL=y
+CONFIG_MESON_GXL_USB_PHY=y
+CONFIG_PINCTRL=y
+CONFIG_PINCTRL_MESON_GXL=y
+CONFIG_POWER_DOMAIN=y
+CONFIG_MESON_EE_POWER_DOMAIN=y
+CONFIG_DM_REGULATOR=y
+CONFIG_DM_REGULATOR_FIXED=y
+# CONFIG_SPECIFY_CONSOLE_INDEX is not set
+# CONFIG_SPL_SERIAL_PRESENT is not set
+CONFIG_DEBUG_UART_ANNOUNCE=y
+CONFIG_DEBUG_UART_SKIP_INIT=y
+CONFIG_MESON_SERIAL=y
+CONFIG_SPI=y
+CONFIG_DM_SPI=y
+CONFIG_MESON_SPICC=y
+CONFIG_SYSINFO=y
+CONFIG_SYSINFO_SMBIOS=y
+CONFIG_SYSRESET_CMD_POWEROFF=y
+CONFIG_USB=y
+CONFIG_DM_USB_GADGET=y
+CONFIG_USB_XHCI_HCD=y
+CONFIG_USB_XHCI_DWC3=y
+CONFIG_USB_DWC3=y
+# CONFIG_USB_DWC3_GADGET is not set
+CONFIG_USB_DWC3_MESON_GXL=y
+CONFIG_USB_KEYBOARD=y
+CONFIG_USB_GADGET=y
+CONFIG_USB_GADGET_MANUFACTURER="Libre Computer"
+CONFIG_USB_GADGET_PRODUCT="Le Potato"
+CONFIG_USB_GADGET_VENDOR_NUM=0x1b8e
+CONFIG_USB_GADGET_PRODUCT_NUM=0xfada
+CONFIG_USB_GADGET_DWC2_OTG=y
+CONFIG_USB_GADGET_VBUS_DRAW=500
+CONFIG_USB_GADGET_DOWNLOAD=y
+CONFIG_USB_FUNCTION_ACM=y
+CONFIG_USB_FUNCTION_ACM_LINUX_GADGET_ID=y
+CONFIG_USB_GADGET_DNL_ACM=y
+CONFIG_VIDEO=y
+CONFIG_VIDEO_LOGO=y
+CONFIG_SYS_WHITE_ON_BLACK=y
+CONFIG_VIDEO_SYNC_CYCLIC_MS=100
+CONFIG_VIDEO_MESON=y
+CONFIG_I2C_EDID_STANDARD=y
+CONFIG_VIDEO_ILI9486=y
+CONFIG_VIDEO_DT_SIMPLEFB=y
+CONFIG_SPLASH_SCREEN=y
+CONFIG_SPLASH_SCREEN_ALIGN=y
+CONFIG_HIDE_LOGO_VERSION=y
+CONFIG_VIDEO_BMP_GZIP=y
+CONFIG_BMP_16BPP=y
+CONFIG_BMP_24BPP=y
+CONFIG_BMP_32BPP=y
+# CONFIG_WATCHDOG_AUTOSTART is not set
+CONFIG_WDT=y
+CONFIG_WDT_MESON_GXBB=y
+CONFIG_DYNAMIC_CRC_TABLE=y
+# CONFIG_RANDOM_UUID is not set
+# CONFIG_SPL_RSA is not set
+CONFIG_SPL_CRC32=y
+# CONFIG_SPL_SHA1 is not set
+# The SC-ROM's fetch handshake ends in a SHA-256 the AP computes over the
+# staged image and hands over in 0xd0/0xd1/0xd5; the ROM refuses the image on
+# a mismatch.  spl-gxl-scp.c calls sha256_csum_wd() directly.
+CONFIG_SPL_SHA256=y
+CONFIG_SPL_LZMA=y
+# CONFIG_VPL_LZMA is not set

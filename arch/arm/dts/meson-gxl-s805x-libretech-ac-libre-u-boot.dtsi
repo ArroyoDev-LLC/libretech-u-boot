@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * U-Boot additions for meson-gxl-s805x-libretech-ac-libre.dts: the same
+ * board, the libre firmware layout. U-Boot auto-includes only the first
+ * matching <dt-name>-u-boot.dtsi, so the -libre DT names the board's own.
+ */
+
+#include "meson-gxl-s805x-libretech-ac-u-boot.dtsi"

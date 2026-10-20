@@ -1,0 +1,6 @@
+Genio-510 (MT8188/MT8370) Evk
+M:	Macpaul Lin <macpaul.lin@mediatek.com>
+S:	Maintained
+F:	board/mediatek/genio-510-evk
+F:	include/configs/mt8188.h
+F:	configs/genio_510_evk_defconfig

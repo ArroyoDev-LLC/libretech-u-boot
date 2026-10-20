@@ -260,10 +260,11 @@ static int mtu3_gadget_queue(struct usb_ep *ep,
 		__func__, mep->is_in ? "TX" : "RX", mreq->epnum, ep->name,
 		mreq, ep->maxpacket, mreq->request.length);
 
-	if (req->length > GPD_BUF_SIZE) {
+	if (req->length > (mtu->gen2cp ? GPD_BUF_SIZE_EL : GPD_BUF_SIZE)) {
 		dev_warn(mtu->dev,
 			 "req length > supported MAX:%d requested:%d\n",
-			 GPD_BUF_SIZE, req->length);
+			 mtu->gen2cp ? GPD_BUF_SIZE_EL : GPD_BUF_SIZE,
+			 req->length);
 		return -EOPNOTSUPP;
 	}
 

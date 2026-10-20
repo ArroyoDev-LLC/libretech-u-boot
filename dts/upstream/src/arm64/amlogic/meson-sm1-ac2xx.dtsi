@@ -144,18 +144,26 @@
 };
 
 &cpu0 {
+	operating-points-v2 = <&cpu_opp_table>;
+	clocks = <&clkc CLKID_CPU_CLK>;
 	cpu-supply = <&vddcpu>;
 };
 
 &cpu1 {
+	operating-points-v2 = <&cpu_opp_table>;
+	clocks = <&clkc CLKID_CPU1_CLK>;
 	cpu-supply = <&vddcpu>;
 };
 
 &cpu2 {
+	operating-points-v2 = <&cpu_opp_table>;
+	clocks = <&clkc CLKID_CPU2_CLK>;
 	cpu-supply = <&vddcpu>;
 };
 
 &cpu3 {
+	operating-points-v2 = <&cpu_opp_table>;
+	clocks = <&clkc CLKID_CPU3_CLK>;
 	cpu-supply = <&vddcpu>;
 };
 

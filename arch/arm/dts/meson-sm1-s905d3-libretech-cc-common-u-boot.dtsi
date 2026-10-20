@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright (c) 2023 Neil Armstrong <neil.armstrong@linaro.org>
+ *
+ * U-Boot additions shared by every AML-S905D3-CC control DT. The eMMC
+ * width / SPI NOR choice is NOT here: the NOR products include
+ * meson-sm1-s905d3-libretech-cc-nor-u-boot.dtsi, the 8-bit eMMC product
+ * does not.
+ */
+
+#include "meson-g12-common-u-boot.dtsi"
+
+/ {
+	smbios {
+		compatible = "u-boot,sysinfo-smbios";
+
+		smbios {
+			system {
+				manufacturer = "libre-computer";
+				product = "aml-s905d3-cc";
+			};
+
+			baseboard {
+				manufacturer = "libre-computer";
+				product = "aml-s905d3-cc";
+			};
+
+			chassis {
+				manufacturer = "libre-computer";
+				product = "aml-s905d3-cc";
+			};
+		};
+	};
+};
+
+#if defined(CONFIG_BINMAN)
+/* Solitude is SM1: amlimage VARIANT sm1 @ 0xf000 (same size as g12a) */
+&binman {
+	u-boot-amlogic {
+		mkimage {
+			args = "-n", "sm1", "-T", "amlimage";
+		};
+	};
+};
+#endif
+
+/*
+ * Open-chain SCMI (aml-s905d3-cc / Solitude).
+ * Merged only when CONFIG_SCMI_FIRMWARE is enabled -- the shipping
+ * aml-s905d3-cc_libre / aml-s905d3-cc_libre_emmc defconfigs (soft-fail
+ * SCMI_BASE_PROBE_OPTIONAL only) and the residual/open-SC bring-up
+ * defconfigs (which add the SCMI_RESIDUAL_DIAG banner).
+ * Switches on the -libre leaf's disabled SCMI package (MHU + AHB shmem +
+ * firmware/scmi, meson-sm1-libre-scmi.dtsi) for U-Boot's own agent; every
+ * SCMI_FIRMWARE defconfig boots the -libre leaf.
+ */
+#ifdef CONFIG_SCMI_FIRMWARE
+#include "meson-sm1-scmi-u-boot.dtsi"
+#endif

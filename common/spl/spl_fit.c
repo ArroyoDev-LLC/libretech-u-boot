@@ -8,6 +8,7 @@
 #include <fpga.h>
 #include <gzip.h>
 #include <image.h>
+#include <u-boot/lz4.h>
 #include <log.h>
 #include <memalign.h>
 #include <mapmem.h>
@@ -20,6 +21,67 @@
 #include <linux/printk.h>
 
 DECLARE_GLOBAL_DATA_PTR;
+
+/*
+ * This file is also built for TPL/VPL, whose LOAD_FIT symbols are separate
+ * from SPL's -- so a build can compile it with CONFIG_SPL_LOAD_FIT unset and
+ * the Kconfig symbol below therefore absent. Zero is the "unset" value and
+ * means "use CONFIG_SYS_LOAD_ADDR", so defaulting it here is exactly the
+ * behaviour a board that never set it asks for.
+ */
+#ifndef CONFIG_SPL_FIT_COMP_STAGING_ADDR
+#define CONFIG_SPL_FIT_COMP_STAGING_ADDR 0
+#endif
+#ifndef CONFIG_SPL_FIT_COMP_STAGING_MAX
+#define CONFIG_SPL_FIT_COMP_STAGING_MAX 0
+#endif
+#ifndef CONFIG_SPL_FIT_BUF_MAX
+#define CONFIG_SPL_FIT_BUF_MAX 0
+#endif
+
+/*
+ * A hand-picked staging address is a memory-map CLAIM, and until now nothing
+ * tied it to the symbols that can invalidate it. A later CONFIG_TEXT_BASE bump,
+ * a bigger media budget, or a variant with a different SPL layout would leave
+ * the constant sitting where it is and SPL would read compressed bytes over
+ * live .text -- after the hash that would have caught it has already passed.
+ * That failure is silent by construction, so it has to be caught at BUILD time.
+ *
+ * The two board-declared bounds are what make it checkable:
+ *
+ *   SPL_FIT_COMP_STAGING_MAX  the largest COMPRESSED payload staged, so the
+ *                             window above the staging address is big enough.
+ *                             It must exceed the compressed size of the biggest
+ *                             node (U-Boot proper, in practice), which moves
+ *                             build to build -- declare it with headroom.
+ *   SPL_FIT_BUF_MAX           the largest FIT the media can deliver into the
+ *                             buffer at CONFIG_SPL_LOAD_FIT_ADDRESS, i.e. the
+ *                             image budget. This is the bound the original
+ *                             safety argument did not use: it measured
+ *                             clearance against the buffer's CURRENT size, and
+ *                             the buffer's CEILING is the tighter side.
+ *
+ * Each check is skipped when its bound is 0 (undeclared) so no existing board
+ * changes behaviour; a board that names a staging address is strongly
+ * encouraged to declare both.
+ *
+ * NOT covered, deliberately, because SPL's own extent is not derivable from
+ * Kconfig alone: an overlap with SPL text/BSS/stack, or with a payload whose
+ * load address is neither U-Boot's nor the FIT buffer's. Those stay a board
+ * memory-map review.
+ */
+#if CONFIG_SPL_FIT_COMP_STAGING_ADDR
+#if CONFIG_SPL_FIT_COMP_STAGING_MAX
+_Static_assert(CONFIG_SPL_FIT_COMP_STAGING_ADDR +
+	       CONFIG_SPL_FIT_COMP_STAGING_MAX <= CONFIG_TEXT_BASE,
+	       "SPL_FIT_COMP_STAGING_ADDR + SPL_FIT_COMP_STAGING_MAX runs into CONFIG_TEXT_BASE: the staging buffer would be read over U-Boot proper's .text, silently, after its hash has passed");
+#endif
+#if CONFIG_SPL_FIT_BUF_MAX
+_Static_assert(CONFIG_SPL_LOAD_FIT_ADDRESS + CONFIG_SPL_FIT_BUF_MAX <=
+	       CONFIG_SPL_FIT_COMP_STAGING_ADDR,
+	       "SPL_FIT_COMP_STAGING_ADDR is inside the FIT read buffer's bound (SPL_LOAD_FIT_ADDRESS + SPL_FIT_BUF_MAX): a full-budget image would overlap the staging buffer");
+#endif
+#endif
 
 struct spl_fit_info {
 	const void *fit;	/* Pointer to a valid FIT blob */
@@ -209,6 +271,48 @@ static int get_aligned_image_size(struct spl_load_info *info, int data_size,
  * (for CONFIG_BOOTMETH_VBE_SIMPLE_FW), or another negative error number on
  * other error.
  */
+/**
+ * spl_decomp_size() - exact decompressed length of a compressed image
+ *
+ * Reads the decompressed size recorded in the compressed stream itself.
+ * This is needed to decide whether the compressed source overlaps the
+ * decompression destination: the *compressed* length says nothing about
+ * how far the decompressor will write.
+ *
+ * @comp:	IH_COMP_* of the stream
+ * @src:	compressed data (already in memory)
+ * @len:	compressed length
+ * Return: decompressed length, or 0 if this format does not record one
+ *	   (LZ4, or an LZMA stream marked "unknown size")
+ */
+static ulong spl_decomp_size(int comp, const void *src, ulong len)
+{
+	const u8 *p = src;
+	u64 size;
+	int i;
+
+	switch (comp) {
+	case IH_COMP_LZMA:
+		/* .lzma "alone" header: props[1], dict[4], size[8], LE */
+		if (len < 13)
+			return 0;
+		for (size = 0, i = 7; i >= 0; i--)
+			size = (size << 8) | p[5 + i];
+		/* all-ones is the "size unknown" marker */
+		if (size == ~0ULL || size > (u64)(ulong)~0UL)
+			return 0;
+		return (ulong)size;
+	case IH_COMP_GZIP:
+		/* gzip trailer: CRC32[4], ISIZE[4], LE (ISIZE is mod 2^32) */
+		if (len < 18)
+			return 0;
+		return p[len - 4] | ((ulong)p[len - 3] << 8) |
+		       ((ulong)p[len - 2] << 16) | ((ulong)p[len - 1] << 24);
+	default:
+		return 0;
+	}
+}
+
 static int load_simple_fit(struct spl_load_info *info, ulong fit_offset,
 			   const struct spl_fit_info *ctx, int node,
 			   struct spl_image_info *image_info)
@@ -245,8 +349,14 @@ static int load_simple_fit(struct spl_load_info *info, ulong fit_offset,
 		}
 	}
 
-	if (IS_ENABLED(CONFIG_SPL_FPGA) ||
-	    (IS_ENABLED(CONFIG_SPL_OS_BOOT) && spl_decompression_enabled())) {
+	/*
+	 * The type is also what image_decomp() names in its per-node line
+	 * ("Uncompressing Firmware to 40000"), so read it whenever a node can
+	 * be decompressed, not only for FPGA/OS payloads. Left at -1 it
+	 * prints "Invalid Image" for every compressed node -- which is what
+	 * the LZMA path below did until it started passing @type through.
+	 */
+	if (IS_ENABLED(CONFIG_SPL_FPGA) || spl_decompression_enabled()) {
 		if (fit_image_get_type(fit, node, &type))
 			puts("Cannot get image type.\n");
 		else
@@ -292,9 +402,54 @@ static int load_simple_fit(struct spl_load_info *info, ulong fit_offset,
 		}
 
 		if (spl_decompression_enabled() &&
-		    (image_comp == IH_COMP_GZIP || image_comp == IH_COMP_LZMA))
-			src_ptr = map_sysmem(ALIGN(CONFIG_SYS_LOAD_ADDR, ARCH_DMA_MINALIGN), len);
-		else
+		    (image_comp == IH_COMP_GZIP || image_comp == IH_COMP_LZMA ||
+		     image_comp == IH_COMP_LZ4)) {
+			/*
+			 * Staging buffer for compressed data.
+			 *
+			 * The historical choice is CONFIG_SYS_LOAD_ADDR, and
+			 * it is not a memory-map statement at all: it is
+			 * U-Boot-proper's `loadaddr`, the address a human
+			 * types `tftp` to once U-Boot has relocated itself to
+			 * the top of DRAM. It says nothing about which parts
+			 * of DRAM SPL has already filled. Where it happens to
+			 * land inside an image loaded EARLIER from this same
+			 * FIT, the read below destroys that image after its
+			 * own hash has already passed -- and nothing hashes it
+			 * again, so the failure is silent.
+			 *
+			 * That is not hypothetical on rk3399, where
+			 * SYS_LOAD_ADDR is TEXT_BASE + 0x800: 2 KiB into
+			 * decompressed U-Boot. Every compressed node loaded
+			 * after U-Boot writes over live .text -- and the
+			 * control FDT is always such a node, because
+			 * spl_fit_append_fdt() runs immediately after the
+			 * U-Boot image is in memory.
+			 *
+			 * CONFIG_SPL_FIT_COMP_STAGING_ADDR lets a board name a
+			 * window it knows is free instead. Zero, the default,
+			 * keeps the old behaviour for every board that has not
+			 * made that statement.
+			 *
+			 * Either way this is only a first guess: if it
+			 * overlaps the decompression destination, place the
+			 * staging buffer past the *compressed* extent. The
+			 * decompressed extent is not known yet -- nothing has
+			 * been read -- so it is re-checked exactly, and the
+			 * buffer moved again if needed, once the data is in
+			 * memory (below).
+			 */
+			ulong staging = CONFIG_SPL_FIT_COMP_STAGING_ADDR ?
+					CONFIG_SPL_FIT_COMP_STAGING_ADDR :
+					CONFIG_SYS_LOAD_ADDR;
+
+			if (staging < load_addr + len &&
+			    load_addr < staging + len)
+				staging = ALIGN(load_addr + len,
+						ARCH_DMA_MINALIGN);
+			src_ptr = map_sysmem(ALIGN(staging,
+						   ARCH_DMA_MINALIGN), len);
+		} else
 			src_ptr = map_sysmem(ALIGN(load_addr, ARCH_DMA_MINALIGN), len);
 		length = len;
 
@@ -334,6 +489,73 @@ static int load_simple_fit(struct spl_load_info *info, ulong fit_offset,
 	if (CONFIG_IS_ENABLED(FIT_IMAGE_POST_PROCESS))
 		board_fit_image_post_process(fit, node, &src, &length);
 
+	/*
+	 * Decompression reads from @src and writes to @load_addr. Where the
+	 * two ranges overlap the result is only correct while the read
+	 * pointer stays ahead of the write pointer, which depends on the
+	 * compression ratio -- so an image that grows by a few percent can
+	 * start corrupting itself with no diagnostic at all. The FIT hash
+	 * cannot catch it: it is verified above, over the *compressed*
+	 * bytes, before any of this runs.
+	 *
+	 * The compressed data is in memory now, so the decompressed extent
+	 * is exactly known. Move the compressed copy clear of the
+	 * destination if -- and only if -- they really overlap. Formats that
+	 * do not record their decompressed size (LZ4) are left as they were.
+	 */
+	if ((IS_ENABLED(CONFIG_SPL_GZIP) && image_comp == IH_COMP_GZIP) ||
+	    (IS_ENABLED(CONFIG_SPL_LZMA) && image_comp == IH_COMP_LZMA)) {
+		ulong dst_len = spl_decomp_size(image_comp, src, length);
+		ulong src_addr = map_to_sysmem(src);
+
+		if (dst_len > CONFIG_SYS_BOOTM_LEN) {
+			printf("Decompressed size %lx exceeds SYS_BOOTM_LEN %x\n",
+			       dst_len, (uint)CONFIG_SYS_BOOTM_LEN);
+			return -EFBIG;
+		}
+
+		if (dst_len && src_addr < load_addr + dst_len &&
+		    load_addr < src_addr + length) {
+			ulong safe = ALIGN(load_addr + dst_len,
+					   ARCH_DMA_MINALIGN);
+
+			if (safe < load_addr || safe + length < safe) {
+				puts("No safe decompression staging buffer\n");
+				return -EFBIG;
+			}
+
+			/*
+			 * KNOWN LIMITATION, stated because the failure it
+			 * leaves is the same silent class this code exists to
+			 * remove.
+			 *
+			 * The only rejection above is arithmetic wrap. Nothing
+			 * here checks that [safe, safe+length) is actually
+			 * free: not against the end of DRAM, not against the
+			 * SPL heap/stack/BSS, and -- the one that matters --
+			 * not against an image ALREADY LOADED from this same
+			 * FIT. spl_load_simple_fit() loads `firmware` first and
+			 * then each loadable in order, so on a FIT whose
+			 * earlier loadable happens to sit in
+			 * [load_addr+dst_len, +length) this memmove writes
+			 * compressed bytes over it AFTER that image's own hash
+			 * has already passed.
+			 *
+			 * SPL has no memory map to check against, which is why
+			 * this is documented rather than guarded. It does not
+			 * bite the board this was written for -- its BL31
+			 * segments are at 0x40000 and 0xff8c0000, nowhere near
+			 * -- but a FIT carrying OP-TEE, an FPGA blob or a
+			 * second firmware in that window would be corrupted
+			 * silently.
+			 */
+			debug("Restaging compressed data %lx -> %lx (dst %lx+%lx)\n",
+			      src_addr, safe, load_addr, dst_len);
+			memmove(map_sysmem(safe, length), src, length);
+			src = map_sysmem(safe, length);
+		}
+	}
+
 	load_ptr = map_sysmem(load_addr, length);
 	if (IS_ENABLED(CONFIG_SPL_GZIP) && image_comp == IH_COMP_GZIP) {
 		size = length;
@@ -346,12 +568,30 @@ static int load_simple_fit(struct spl_load_info *info, ulong fit_offset,
 		size = CONFIG_SYS_BOOTM_LEN;
 		ulong loadEnd;
 
-		if (image_decomp(IH_COMP_LZMA, CONFIG_SYS_LOAD_ADDR, 0, 0,
+		/*
+		 * @load and @type are only used for the message and for
+		 * *load_end = load + decompressed length: hand over the
+		 * node's real load address and type, so the line names the
+		 * image that is being placed and where. The old call passed
+		 * CONFIG_SYS_LOAD_ADDR and 0 (IH_TYPE_INVALID), which printed
+		 * "Uncompressing Invalid Image to 800800" for every node on
+		 * a board whose SYS_LOAD_ADDR is 0x800800 -- an address no
+		 * SPL-loaded node on that board is ever written to.
+		 */
+		if (image_decomp(IH_COMP_LZMA, load_addr, 0, type,
 				 load_ptr, src, length, size, &loadEnd)) {
 			puts("Uncompressing error\n");
 			return -EIO;
 		}
-		length = loadEnd - CONFIG_SYS_LOAD_ADDR;
+		length = loadEnd - load_addr;
+	} else if (IS_ENABLED(CONFIG_SPL_LZ4) && image_comp == IH_COMP_LZ4) {
+		size_t lz4_size = CONFIG_SYS_BOOTM_LEN;
+
+		if (ulz4fn(src, length, load_ptr, &lz4_size)) {
+			puts("Uncompressing error\n");
+			return -EIO;
+		}
+		length = lz4_size;
 	} else {
 		memmove(load_ptr, src, length);
 	}
@@ -864,11 +1104,14 @@ int spl_load_simple_fit(struct spl_image_info *spl_image,
 
 	/*
 	 * Booting a next-stage U-Boot may require us to append the FDT.
-	 * We allow this to fail, as the U-Boot image might embed its FDT.
+	 * We allow this to fail, as the U-Boot image might embed its FDT --
+	 * but not when the FDT is there and FAILED its hash check (-EPERM,
+	 * from spl_load_fit_image()): that is a corrupt or tampered image,
+	 * not a missing one, and booting on it hands U-Boot a bad DTB.
 	 */
 	if (os_takes_devicetree(spl_image->os)) {
 		ret = spl_fit_append_fdt(spl_image, info, offset, &ctx);
-		if (ret < 0 && spl_image->os != IH_OS_U_BOOT)
+		if (ret < 0 && (spl_image->os != IH_OS_U_BOOT || ret == -EPERM))
 			return ret;
 	}
 
@@ -904,7 +1147,17 @@ int spl_load_simple_fit(struct spl_image_info *spl_image,
 			debug("Loadable is %s\n", genimg_get_os_name(os_type));
 
 		if (os_takes_devicetree(os_type)) {
-			spl_fit_append_fdt(&image_info, info, offset, &ctx);
+			/*
+			 * Same rule as for the firmware image above: a missing
+			 * FDT is tolerated, one that failed its hash check is
+			 * not.  This return used to be ignored, so a loadable
+			 * U-Boot (BL31 as the firmware, as on Meson GX) booted
+			 * on a DTB the SPL had just reported "sha256 error".
+			 */
+			ret = spl_fit_append_fdt(&image_info, info, offset,
+						 &ctx);
+			if (ret == -EPERM)
+				return ret;
 			spl_image->fdt_addr = image_info.fdt_addr;
 		}
 

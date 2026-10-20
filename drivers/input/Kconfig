@@ -56,6 +56,26 @@ config BUTTON_KEYBOARD
 	  dt node to define button-event mapping.
 	  For example, an arrows and enter may be implemented to navigate boot menu.
 
+config TOUCH_KEYBOARD
+	bool "Touchscreen zones as keyboard"
+	depends on DM_KEYBOARD && DM_SPI && DM_GPIO
+	help
+	  Present an XPT2046/ADS7846 resistive touch panel as a keyboard, so
+	  that stdin consumers become touch-navigable without knowing anything
+	  about touch. The panel is split into a five-zone cross and each zone
+	  emits one keycode: top/bottom/left/right give the arrow keys and the
+	  centre gives enter, which is what the bootmenu needs to be driven by
+	  finger alone.
+
+	  Keys are emitted when the finger LIFTS, so a held finger produces one
+	  keypress rather than an auto-repeat storm. Polling reads the pendown
+	  GPIO first and only touches the SPI bus while a finger is down, so
+	  the console's continuous tstc() does not monopolise a bus that is
+	  typically shared with the display.
+
+	  The driver binds to the "ti,ads7846" node; without it (or without the
+	  overlay that supplies it) nothing is registered.
+
 config CPCAP_POWER_BUTTON
 	bool "Enable power button of CPCAP PMIC support"
 	depends on DM_KEYBOARD && DM_PMIC_CPCAP

@@ -17,7 +17,15 @@
 
 /* Meson GXBB specific DRAM init */
 
-void meson_dram_prepare_pctl(void)
+/*
+ * int since 2026-08-29 (N27), to match the prototype the GXL arm needs.  The
+ * GXBB arm's BEHAVIOUR is deliberately unchanged: every wait still reports and
+ * continues, and this function still cannot fail.  GXBB (S905) is out of scope
+ * for this project's boards -- see boot-chain-policy.md -- and its BL2 does not
+ * share the GXL reset sequence either (reversing-gxbb-bl2/gxbb/bl2.c:4113-4115
+ * writes only the release values), so nothing measured on GXL transfers here.
+ */
+int meson_dram_prepare_pctl(void)
 {
 	writel(PCTL0_1US_PCK, PCTL_TOGCNT1U);
 	writel(PCTL0_100NS_PCK, PCTL_TOGCNT100N);
@@ -34,9 +42,11 @@ void meson_dram_prepare_pctl(void)
 	/* Ask the DRAM to kindly power on and wait until it is ready */
 	writel(PCTL_POWCTL_POWERON, PCTL_POWCTL);
 	WAIT_FOR(PCTL_POWSTAT);
+
+	return 0;
 }
 
-void meson_dram_phy_init(void)
+int meson_dram_phy_init(void)
 {
 	/* Some unknown magic done by bl2 */
 	writel(0x49494949, DDR0_PUB_IOVCR0);
@@ -98,6 +108,8 @@ void meson_dram_phy_init(void)
 
 	/* Wait for the SDRAM to initialise */
 	WAIT_FOR(DDR0_PUB_PGSR0);
+
+	return 0;
 }
 
 void meson_dram_phy_setup_ranks(void)
@@ -160,7 +172,11 @@ void meson_dram_phy_setup_ranks(void)
 		writel(0x1f, DDR0_PUB_ACLCDLR);
 }
 
-void meson_dram_finalise_init(void)
+/*
+ * int to match the GXL arm's prototype; the GXBB arm's behaviour is unchanged
+ * (its ACCESS spin stays as it was -- GXBB is out of scope, see dram-gx.c).
+ */
+int meson_dram_finalise_init(void)
 {
 	WAIT_FOR(PCTL_CMDTSTAT);
 	writel(PCTL_SCTL_GO_STATE, PCTL_SCTL);
@@ -171,4 +187,6 @@ void meson_dram_finalise_init(void)
 	writel(0x20100000 | (CONFIG_DRAM_CLK / 20) |
 		(timings.refi << 8), DMC_REFR_CTRL2);
 	clrbits_32(DDR0_PUB_ZQCR, 4);
+
+	return 0;
 }

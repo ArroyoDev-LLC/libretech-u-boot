@@ -6,13 +6,6 @@
  */
 
 / {
-	/* Keep HW order from U-Boot */
-	aliases {
-		/delete-property/ mmc0;
-		/delete-property/ mmc1;
-		/delete-property/ mmc2;
-	};
-
 	soc {
 		bootph-all;
 	};
@@ -47,12 +40,44 @@
 		pad-byte = <0xff>;
 
 		mkimage {
-			filename = "spl/u-boot-spl-signed.bin";
 			/* args are per-SoC, and defined in meson-(gxbb/gxl)-u-boot.dtsi */
+#if defined(CONFIG_MESON_GX_XPL_CHAIN)
+			/*
+			 * In the chain the BootROM-loaded stage is TPL, so that
+			 * is what gets amlimage-signed.  The args do not change:
+			 * the variant names the SoC, not the u-boot stage.
+			 */
+			filename = "tpl/u-boot-tpl-signed.bin";
+
+			u-boot-tpl {
+			};
+#else
+			filename = "spl/u-boot-spl-signed.bin";
 
 			u-boot-spl {
 			};
+#endif
 		};
+
+#if defined(CONFIG_MESON_GX_XPL_CHAIN)
+		/*
+		 * The DRAM stage, in the padding the signed SRAM stage and the
+		 * FIT already leave between them: 0xc000 -> 0x1fe00 is 0x13e00
+		 * (81408 B) of 0xff, measured from this image's own binman map.
+		 * Putting SPL there costs no new space and, more importantly,
+		 * gives every boot medium ONE layout to read -- a raw MMC
+		 * sector, a NOR offset and the USB payload all address the same
+		 * bytes at the same offset from the start of the image.
+		 *
+		 * It is deliberately NOT inside the mkimage node: only the
+		 * BootROM-loaded stage is amlimage-signed, and the signature
+		 * covers a 0xb000 payload.  SPL is fetched by TPL, which is
+		 * already past the ROM's trust boundary.
+		 */
+		u-boot-spl {
+			offset = <CONFIG_MESON_GX_SPL_OFFSET>;
+		};
+#endif
 
 		fit: fit {
 			description = "ATF and U-Boot images";
@@ -60,7 +85,14 @@
 			fit,fdt-list = "of-list";
 			fit,external-offset = <CONFIG_FIT_EXTERNAL_OFFSET>;
 			fit,align = <512>;
-			offset = <CONFIG_SPL_PAD_TO>;
+			/*
+			 * Its own symbol, not SPL_PAD_TO.  SPL_PAD_TO is a linker
+			 * pad for the SRAM stage and include/config_fallbacks.h
+			 * ties it to SPL_MAX_SIZE; the FIT's position in the
+			 * combined image has nothing to do with either.  Defaults
+			 * to SPL_PAD_TO, so no existing board moves.
+			 */
+			offset = <CONFIG_MESON_GX_FIT_OFFSET>;
 
 			images {
 				u-boot {
@@ -68,14 +100,94 @@
 					type = "standalone";
 					os = "u-boot";
 					arch = "arm64";
+					/*
+					 * BL33 compression ladder: LZ4 first, LZMA only
+					 * where LZ4's ratio does not fit the size
+					 * requirement, then none.  Same order and same
+					 * reason as arch/arm/dts/sunxi-u-boot.dtsi, and the
+					 * policy in design/rules/bootloader/
+					 * bootloader-checklist.md section 1.  GZIP is not
+					 * offered: strictly dominated -- worse ratio than
+					 * LZMA, slower to decompress than LZ4.
+					 *
+					 * Compressed only when the SPL can actually
+					 * decompress it, so the gate is the SPL-phase
+					 * symbol, never the host-tool one.  Before this
+					 * ladder existed the node keyed on CONFIG_SPL_LZMA
+					 * alone, so CONFIG_SPL_LZ4=y emitted
+					 * compression = "none" -- the image built, shrank by
+					 * nothing, and said so nowhere.  That is the same
+					 * failure the Rockchip FIT_UBOOT_COMP ladder had
+					 * before u-boot 68f56355136.
+					 *
+					 * SPL_LZMA is affordable only under
+					 * MESON_GX_XPL_CHAIN, where the SPL phase runs from
+					 * DRAM: in SRAM the LZMA decompressor overflows the
+					 * .sram region by 1288 B even with
+					 * SPL_LZMA_SIZE_OPTIMIZATION.  LZ4's decompressor is
+					 * far smaller, which is why it is reachable on the
+					 * single-stage path where LZMA is not.
+					 *
+					 * u-boot is 89.9% of the FIT, which is what this is
+					 * for.  spl_fit.c dispatches IH_COMP_LZ4 under
+					 * CONFIG_SPL_LZ4 and IH_COMP_LZMA under
+					 * CONFIG_SPL_LZMA.
+					 */
+#if defined(CONFIG_SPL_LZ4)
+					compression = "lz4";
+#elif defined(CONFIG_SPL_LZMA)
+					compression = "lzma";
+#else
 					compression = "none";
+#endif
 					load = <CONFIG_TEXT_BASE>;
 					entry = <CONFIG_TEXT_BASE>;
 
 					u-boot-nodtb {
+#if defined(CONFIG_SPL_LZ4)
+						compress = "lz4";
+						/*
+						 * SPL decompresses this image from a
+						 * staging buffer that OVERLAPS the
+						 * destination, and for LZ4 it cannot
+						 * do otherwise: spl_decomp_size()
+						 * returns 0 for a format that records
+						 * no decompressed length, so
+						 * load_simple_fit()'s exact re-stage
+						 * is skipped by construction and the
+						 * compressed copy stays at
+						 * load_addr + compressed_size.  LZ4's
+						 * in-place criterion then reduces to
+						 * 2 * compressed > decompressed --
+						 * the ratio must stay WORSE than 50%.
+						 * Better than that and u-boot
+						 * decompresses over its own unread
+						 * tail, with no diagnostic: the FIT
+						 * hash is verified over the
+						 * COMPRESSED bytes, before any of this
+						 * runs.  Assert it here, where both
+						 * numbers are known and the build can
+						 * still be stopped.  LZ4 gets ~59% on
+						 * this image; LZMA's ~50% is why the
+						 * ladder below never reaches this
+						 * property.
+						 */
+						decomp-in-place;
+#elif defined(CONFIG_SPL_LZMA)
+						compress = "lzma";
+#endif
 					};
 
-#if CONFIG_IS_ENABLED(FIT_SIGNATURE) && CONFIG_IS_ENABLED(SHA256)
+/*
+ * The SPL is what checks these hashes, and with no hash node it still prints
+ * "## Checking hash(es) ... OK".  This file is preprocessed for U-Boot proper,
+ * so CONFIG_IS_ENABLED() reads proper's symbols; the SPL's are ORed in so a
+ * hash node is emitted whenever the SPL verifies (GXL DDR3 boot-chain FMA
+ * FB4).  ORed, not replaced, so no board loses a node it has today.  The same
+ * condition guards the two hash nodes below.
+ */
+#if (CONFIG_IS_ENABLED(FIT_SIGNATURE) && CONFIG_IS_ENABLED(SHA256)) || \
+	(defined(CONFIG_SPL_FIT_SIGNATURE) && defined(CONFIG_SPL_SHA256))
 					hash {
 						algo = "sha256";
 					};
@@ -87,7 +199,14 @@
 					type = "firmware";
 					os = "arm-trusted-firmware";
 					arch = "arm64";
+					/* Same ladder as u-boot above; BL31 compresses to 47.9% under LZMA. */
+#if defined(CONFIG_SPL_LZ4)
+					compression = "lz4";
+#elif defined(CONFIG_SPL_LZMA)
+					compression = "lzma";
+#else
 					compression = "none";
+#endif
 					/*
 					 * load and entry are SoC-specific, and thus
 					 * defined in meson-(gxbb/gxl)-u-boot.dtsi
@@ -95,9 +214,29 @@
 
 					atf-bl31 {
 						filename = "bl31.bin";
+#if defined(CONFIG_SPL_LZ4)
+						compress = "lz4";
+						/*
+						 * Same reason as the u-boot image
+						 * above: load_simple_fit() runs this
+						 * path for EVERY compressed image in
+						 * the FIT, not just the big one, and
+						 * under LZ4 it has no decompressed
+						 * length to re-stage against.  BL31 is
+						 * at ~57.5%, a smaller margin than
+						 * u-boot's ~59% because it is a
+						 * smaller, denser image -- which is
+						 * the argument for asserting it, not
+						 * against.
+						 */
+						decomp-in-place;
+#elif defined(CONFIG_SPL_LZMA)
+						compress = "lzma";
+#endif
 					};
 
-#if CONFIG_IS_ENABLED(FIT_SIGNATURE) && CONFIG_IS_ENABLED(SHA256)
+#if (CONFIG_IS_ENABLED(FIT_SIGNATURE) && CONFIG_IS_ENABLED(SHA256)) || \
+	(defined(CONFIG_SPL_FIT_SIGNATURE) && defined(CONFIG_SPL_SHA256))
 					hash {
 						algo = "sha256";
 					};
@@ -108,14 +247,71 @@
 					description = "SCP BL30 Firmware";
 					type = "scp";
 					arch = "arm"; /* The Cortex-M core is used as SCP */
+					/*
+					 * DELIBERATELY uncompressed, even when SPL_LZMA is
+					 * on -- do not "complete the set" here.  This image
+					 * is 2.9% of the FIT and compresses worst of the
+					 * four (70.4%), so it is nearly all risk and almost
+					 * no saving; and its consumer is not SPL.  See the
+					 * contract note below: BL31 reads it from `load`,
+					 * and aml_scpi_upload_scp_fw() SHAs whatever is
+					 * there.  The FDT entries are excluded for the same
+					 * reason of scope -- the objective is u-boot and
+					 * BL31, which together are 93.0% of the FIT.
+					 */
 					compression = "none";
 					/*
 					 * On GXBB the base address of the SCP firmware doesn't matter as SPL will
 					 * send the firmware to the SCP anyway, and can get the base address from the
-					 * FIT. On GXL it matters, as BL31 is supposed to send the firmware, so set the
-					 * base address to what GXL BL2 would load the binary to.
+					 * FIT. On GXL it matters, as BL31 is supposed to send the firmware, so this
+					 * address is a CONTRACT WITH BL31: SPL is the writer -- spl_load_simple_fit()
+					 * copies this loadable to `load` -- and BL31 is the reader, from the base its
+					 * own bl30_image_info/bl301_image_info descriptors name.  The two must agree
+					 * or aml_scpi_upload_scp_fw() SHAs and uploads whatever happens to be there.
 					 */
+#if defined(CONFIG_MESON_GX_LIBRE_SECURE_LAYOUT)
+					/*
+					 * Open TF-A: the staging buffer is the 256 KiB tail of BL31's
+					 * own MiB, immediately above BL31_LIMIT --
+					 * AML_SCP_BL30_BASE 0x001C0000 + 0xA000 and
+					 * AML_SCP_BL301_BASE 0x001CA000 + 0x3400
+					 * (plat/amlogic/gxl/gxl_def.h).  The FIT carries bl30_new.bin,
+					 * which is the two images concatenated, so this single load
+					 * places both -- exactly as it did at 0x013C0000.
+					 *
+					 * THIS VALUE MUST EQUAL AML_SCP_BL30_BASE.  It was briefly
+					 * 0x1000, on the premise that the walled first MiB was DRAM an
+					 * EL3 writer could use for free.  It is not DRAM: it is a
+					 * read-only ROM mirror (hwrom@0), EL3 stores to it are silently
+					 * dropped, and SPL's copy of this loadable never landed --
+					 * which is a sufficient cause for "BL31: SCP never became
+					 * ready".  See section 1 of
+					 * amlogic/software/boot/design/dram-reservations.md.
+					 */
+					load = <0x1c0000>;
+#else
+					/* What vendor GXL BL2 loads the binary to. */
 					load = <0x13c0000>;
+#endif
+
+					/*
+					 * G5/D3 PAIRING CLAIM (ledger N339, scmi-plan.md G5).
+					 * The open SC firmware is compiled one board at a time and
+					 * carries its board id as the LAST word of the .bin; this
+					 * property says which board THIS build's defconfig believes
+					 * the slice is for, fed from CONFIG_MESON_GXL_SCP_BOARD_ID
+					 * (arch/arm/mach-meson/Kconfig, registry = scp-firmware
+					 * product/amlogic/gxl/include/gxl_board.h).  spl-gxl-scp.c
+					 * compares the staged trailer word before the 0xd3 send, and
+					 * the host-side gate (amlogic software/boot/gxl/tests/)
+					 * asserts each built FIT carries ITS board's id and not the
+					 * other's.  Only emitted when a real id is declared (the
+					 * two *_libre gxl defconfigs); GXBB and vendor-chain builds
+					 * carry no claim and no property.
+					 */
+#if defined(CONFIG_MESON_GXL_SCP_BOARD_ID) && (CONFIG_MESON_GXL_SCP_BOARD_ID != 0)
+					board-id = <CONFIG_MESON_GXL_SCP_BOARD_ID>;
+#endif
 
 					scp {
 						filename = "scp.bin";
@@ -134,7 +330,8 @@
 					type = "flat_dt";
 					compression = "none";
 
-#if CONFIG_IS_ENABLED(FIT_SIGNATURE) && CONFIG_IS_ENABLED(SHA256)
+#if (CONFIG_IS_ENABLED(FIT_SIGNATURE) && CONFIG_IS_ENABLED(SHA256)) || \
+	(defined(CONFIG_SPL_FIT_SIGNATURE) && defined(CONFIG_SPL_SHA256))
 					hash {
 						algo = "sha256";
 					};

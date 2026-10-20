@@ -8,6 +8,7 @@
 #include <dm.h>
 #include <dm/uclass-internal.h>
 #include <usb/tcpm.h>
+#include <usb/typec_dp.h>
 
 #define LIMIT_DEV	32
 #define LIMIT_PARENT	20
@@ -79,10 +80,18 @@ int do_print_info(struct udevice *dev)
 	enum typec_data_role data_role = tcpm_get_data_role(dev);
 	bool connected = tcpm_is_connected(dev);
 
-	if (!connected) {
-		printf("TCPM State: %s\n", state);
+	/*
+	 * Print the state whether or not the port is connected. It was shown
+	 * only for a disconnected port, which hides it in exactly the case
+	 * where it matters most: an attached port that is not doing what you
+	 * expect is diagnosed by which state it settled in, and nothing else
+	 * printed here distinguishes "no PD contract" from "contract, wrong
+	 * roles".
+	 */
+	printf("TCPM State:  %s\n", state);
+
+	if (!connected)
 		return 0;
-	}
 
 	printf("Orientation: %s\n", typec_orientation_name[orientation]);
 	printf("PD Revision: %s\n", typec_pd_rev_name[pd_rev]);
@@ -105,10 +114,141 @@ static int do_info(struct cmd_tbl *cmdtp, int flag, int argc,
 	return do_print_info(currdev);
 }
 
+static const char *dp_pin_name(u32 conf)
+{
+	static const char * const name[] = {
+		"A", "B", "C", "D", "E", "F"
+	};
+	u32 pin = (conf >> 8) & 0xff;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(name); i++)
+		if (pin == BIT(i))
+			return name[i];
+
+	return pin ? "multiple" : "none";
+}
+
+static int do_dp(struct cmd_tbl *cmdtp, int flag, int argc,
+		 char *const argv[])
+{
+	struct typec_dp_state *dp;
+	u16 svids[SVID_DISCOVERY_MAX];
+	unsigned int n, i;
+	bool enter;
+	int ret;
+
+	if (!currdev) {
+		printf("First, set the TCPM device!\n");
+		return CMD_RET_USAGE;
+	}
+
+	/*
+	 * The port's own state, not a stack local. `exit` used to assert
+	 * active = true and mode_pos = 1 on a local to force an exit against
+	 * a port whose real state it could not see -- a guess, and a second
+	 * answer to a question the port can answer itself.
+	 */
+	dp = tcpm_dp_state(currdev);
+
+	enter = argc > 1 && !strcmp(argv[1], "enter");
+
+	/*
+	 * `exit` exists so a partner left in DisplayPort alt mode has a
+	 * software way out. Without it the only recovery is unplugging the
+	 * cable, which is not available on a board at the end of a lease.
+	 */
+	if (argc > 1 && !strcmp(argv[1], "exit")) {
+		bool force = argc > 2 && !strcmp(argv[2], "-f");
+
+		/*
+		 * The case that matters is the one this port CANNOT see: a
+		 * partner left in alt mode by a previous boot. port->dp is
+		 * zeroed at reset, so ->active is false and the honest answer
+		 * is "not in alt mode" -- while the monitor is still in it and
+		 * the only other way out is unplugging the cable.
+		 *
+		 * An earlier revision handled that by asserting active = true
+		 * and mode_pos = 1 on a stack local, which was a fabrication
+		 * and rightly removed. `-f` is the same capability without the
+		 * lie: the operator, who can see the monitor, states that the
+		 * partner is in the mode, and object position 1 is used
+		 * because that is where DisplayPort is found on every partner
+		 * this board has met. Without -f the port's own state decides.
+		 */
+		if (!dp->active && !force) {
+			printf("DisplayPort exit: not in alt mode (use 'exit -f' to send one anyway)\n");
+			return CMD_RET_SUCCESS;
+		}
+
+		if (force && !dp->active) {
+			printf("DisplayPort exit: forcing, port has no record of an active mode\n");
+			dp->active = true;
+			if (!dp->mode_pos)
+				dp->mode_pos = 1;
+		}
+
+		ret = typec_dp_exit(currdev, dp);
+		printf("DisplayPort exit: %s\n",
+		       ret ? errno_str(ret) : "left alt mode");
+
+		return ret ? CMD_RET_FAILURE : CMD_RET_SUCCESS;
+	}
+
+	ret = enter ? typec_dp_enter(currdev, dp)
+		    : typec_dp_discover(currdev, dp);
+
+	/*
+	 * Print what was learned even on failure. A refused Enter Mode with
+	 * the partner's capability VDO in hand is a diagnosis; the same
+	 * failure with nothing printed is a mystery.
+	 */
+	n = tcpm_get_partner_svids(currdev, svids, ARRAY_SIZE(svids));
+	printf("Partner SVIDs:");
+	for (i = 0; i < n; i++)
+		printf(" %04x%s", svids[i],
+		       svids[i] == USB_TYPEC_DP_SID ? " (DisplayPort)" : "");
+	if (!n)
+		printf(" none");
+	printf("\n");
+
+	printf("Port DP VDO:    %08x\n", dp->port_vdo);
+	printf("Partner DP VDO: %08x\n", dp->partner_vdo);
+
+	if (dp->partner_vdo)
+		printf("  capability %u, signalling %u, %s, pin DFP_D %02x UFP_D %02x\n",
+		       DP_CAP_CAPABILITY(dp->partner_vdo),
+		       DP_CAP_DP_SIGNALLING(dp->partner_vdo),
+		       dp->partner_vdo & DP_CAP_RECEPTACLE ? "receptacle"
+							   : "plug",
+		       DP_CAP_DFP_D_PIN_ASSIGN(dp->partner_vdo),
+		       DP_CAP_UFP_D_PIN_ASSIGN(dp->partner_vdo));
+
+	if (enter) {
+		printf("DP Status:      %08x  connection %u, hpd %u, irq_hpd %u%s\n",
+		       dp->status, DP_STATUS_CONNECTION(dp->status),
+		       !!(dp->status & DP_STATUS_HPD_STATE),
+		       !!(dp->status & DP_STATUS_IRQ_HPD),
+		       dp->status & DP_STATUS_PREFER_MULTI_FUNC ?
+		       ", prefers multi-function" : "");
+		printf("DP Configure:   %08x  pin assignment %s\n",
+		       dp->conf, dp_pin_name(dp->conf));
+	}
+
+	if (ret) {
+		printf("DisplayPort %s failed: %d (%s)\n",
+		       enter ? "entry" : "discovery", ret, errno_str(ret));
+		return CMD_RET_FAILURE;
+	}
+
+	return CMD_RET_SUCCESS;
+}
+
 static struct cmd_tbl subcmd[] = {
 	U_BOOT_CMD_MKENT(dev, 2, 1, do_dev, "", ""),
 	U_BOOT_CMD_MKENT(list, 1, 1, do_list, "", ""),
 	U_BOOT_CMD_MKENT(info, 1, 1, do_info, "", ""),
+	U_BOOT_CMD_MKENT(dp, 2, 1, do_dp, "", ""),
 };
 
 static int do_tcpm(struct cmd_tbl *cmdtp, int flag, int argc,
@@ -133,4 +273,9 @@ U_BOOT_CMD(tcpm, CONFIG_SYS_MAXARGS, 1, do_tcpm,
 	"list          - list TCPM devices\n"
 	"tcpm dev [ID]      - show or [set] operating TCPM device\n"
 	"tcpm info          - dump information\n"
+	"tcpm dp            - discover the partner's DisplayPort alt mode\n"
+	"tcpm dp enter      - and enter it as a source\n"
+	"tcpm dp exit [-f]  - leave it, for a partner left stuck in alt mode\n"
+	"                     (-f sends one even when this port has no record,\n"
+	"                      e.g. a partner left in the mode by a prior boot)\n"
 );

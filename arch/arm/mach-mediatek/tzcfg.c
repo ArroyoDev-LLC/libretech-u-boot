@@ -15,6 +15,7 @@
 #include <fdtdec.h>
 #include <fdt_support.h>
 #include <lmb.h>
+#include "cpu.h"
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -179,6 +180,8 @@ int arch_misc_init(void)
 {
 	phys_addr_t addr;
 	struct arm_smccc_res res;
+
+	mtk_setup_serial();
 
 	/*
 	 * Since board_get_usable_ram_top is be called before arch_misc_init,

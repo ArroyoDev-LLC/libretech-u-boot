@@ -83,12 +83,37 @@ static const struct mtk_pll_data apmixed_plls[] = {
 	    0x0344, 0),
 };
 
+/*
+ * CLK_APMIXED_PLL_SSUSB26M_EN (the last apmixed binding ID) is a gate, not a
+ * PLL -- AP_PLL_CON0 bit 1, enabled by clearing the bit (no_setclr_inv in the
+ * Linux clk-mt8188-apmixedsys.c). Without this table an enable request for it
+ * indexes past apmixed_plls[] and faults on a garbage pwr_reg.
+ */
+static const struct mtk_gate_regs apmixed_cg_regs = {
+	.set_ofs = 0x8,
+	.clr_ofs = 0x8,
+	.sta_ofs = 0x8,
+};
+
+static const struct mtk_gate apmixed_gates[] = {
+	{
+		.id = CLK_APMIXED_PLL_SSUSB26M_EN,
+		.parent = CLK_PAD_CLK26M,
+		.regs = &apmixed_cg_regs,
+		.shift = 1,
+		.flags = CLK_GATE_NO_SETCLR_INV | CLK_PARENT_EXT,
+	},
+};
+
 static const struct mtk_clk_tree mt8188_apmixedsys_clk_tree = {
 	.pll_parent = EXT_PARENT(CLK_PAD_CLK26M),
 	.ext_clk_rates = ext_clock_rates,
 	.num_ext_clks = ARRAY_SIZE(ext_clock_rates),
 	.plls = apmixed_plls,
 	.num_plls = ARRAY_SIZE(apmixed_plls),
+	.gates = apmixed_gates,
+	.num_gates = ARRAY_SIZE(apmixed_gates),
+	.gates_offs = CLK_APMIXED_PLL_SSUSB26M_EN,
 };
 
 #define FIXED_CLK0(_id, _rate)			\

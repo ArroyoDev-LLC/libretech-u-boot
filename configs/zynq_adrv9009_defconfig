@@ -1,0 +1,426 @@
+CONFIG_ARM=y
+CONFIG_SPL_SYS_DCACHE_OFF=y
+CONFIG_SYS_L2CACHE_OFF=y
+CONFIG_ARCH_ZYNQ=y
+CONFIG_TEXT_BASE=0x4000000
+CONFIG_DEBUG_UART=y
+CONFIG_DEBUG_UART_ZYNQ=y
+CONFIG_DEBUG_UART_BASE=0xe0000000
+CONFIG_DEBUG_UART_CLOCK=50000000
+CONFIG_DEBUG_UART_ANNOUNCE=y
+CONFIG_CLK=y
+CONFIG_SPL_CLK=y
+CONFIG_CLK_ZYNQ=y
+CONFIG_SF_DEFAULT_BUS=0
+CONFIG_SF_DEFAULT_CS=0
+CONFIG_SF_DEFAULT_SPEED=30000000
+# Env size for FAT uboot.env (Libre Computer policy: env proper on boot media
+# EFI/FAT, NOT in SPI NOR). Matches zynq_e310_defconfig and
+# aml-s905d3-cc_defconfig. This was 0x10000 (64 KiB) until 2026-07-30, a
+# leftover sized to the NOR erase block from the retired ENV_IS_IN_SPI_FLASH
+# arrangement; nothing about a FAT file wants an erase-block size. Changing it
+# changes the size of uboot.env on the ESP, so the old 64 KiB file no longer
+# matches and a fresh `saveenv` is required after the update.
+CONFIG_ENV_SIZE=0x2000
+CONFIG_DM_GPIO=y
+CONFIG_DEFAULT_DEVICE_TREE="zynq-adrv9009"
+CONFIG_OF_LIBFDT_OVERLAY=y
+CONFIG_SPL_STACK_R_ADDR=0x200000
+CONFIG_SPL_STACK=0xfffffe00
+CONFIG_SPL_HAS_BSS_LINKER_SECTION=y
+CONFIG_SPL_BSS_START_ADDR=0x100000
+CONFIG_SPL_BSS_MAX_SIZE=0x100000
+CONFIG_SPL_STACK_R=y
+# Board-specific code in board/xilinx/zynq/zynq-adrv9009/board.c: misc_init_r()
+# derives a deterministic ethaddr from the QSPI NOR (W25Q256) factory unique
+# ID. Without it U-Boot sets no ethaddr, so it injects no local-mac-address
+# into the FDT, Linux's macb falls back to a random MAC
+# ("invalid hw address, using random", addr_assign_type != 0), and the fleet
+# client loses the board's permanent identity. Ported from zynq_e310.
+CONFIG_ZYNQ_ADRV9009=y
+CONFIG_MISC_INIT_R=y
+# Board-bootloader policy §2 "Boot menu (interruptible)": a 1 s autoboot delay
+# interruptible with ESC (27) into a looping interactive bootmenu that carries
+# the recovery actions (Select Boot / UEFI Config / UMS / DFU / Console /
+# Reboot). The entries themselves live in
+# board/xilinx/zynq/zynq-adrv9009.env (CONFIG_ENV_SOURCE_FILE below) --
+# compiled-in defaults, so they exist even with a blank uboot.env, which is
+# exactly when the recovery UI is wanted. CMD_PAUSE is what the menu uses to
+# hold a failure message on screen before looping back.
+#
+# CONFIG_USE_PREBOOT stays OFF (see the PL note further down) -- the menu key is
+# handled by common/autoboot.c, which does not need a preboot hook.
+CONFIG_BOOTDELAY=1
+CONFIG_AUTOBOOT_USE_MENUKEY=y
+CONFIG_AUTOBOOT_MENUKEY=27
+CONFIG_CMD_BOOTMENU=y
+CONFIG_CMD_PAUSE=y
+CONFIG_ENV_SOURCE_FILE="zynq-adrv9009"
+# Last-resort MAC rung, per policy §1's eFUSE -> hash -> random chain. The
+# comment block in board/xilinx/zynq/zynq-adrv9009/board.c already documents a
+# random MAC as this board's *failure signal* for the QSPI-UID derivation, and
+# net/eth-uclass.c only calls net_random_ethaddr() when this symbol is set --
+# without it a UID read failure yields NO MAC at all, which is silent rather
+# than diagnosable.
+CONFIG_NET_RANDOM_ETHADDR=y
+CONFIG_SYS_BOOTM_LEN=0x3c00000
+CONFIG_SYS_LOAD_ADDR=0x0
+CONFIG_SPL=y
+CONFIG_CMD_FRU=y
+CONFIG_SYS_MEMTEST_START=0x00000000
+CONFIG_SYS_MEMTEST_END=0x00001000
+CONFIG_REMAKE_ELF=y
+CONFIG_SYS_CUSTOM_LDSCRIPT=y
+CONFIG_SYS_LDSCRIPT="arch/arm/mach-zynq/u-boot.lds"
+CONFIG_FIT=y
+# Board-bootloader policy §6: this is an OPEN platform, so images ship UNSIGNED,
+# but the board must provide the signature-verification MECHANISM for a customer
+# to enrol keys into. Before this the mechanism was absent entirely -- weaker
+# than roc-rk3328-cc -- so a customer who wanted a verified boot chain had
+# nothing to attach to and would have had to rebuild U-Boot first.
+#
+# With no /signature node in the SPL's control FDT,
+# fit_config_verify_required_keys() (boot/image-fit-sig.c:640) returns 0, so an
+# unsigned FIT still loads: enabling this does not require signing today. Keys
+# stay entirely the customer's act.
+CONFIG_FIT_SIGNATURE=y
+CONFIG_SPL_FIT_SIGNATURE=y
+CONFIG_FIT_VERBOSE=y
+CONFIG_SPL_FIT_PRINT=y
+CONFIG_SPL_LOAD_FIT=y
+CONFIG_SPL_LOAD_FIT_ADDRESS=0x10000000
+CONFIG_BOOTSTD_FULL=y
+CONFIG_HUSH_PARSER=y
+# CONFIG_ARCH_FIXUP_FDT_MEMORY is not set
+# NO PREBOOT -- U-Boot does not touch the PL. The bitstream lifecycle moved to
+# Linux userspace on 2026-07-26 (adrv9009-fpga-up programs the PL on demand from
+# /lib/firmware and applies the runtime overlay), so the board boots with a DARK
+# PL and the control FDT describes PS only. The bitstream still sits in QSPI NOR
+# @0x300000 as a recovery copy; the retired PREBOOT that loaded it was
+#   "sf probe 0 0 0; sf read 0x10000000 0x300000 0x109c0a0; fpga load 0 0x10000000 0x109c0a0"
+# and can be restored by hand with setenv if a bootloader-programmed PL is ever
+# wanted again. Leaving USE_PREBOOT compiled in was a live hazard for a
+# factory-reset environment: it would program the PL under a PS-only FDT.
+# CONFIG_USE_PREBOOT is not set
+CONFIG_SYS_PBSIZE=2071
+CONFIG_CLOCKS=y
+CONFIG_SPL_MAX_SIZE=0x30000
+# CONFIG_SPL_SHARES_INIT_SP_ADDR is not set
+CONFIG_SPL_HAVE_INIT_STACK=y
+CONFIG_SPL_SYS_MALLOC=y
+CONFIG_SPL_SYS_MALLOC_SIZE=0x2000000
+CONFIG_SPL_FS_LOAD_PAYLOAD_NAME="u-boot.img"
+# The full production control FDT (ad9528/adrv9009/fpga-axi radio + PS boot
+# nodes) overflows U-Boot-proper's pre-relocation reserve region. zynq-common.h
+# pins that region to an 8 KiB window in high OCM (CFG_SYS_INIT_RAM_ADDR
+# 0xFFFF0000 + SIZE 0x2000), so gd + malloc_f + stack for the bigger FDT grow
+# past 0xFFFF0000 into unmapped space -> data abort. Move U-Boot-proper's
+# pre-reloc stack into DRAM (already brought up by the SPL) so the reserve chain
+# has room; the SPL keeps its own OCM stack (CONFIG_SPL_STACK,
+# SPL_SHARES_INIT_SP_ADDR unset). 0x03f00000 sits in DRAM just below the u-boot
+# text base (0x04000000), clear of the SPL BSS/stack (0x100000/0x200000) and the
+# top-of-DRAM relocation target.
+CONFIG_HAS_CUSTOM_SYS_INIT_SP_ADDR=y
+CONFIG_CUSTOM_SYS_INIT_SP_ADDR=0x3f00000
+# malloc_f now has DRAM room; keep it generous for the bigger FDT parse.
+CONFIG_SYS_MALLOC_F_LEN=0x2000
+CONFIG_SPL_FPGA=y
+CONFIG_SPL_SPI_FLASH_BAR=y
+CONFIG_SPL_SPI_LOAD=y
+# Offset of the FIT payload INSIDE the combined bootloader blob binman writes to
+# NOR offset 0 (arch/arm/dts/zynq-sdr-nor-u-boot.dtsi). DERIVED, not chosen:
+# the Zynq-7000 SPL executes in place out of the 192 KiB low-OCM window mapped
+# at 0x0, and that window IS CONFIG_SPL_MAX_SIZE (0x30000) -- so 0x40000, the
+# smallest 64 KiB-erase-aligned offset above the SPL's hard ceiling, is the
+# floor. Same value as the sibling zynq_e310 and as the in-tree Zynq binman
+# precedent brcp150_defconfig.
+#
+# This was 0x120000 until 2026-07-31, a legacy number inherited from the vendor
+# layout. It put 1 045 544 B of 0xff between the end of the SPL image and the
+# payload -- 33.94% of the then-0x2F0000 build budget spent on nothing.
+# Reclaimed by this line alone: 0x120000 - 0x40000 = 917 504 B.
+CONFIG_SYS_SPI_U_BOOT_OFFS=0x40000
+CONFIG_SYS_MAXARGS=32
+CONFIG_CMD_IMLS=y
+CONFIG_CMD_THOR_DOWNLOAD=y
+CONFIG_THOR_RESET_OFF=y
+CONFIG_CMD_GREPENV=y
+CONFIG_CMD_MEMINFO=y
+CONFIG_CMD_MEMTEST=y
+CONFIG_SYS_ALT_MEMTEST=y
+CONFIG_CMD_DFU=y
+CONFIG_CMD_FPGA=y
+CONFIG_CMD_FPGA_LOADP=y
+CONFIG_CMD_FPGA_LOADBP=y
+CONFIG_CMD_FPGA_LOADFS=y
+CONFIG_CMD_FPGA_LOADMK=y
+CONFIG_CMD_GPIO=y
+CONFIG_CMD_MMC=y
+CONFIG_MMC_SPEED_MODE_SET=y
+CONFIG_CMD_MTD=y
+CONFIG_CMD_SF_TEST=y
+CONFIG_CMD_USB=y
+CONFIG_CMD_CACHE=y
+CONFIG_CMD_TIME=y
+CONFIG_CMD_TIMER=y
+CONFIG_CMD_FAT=y
+CONFIG_CMD_EXT4=y
+CONFIG_CMD_EXT4_WRITE=y
+CONFIG_CMD_INI=y
+CONFIG_CMD_MTDPARTS=y
+CONFIG_CMD_BOOTEFI=y
+CONFIG_OF_SEPARATE=y
+CONFIG_OF_LIST="zynq-adrv9009"
+# Env proper lives on the boot media's EFI/FAT partition, per Libre Computer
+# bootloader policy §4 ("Environment storage: a filesystem, never a raw block" --
+# never a raw offset, and never in NOR; the NOR config sector holds *overrides*
+# only). Same backend as zynq_e310_defconfig and aml-s905d3-cc_defconfig.
+#
+# This REPLACES an earlier env-in-QSPI-NOR arrangement (ENV_IS_IN_SPI_FLASH at a
+# raw ENV_OFFSET=0x200000) whose stated goal was to keep the SD a clean generic
+# armhf EFI Debian with no board-specific boot state on it. That goal lost to
+# policy §4, and the raw offset was independently unsafe: with the FIT at the
+# then-current 0x120000 the blob ran to 0x1e4000, so a raw env at 0x200000 sat
+# only 112 KiB past it and a slightly larger U-Boot would silently overwrite the
+# env -- exactly the invisible-reservation collision §4 exists to prevent. The
+# board's dedicated "bootenv" partition at 0x500000 was never used by it either.
+# (Under the 2026-07-31 layout 0x200000 is the QSPI boot-script slot; see
+# board/xilinx/zynq/zynq-adrv9009.env.)
+#
+# Do NOT enable ENV_IS_NOWHERE: a missing uboot.env must fall back to the
+# built-in defaults, not to a no-op env.
+# CONFIG_ENV_IS_NOWHERE is not set
+CONFIG_ENV_IS_IN_FAT=y
+CONFIG_ENV_FAT_INTERFACE="mmc"
+CONFIG_ENV_FAT_DEVICE_AND_PART=":auto"
+CONFIG_ENV_FAT_FILE="uboot.env"
+# CONFIG_ENV_IS_IN_SPI_FLASH is not set
+# NOR config sector (policy §4): one erase block of plain-text key=value
+# environment *overrides*, DFU-writable, so boot_targets / overlays / a
+# provisioned ethaddr can be changed on a unit without rebuilding U-Boot. Read at
+# misc_init_r() by board_config_env_import(); the board_nor_* hooks are in
+# board/xilinx/zynq/zynq-adrv9009/board.c.
+#
+# OFFSET IS THE POLICY DEFAULT, 0x1F0000, since 2026-07-31. It was 0x2F0000, and
+# the reason it had to be is gone: 0x2F0000 was chosen as "the last 64 KiB-aligned
+# block below the 0x300000 bitstream" only because a blob anchored at the legacy
+# FIT offset 0x120000 already reached 0x1E7440 and could not clear 0x1F0000 with
+# any headroom. With the FIT moved to its derived floor (0x40000, see
+# SYS_SPI_U_BOOT_OFFS above) and BL33 LZ4-compressed (SPL_LZ4 below), the blob
+# ends around 0xC8000 and 0x1F0000 clears it by ~1.2 MiB, so this board stops
+# carrying a bespoke config-sector offset. That also frees the whole
+# 0x1F0000-0x300000 span for the boot-script slot and spare.
+#
+# The two hard constraints that shaped the old value still hold and 0x1F0000
+# satisfies both:
+#  - It must stay BELOW the stock 17 416 352 B PL bitstream at 0x300000-0x139C0A0
+#    (documented byte-for-byte in rf/rfsim/reference/adrv9009-qspi-nor-contents.md,
+#    claude repo). 0x1F0000 is 1 114 112 B below it.
+#  - It must stay BELOW 0x1000000 (16 MiB). U-Boot proper on this board has NO
+#    4-byte addressing: the device measures SR3 = 0x60 (ADS = 0, ADP = 0) at the
+#    U-Boot prompt AFTER "SF: Detected w25q256", i.e. after spi_nor_init(),
+#    sampled three times and identical from Linux; CONFIG_SPI_FLASH_BAR is off in
+#    U-Boot proper (only SPL_SPI_FLASH_BAR is set), and the w25q256 entry
+#    (0xef4019) carries neither SPI_NOR_4B_OPCODES nor a Spansion mfr. An access
+#    at or above 16 MiB truncates -- an earlier draft that put this at 0x1400000
+#    would have resolved to 0x400000, INSIDE the bitstream, so a config-sector
+#    write would have corrupted PL configuration data while reporting success.
+#
+# The bound is ENFORCED, not just documented: configs/xil-z7100-sdr in
+# libretech-builder-simple now inherits LBS_TARGET_MAX_SIZE=0x1F0000 from
+# configs/xilinx-zynq7 (its 0x2F0000 override is removed), so a bootloader blob
+# that ever grows into the config sector fails the build. The DFU alt map in
+# board.c uses the same boundary.
+CONFIG_BOARD_CONFIG=y
+# PINNED, and it must stay pinned. The default is now the last 64 KiB of the
+# addressable device -- min(size, 16 MiB) - 64 KiB, and 0xFF0000 outright when
+# the size cannot be measured, which is this board's case. Either way it is
+# 0xFF0000, and 0xFF0000 is inside the 17 416 352 B stock PL bitstream at
+# 0x300000-0x139C0A0. A config write there destroys PL configuration data
+# while reporting success. See board.c's DFU alt map.
+#
+# The pin also matches the write side with nothing further to do: board.c
+# compiles in "config raw 0x1f0000 0x10000" and the capsule FMP alt stops at
+# this same boundary, which is LBS_TARGET_MAX_SIZE for configs/xil-z7100-sdr.
+CONFIG_BOARD_CONFIG_NOR_OFFSET_PIN=y
+CONFIG_BOARD_CONFIG_NOR_OFFSET=0x1F0000
+# Platform boot-source variables (policy §4 "Boot source variables"): not on
+# by default here because SYS_VENDOR is "xilinx", so it is opted into.
+CONFIG_BOOTSOURCE=y
+# No CONFIG_BOOT_SCRIPT_OFFSET, and no QSPI boot target: SPI NOR on a Libre
+# Computer board carries no boot script (policy §4 -- bootloader blob, config
+# sector, overlay FIT, and nothing else), and the per-unit override surface is
+# the config sector selected just above. CONFIG_BOARD_CONFIG is what
+# switches both off; see include/configs/zynq-common.h (the boot target) and
+# board/xilinx/common/board.c (the script_offset_f assignment). An earlier
+# revision set CONFIG_BOOT_SCRIPT_OFFSET=0x200000 here, which pointed the
+# script reader at the overlay-FIT region.
+# No DT overlay FIT on this board: OF_OVERLAY_LIST is empty and there is no
+# .dtbo set (the radio arrives via a userspace overlay after Linux programs the
+# PL). BOARD_CONFIG_OVERLAYS defaults to y and would parse whatever happens to sit
+# at its default 0x200000 -- which on this unit is inside the bootloader region.
+# It also installs fdtdec_board_setup(). Both are wrong here.
+# CONFIG_BOARD_CONFIG_OVERLAYS is not set
+CONFIG_SPL_DM_SEQ_ALIAS=y
+CONFIG_SIMPLE_PM_BUS=y
+CONFIG_DFU_TIMEOUT=y
+CONFIG_DFU_MMC=y
+CONFIG_DFU_RAM=y
+CONFIG_DFU_SF=y
+# QSPI NOR DFU alternate-setting map, built in
+# board/xilinx/zynq/zynq-adrv9009/board.c set_dfu_alt_info(). Compiled in rather
+# than an env default because (a) the env lives on the ESP FAT (ENV_IS_IN_FAT)
+# and may be absent exactly when DFU recovery is wanted, and (b) zynq-common.h's
+# bootcmd_usb_dfu*/usb_thor* overwrite dfu_alt_info during a bootstd scan, which
+# would permanently destroy an env-supplied map. Keyed on the interface so the
+# boot.scr-over-DFU path keeps working unchanged. Without this, `dfu 0 sf 0` has
+# no alt map at all and DFU-to-NOR -- the checklist's *minimum* recovery path --
+# is unusable.
+CONFIG_SET_DFU_ALT_INFO=y
+CONFIG_SYS_DFU_DATA_BUF_SIZE=0x600000
+CONFIG_FPGA_XILINX=y
+CONFIG_FPGA_ZYNQPL=y
+CONFIG_MMC_SDHCI=y
+CONFIG_MMC_SDHCI_ZYNQ=y
+CONFIG_SPI_FLASH_ISSI=y
+CONFIG_SPI_FLASH_MACRONIX=y
+CONFIG_SPI_FLASH_SPANSION=y
+CONFIG_SPI_FLASH_STMICRO=y
+CONFIG_SPI_FLASH_SST=y
+CONFIG_SPI_FLASH_WINBOND=y
+# CONFIG_SPI_FLASH_USE_4K_SECTORS is not set
+CONFIG_SPI_FLASH_MTD=y
+CONFIG_DM_ETH_PHY=y
+CONFIG_MII=y
+CONFIG_ZYNQ_GEM=y
+CONFIG_PHY_MARVELL=y
+CONFIG_PHY_REALTEK=y
+# Board-bootloader policy §2 "CPU power management & reset": reset must go
+# through the SYSRESET uclass; an arch-specific reset_cpu() is a violation.
+# SYSRESET_ZYNQ (drivers/sysreset/sysreset_zynq.c) is the SLCR sequence
+# mach-zynq/cpu.c used to open-code. NOT syscon-reboot: the SLCR is
+# write-protected by the time U-Boot reaches its prompt and that driver has
+# nowhere to put the 0xDF0D unlock -- see the driver's header comment.
+CONFIG_SYSRESET=y
+CONFIG_SYSRESET_ZYNQ=y
+# SMBIOS identity provider. The strings live in the /smbios node of
+# arch/arm/dts/zynq-adrv9009-u-boot.dtsi rather than in CONFIG_SYS_VENDOR /
+# CONFIG_SYS_BOARD, because those two also select $(BOARDDIR) (board/xilinx/zynq)
+# and renaming them would break the build. Without a provider lib/smbios.c fell
+# back to those Kconfig defaults and told the OS vendor "xilinx" / board "zynq".
+CONFIG_SYSINFO=y
+CONFIG_SYSINFO_SMBIOS=y
+CONFIG_DM_RTC=y
+CONFIG_RTC_EMULATION=y
+CONFIG_ARM_DCC=y
+CONFIG_ZYNQ_SERIAL=y
+# PS SPI0 (e0006000) = AD9528/ADRV9009 control (Linux only). Leave ZYNQ_SPI off
+# so SPI bus 0 is QSPI for SPL/u-boot.img load (sf probe). The env is NOT in
+# QSPI -- it lives on the boot media's EFI/FAT partition (ENV_IS_IN_FAT above).
+# CONFIG_ZYNQ_SPI is not set
+CONFIG_ZYNQ_QSPI=y
+CONFIG_FS_FAT=y
+CONFIG_FAT_WRITE=y
+CONFIG_FS_EXT4=y
+CONFIG_EFI_LOADER=y
+# Board-bootloader policy §6 "Firmware signing & capsule production": the
+# bootloader must be updatable by a signed UEFI capsule, with a per-board FMP
+# target. On a SPI-NOR board the target writes U-Boot to NOR -- here that is the
+# single binman blob u-boot-zynq-nor.bin, so the FMP is ONE image spanning
+# 0x0-0x1F0000 (the DFU "bootloader" alt; see board/xilinx/zynq/zynq-adrv9009/
+# board.c). Before this, EFI_RUNTIME_UPDATE_CAPSULE was unset and there was no
+# FMP at all, so the bootmenu's Firmware Update row -- already #ifdef'd on
+# CONFIG_EFI_HAVE_CAPSULE_SUPPORT -- could never compile in.
+#
+# RAW rather than FIT backend: the artifact is a flat blob at a fixed NOR
+# offset, which is exactly what the raw FMP writes (it selects DFU +
+# DFU_WRITE_ALT). CAPSULE_ON_DISK adds the EFI\UpdateCapsule path on the ESP
+# alongside the in-memory `efidebug capsule update` the menu uses; it needs
+# SYSRESET, which this board gained in 15d5a75e156.
+#
+# AUTHENTICATE with the same in-repo public certificate the Amlogic SPI-NOR
+# reference board (aml-s905d3-cc) uses. Policy §6 is explicit that this is an
+# OPEN platform -- the key is not treated as a secret and nothing fuses a root
+# of trust -- but the capsule itself is signed for integrity and fwupd identity,
+# and an unsigned or foreign-signed capsule is REJECTED BEFORE ANY WRITE, which
+# is the property that matters on a board whose only recovery path is JTAG.
+# The build turns the .pem into an ESL with cert-to-efi-sig-list (efitools) and
+# embeds it in the binary.
+#
+# CMD_EFIDEBUG is what the bootmenu entry invokes; it was not enabled.
+CONFIG_EFI_RUNTIME_UPDATE_CAPSULE=y
+CONFIG_EFI_CAPSULE_ON_DISK=y
+CONFIG_EFI_CAPSULE_FIRMWARE_RAW=y
+CONFIG_EFI_CAPSULE_AUTHENTICATE=y
+CONFIG_EFI_CAPSULE_CRT_FILE="board/libre-computer/common/eficapsule.pub.pem"
+CONFIG_CMD_EFIDEBUG=y
+CONFIG_USB=y
+CONFIG_USB_EHCI_HCD=y
+CONFIG_USB_ULPI=y
+CONFIG_USB_GADGET=y
+# USB gadget identity. Board-bootloader policy §2 "USB-gadget modes & identity"
+# requires all gadget modes to present the board's real manufacturer and the
+# board name; the Xilinx defaults said manufacturer "Xilinx" / product "U-Boot",
+# i.e. neither. This is a third-party carrier, so the honest manufacturer is
+# HamGeek (matching the DTS model "HamGeek XC7Z100 ADRV9009 (RIGUKE)" and the
+# hamgeek,xc7z100-adrv9009 compatible), not the "Libre Computer" literal policy
+# uses for our own boards.
+#
+# VID:PID stays 03fd:0300. Policy says explicitly that "the USB VID/PID are not
+# significant", and the recovery tooling for this board keys on that pair.
+# iSerialNumber comes from the env serial#, derived in board.c from the W25Q256
+# factory UID.
+CONFIG_USB_GADGET_MANUFACTURER="HamGeek"
+CONFIG_USB_GADGET_PRODUCT="XC7Z100-ADRV9009"
+CONFIG_USB_GADGET_VENDOR_NUM=0x03fd
+CONFIG_USB_GADGET_PRODUCT_NUM=0x0300
+CONFIG_CI_UDC=y
+CONFIG_USB_GADGET_DOWNLOAD=y
+CONFIG_SYS_TIMER_COUNTS_DOWN=y
+# BL33 compression, per the BL33 compression policy: LZ4 first, LZMA only with a
+# recorded shortfall, GZIP banned outright (strictly dominated -- worse ratio
+# than LZMA, slower than LZ4). LZ4 is what the ladder in
+# arch/arm/dts/zynq-sdr-nor-u-boot.dtsi selects off this symbol, and it drives
+# BOTH the FIT `compression` metadata and the binman `compress` property, so the
+# label and the payload can never disagree.
+#
+# LZ4 is taken and LZMA is NOT, because there is no shortfall to record: LZ4
+# brings the blob well inside the 0x1F0000 gate on its own, and LZ4 decompresses
+# far faster than LZMA. Measured on u-boot-nodtb.bin (845 184 B uncompressed):
+# LZ4 539 082 B = 63.78% of uncompressed, LZMA 326 275 B = 38.60%. The policy
+# ladder only reaches for LZMA when LZ4's ratio does not fit.
+#
+# This REPLACES a "no SPL decompressor" arrangement whose stated blocker was
+# real and is now resolved: the Makefile's mkimage "-f auto" path CANNOT
+# compress -- it writes the payload raw and only stamps the compression property
+# -- so a -C lz4 there yields a FIT that lies about its contents and an SPL that
+# ulz4fn()s raw ARM code. The fix is the layer that owns the artifact: the
+# binman `u-boot-img` entry is replaced by an explicit `fit` node whose
+# u-boot-nodtb subentry carries `compress`, which is what actually runs the
+# compressor. Prior to that, CONFIG_SPL_GZIP=y was set here against a FIT
+# marking every entry compression = "none", i.e. 13 064 B of unreachable SPL
+# text.
+CONFIG_SPL_LZ4=y
+# USB-OTG gadget: reflash/write storage over USB (usb@e0002000, ChipIdea UDC via
+# ci_udc + ehci-zynq ULPI). This adds UMS + fastboot on top of the DFU-over-USB
+# already enabled above (CMD_DFU + DFU_MMC/DFU_SF/DFU_RAM; DFU_OVER_USB is
+# auto-selected -- there is no CONFIG_USB_FUNCTION_DFU symbol in this u-boot).
+# The core (USB=y, USB_GADGET=y, CI_UDC=y, USB_GADGET_DOWNLOAD=y, USB_ULPI=y,
+# Xilinx VID/PID) is set above; DM_USB, USB_EHCI_ZYNQ, USB_ULPI_VIEWPORT and
+# USB_GADGET_DUALSPEED come in as ARCH_ZYNQ/select defaults.
+# UMS: `ums 0 mmc 0` exposes the SD as a USB mass-storage device to the host
+# (host then dd's the armhf image straight onto it -- no card pull). Selects
+# USB_FUNCTION_MASS_STORAGE.
+CONFIG_CMD_USB_MASS_STORAGE=y
+# fastboot over USB: `fastboot usb 0`. USB_FUNCTION_FASTBOOT selects FASTBOOT +
+# USB_GADGET_DOWNLOAD and implies CMD_FASTBOOT (set explicitly too).
+CONFIG_USB_FUNCTION_FASTBOOT=y
+CONFIG_CMD_FASTBOOT=y
+# fastboot flash target = SD (mmc dev 0). FASTBOOT_FLASH selects IMAGE_SPARSE.
+CONFIG_FASTBOOT_FLASH=y
+CONFIG_FASTBOOT_FLASH_MMC=y
+CONFIG_FASTBOOT_FLASH_MMC_DEV=0
+# Download buffer in DRAM (Zynq-7100 has >=1 GiB). 0x10000000 (256 MiB) is clear
+# of SPL BSS/stack (0x100000/0x200000) and the u-boot text base (0x04000000).
+CONFIG_FASTBOOT_BUF_ADDR=0x10000000
+CONFIG_FASTBOOT_BUF_SIZE=0x10000000

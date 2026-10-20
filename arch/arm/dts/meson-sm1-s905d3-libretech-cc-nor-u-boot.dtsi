@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * AML-S905D3-CC with the SPI NOR in use: the NOR shares BOOT_4..7 and
+ * BOOT_14 with the upper eMMC data lines, so the eMMC runs 4-bit and the
+ * SPI flash controller is enabled. Included by the NOR products' control
+ * DTs; the 8-bit eMMC product (meson-sm1-s905d3-libretech-cc-libre-emmc)
+ * leaves the upstream 8-bit + mmc-hs200-1_8v description in force.
+ */
+
+&sd_emmc_c {
+	pinctrl-0 = <&emmc_ctrl_pins>, <&emmc_data_4b_pins>, <&emmc_ds_pins>;
+	bus-width = <4>;
+	/*
+	 * The upstream 200 MHz ceiling serves HS200 at 4 bits, tuned, in the
+	 * stages that offer it (SPL_MMC_HS200_SUPPORT for the SPL flash
+	 * session, MMC_HS200_SUPPORT for U-Boot proper on aml-s905d3-cc_libre).
+	 * Untuned modes are held at 40 MHz (1 GHz / 25): HS52 asks 52 MHz =
+	 * 1 GHz / 20 = 50 MHz, where the untuned sample point fails at every
+	 * width on the NJ unit, so a stage without HS200, or a card that does
+	 * not tune, runs HS52 at 40 MHz rather than dropping to HS 26 MHz.
+	 */
+	amlogic,untuned-max-frequency = <40000000>;
+};
+
+&spifc {
+	status = "okay";
+};

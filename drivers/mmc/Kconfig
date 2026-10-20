@@ -293,6 +293,21 @@ config MMC_DW_ROCKCHIP
 	  SD 3.0, SDIO 3.0 and MMC 4.5 and supports common eMMC chips as well
 	  as removeable SD and micro-SD cards.
 
+config MMC_DW_ROCKCHIP_TUNING_MIN_WINDOW
+	int "Minimum tuning window (degrees) before a tuned clock is accepted"
+	depends on MMC_DW_ROCKCHIP && MMC_SUPPORTS_TUNING
+	default 120
+	help
+	  The sample-phase sweep of a tuned mode (SDR104 / HS200) measures the
+	  data eye as the widest passing window in degrees of the card clock
+	  period. A window narrower than this steps the card clock down one
+	  rung (200 / 150 / 100 / 50 MHz, below the DT max-frequency) and
+	  sweeps again, so a max-frequency above what the card and slot are
+	  comfortable at degrades to a rate with margin instead of running on
+	  a marginal eye. The bottom rung accepts any open window. 120 is one
+	  third of the bit period; 0 disables the gate (any window at any
+	  clock, the previous behaviour).
+
 config MMC_SDHCI_ADI
 	bool "ADI SD/MMC controller support"
 	depends on ARCH_SC5XX

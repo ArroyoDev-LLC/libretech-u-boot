@@ -107,8 +107,20 @@ enum vop_modes {
 #define M_EDP_OUT_EN       (1 << 14)
 #define M_HDMI_OUT_EN      (1 << 13)
 #define M_RGB_OUT_EN       (1 << 12)
+/*
+ * SYS_CTRL bit 11 is the DisplayPort output enable, and it exists ONLY on
+ * RK3399 (Linux rockchip_vop_reg.c rk3399_output: .dp_en = bit 11; the
+ * rk3288_output/rk3328 descriptors carry no dp_en at all, and no public TRM
+ * text we have says what bit 11 does on those parts).  Because it is not a
+ * known-harmless bit outside RK3399 it is deliberately NOT folded into
+ * M_ALL_OUT_EN below -- that mask is shared with rk3288_vop.c and
+ * rk3328_vop.c, and widening it would make those SoCs clear a bit of unknown
+ * function on every mode-set.  Use M_RK3399_ALL_OUT_EN from RK3399 code only.
+ */
+#define M_RK3399_DP_OUT_EN (1 << 11)
 #define M_ALL_OUT_EN		\
 		(M_MIPI_OUT_EN | M_EDP_OUT_EN | M_HDMI_OUT_EN | M_RGB_OUT_EN)
+#define M_RK3399_ALL_OUT_EN	(M_ALL_OUT_EN | M_RK3399_DP_OUT_EN)
 #define M_EDPI_WMS_FS      (1 << 10)
 #define M_EDPI_WMS_MODE    (1 << 9)
 #define M_EDPI_HALT_EN     (1 << 8)
@@ -126,6 +138,7 @@ enum vop_modes {
 #define V_EDP_OUT_EN(x)       (((x) & 1) << 14)
 #define V_HDMI_OUT_EN(x)      (((x) & 1) << 13)
 #define V_RGB_OUT_EN(x)       (((x) & 1) << 12)
+#define V_RK3399_DP_OUT_EN(x) (((x) & 1) << 11)
 #define V_EDPI_WMS_FS(x)      (((x) & 1) << 10)
 #define V_EDPI_WMS_MODE(x)    (((x) & 1) << 9)
 #define V_EDPI_HALT_EN(x)     (((x)&1)<<8)
@@ -202,11 +215,22 @@ enum vop_modes {
 #define V_RK3399_DSP_EDP_POL(x)        ((x) << 24)
 #define V_RK3399_DSP_HDMI_POL(x)       ((x) << 20)
 #define V_RK3399_DSP_LVDS_POL(x)       ((x) << 16)
+/*
+ * DSP_CTRL1 19:16 is one physical 4-bit polarity slot that the RGB/LVDS
+ * output and the DisplayPort output share (Linux rockchip_vop_reg.c
+ * rk3399_output maps both .rgb_pin_pol and .dp_pin_pol to 0x7 @ 16, and both
+ * .rgb_dclk_pol and .dp_dclk_pol to 0x1 @ 19).  RK3399 has no LVDS pins, so
+ * on this SoC the slot is only ever reachable as the DP field; the alias
+ * exists so DP code does not have to be read as "why is it writing LVDS".
+ * Same bits, second name -- not a second register.
+ */
+#define V_RK3399_DSP_DP_POL(x)         V_RK3399_DSP_LVDS_POL(x)
 
 #define M_RK3399_DSP_MIPI_POL          (V_RK3399_DSP_MIPI_POL(0xf))
 #define M_RK3399_DSP_EDP_POL           (V_RK3399_DSP_EDP_POL(0xf))
 #define M_RK3399_DSP_HDMI_POL          (V_RK3399_DSP_HDMI_POL(0xf))
 #define M_RK3399_DSP_LVDS_POL          (V_RK3399_DSP_LVDS_POL(0xf))
+#define M_RK3399_DSP_DP_POL            M_RK3399_DSP_LVDS_POL
 
 #define M_DSP_LAYER3_SEL               (3 << 14)
 #define M_DSP_LAYER2_SEL               (3 << 12)

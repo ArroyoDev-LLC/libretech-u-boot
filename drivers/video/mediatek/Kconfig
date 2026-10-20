@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0+
+#
+# MediaTek video support (ported from the MediaTek BSP u-boot).
+
+config VIDEO_MEDIATEK
+	bool "Enable MediaTek video support"
+	depends on VIDEO
+	select DISPLAY
+	help
+	  Enable MediaTek video support: the mt8365 DPI output feeding an
+	  ITE IT66121 HDMI bridge (drivers/video/mediatek/, ported from the
+	  MediaTek BSP u-boot). Used for the HDMI boot splash.

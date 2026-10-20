@@ -9,9 +9,13 @@
  *      (C) Copyright 2017 Theobroma Systems Design und Consulting GmbH
  */
 #include <config.h>
+#include <chip_serial.h>
 #include <clk.h>
 #include <cpu_func.h>
 #include <env.h>
+#include <env_internal.h>
+#include <errno.h>
+#include <search.h>
 #include <dm.h>
 #include <dm/uclass-internal.h>
 #include <efi_loader.h>
@@ -322,43 +326,16 @@ int fastboot_set_reboot_flag(enum fastboot_reboot_reason reason)
 #endif
 
 #ifdef CONFIG_MISC_INIT_R
+/*
+ * The MAC from the chip id (lib/chip_serial.c chip_serial_ethaddr()): SHA-256 of
+ * serial#, the cpu id's 32 raw hex -- the same string this function hashed when
+ * it was published as cpuid#, so a board keeps its MAC.
+ */
 int rockchip_setup_macaddr(void)
 {
-#if CONFIG_IS_ENABLED(HASH) && CONFIG_IS_ENABLED(SHA256)
-	int ret;
-	const char *cpuid = env_get("cpuid#");
-	u8 hash[SHA256_SUM_LEN];
-	int size = sizeof(hash);
-	u8 mac_addr[6];
+	int ret = chip_serial_ethaddr();
 
-	/* Only generate a MAC address, if none is set in the environment */
-	if (env_get("ethaddr"))
-		return 0;
-
-	if (!cpuid) {
-		debug("%s: could not retrieve 'cpuid#'\n", __func__);
-		return -1;
-	}
-
-	ret = hash_block("sha256", (void *)cpuid, strlen(cpuid), hash, &size);
-	if (ret) {
-		debug("%s: failed to calculate SHA256\n", __func__);
-		return -1;
-	}
-
-	/* Copy 6 bytes of the hash to base the MAC address on */
-	memcpy(mac_addr, hash, 6);
-
-	/* Make this a valid MAC address and set it */
-	mac_addr[0] &= 0xfe;  /* clear multicast bit */
-	mac_addr[0] |= 0x02;  /* set local assignment bit (IEEE802) */
-	eth_env_set_enetaddr("ethaddr", mac_addr);
-
-	/* Make a valid MAC address for ethernet1 */
-	mac_addr[5] ^= 0x01;
-	eth_env_set_enetaddr("eth1addr", mac_addr);
-#endif
-	return 0;
+	return ret == -ENOSYS ? 0 : ret;
 }
 
 int rockchip_cpuid_from_efuse(const u32 cpuid_offset,
@@ -395,42 +372,21 @@ int rockchip_cpuid_from_efuse(const u32 cpuid_offset,
 
 int rockchip_cpuid_set(const u8 *cpuid, const u32 cpuid_length)
 {
-	u8 low[cpuid_length / 2], high[cpuid_length / 2];
-	char cpuid_str[cpuid_length * 2 + 1];
-	u64 serialno;
-	char serialno_str[17];
-	const char *oldid;
-	int i;
-
-	memset(cpuid_str, 0, sizeof(cpuid_str));
-	for (i = 0; i < cpuid_length; i++)
-		sprintf(&cpuid_str[i * 2], "%02x", cpuid[i]);
-
-	debug("cpuid: %s\n", cpuid_str);
-
 	/*
-	 * Mix the cpuid bytes using the same rules as in
-	 *   ${linux}/drivers/soc/rockchip/rockchip-cpuinfo.c
+	 * serial# is this chip's id, its raw cpu-id bytes, replacing a saved one
+	 * from another board (arch/arm/mach-rockchip/chip-serial.c). It is the
+	 * only env variable that carries the id (claude docs repo
+	 * design/rules/bootloader/policy.md "One variable, the raw bytes"): a
+	 * cpuid# a saved environment still holds is deleted.
 	 */
-	for (i = 0; i < cpuid_length / 2; i++) {
-		low[i] = cpuid[1 + (i << 1)];
-		high[i] = cpuid[i << 1];
+	if (env_get("cpuid#")) {
+		char *const argv[] = { "setenv", "-f", "cpuid#", NULL };
+
+		printf("cpuid#: dropped, the chip id is serial#\n");
+		env_do_env_set(0, 3, argv, H_PROGRAMMATIC);
 	}
 
-	serialno = crc32_no_comp(0, low, cpuid_length / 2);
-	serialno |= (u64)crc32_no_comp(serialno, high, cpuid_length / 2) << 32;
-	snprintf(serialno_str, sizeof(serialno_str), "%016llx", serialno);
-
-	oldid = env_get("cpuid#");
-	if (oldid && strcmp(oldid, cpuid_str) != 0)
-		printf("cpuid: value %s present in env does not match hardware %s\n",
-		       oldid, cpuid_str);
-
-	env_set("cpuid#", cpuid_str);
-
-	/* Only generate serial# when none is set yet */
-	if (!env_get("serial#"))
-		env_set("serial#", serialno_str);
+	chip_serial_env();
 
 	return 0;
 }
@@ -452,8 +408,10 @@ __weak int misc_init_r(void)
 		return ret;
 
 	ret = rockchip_cpuid_from_efuse(cpuid_offset, cpuid_length, cpuid);
-	if (ret)
+	if (ret) {
+		chip_serial_env();	/* says so, and drops a stored serial# */
 		return ret;
+	}
 
 	ret = rockchip_cpuid_set(cpuid, cpuid_length);
 	if (ret)
@@ -527,7 +485,28 @@ int mmc_get_env_dev(void)
 	debug("%s: booted from %s\n", __func__, boot_device);
 
 	if (uclass_find_device_by_ofnode(UCLASS_MMC, ofnode_path(boot_device), &dev)) {
-		debug("%s: no U-Boot device found for %s\n", __func__, boot_device);
+		/*
+		 * The FIT came from something that is not an MMC controller
+		 * -- SPI NOR on a NOR-booted board. The environment is a
+		 * file on a FAT partition (a NOR has none), so it lives on
+		 * the first MMC device that actually has a medium: eMMC if
+		 * one answers, else the SD. The default index alone is not
+		 * that answer -- on a board whose eMMC slot is empty or dead
+		 * it names a device that never initialises, and the env on
+		 * the SD card is never found.
+		 */
+		struct mmc *mmc;
+		int i;
+
+		debug("%s: no U-Boot MMC device for %s, first present MMC\n",
+		      __func__, boot_device);
+		for (i = 0; i < 2; i++) {
+			mmc = find_mmc_device(i);
+			if (mmc && !mmc_init(mmc)) {
+				debug("%s: mmc%d present\n", __func__, i);
+				return i;
+			}
+		}
 		return devnum;
 	}
 

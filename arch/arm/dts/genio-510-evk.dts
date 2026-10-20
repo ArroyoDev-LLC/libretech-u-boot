@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0 OR MIT
+/*
+ * Copyright (C) 2025 MediaTek Inc.
+ * Author: Macpaul Lin <macpaul.lin@mediatek.com>
+ *
+ * Board compatible reconciled with the kernel linux-6.18.y-lc DT
+ * (mt8370-genio-510-evk.dts): "mediatek,mt8370-evk", "mediatek,mt8370",
+ * "mediatek,mt8188".
+ */
+
+/dts-v1/;
+
+#include "genio-510-evk-common.dtsi"
+
+/ {
+	model = "MediaTek Genio-510 EVK";
+	compatible = "mediatek,mt8370-evk", "mediatek,mt8370",
+		     "mediatek,mt8188";
+};

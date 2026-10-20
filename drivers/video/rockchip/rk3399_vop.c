@@ -45,6 +45,23 @@ static void rk3399_set_pin_polarity(struct udevice *dev,
 				V_RK3399_DSP_MIPI_POL(polarity));
 		break;
 
+	case VOP_MODE_DP:
+		/*
+		 * DSP_CTRL1 19:16 -- the same physical slot the RGB/LVDS
+		 * output uses, which on RK3399 (no LVDS pins) is the DP
+		 * polarity field.  Without this case DP fell to the default
+		 * below and the field kept its reset value, so hsync/vsync
+		 * polarity was never applied to the DP output at all.
+		 * Bit 19 of the slot is dp_dclk_pol; the caller deliberately
+		 * leaves it clear for DP (see rkvop_mode_set()).
+		 *
+		 * NOT yet verified on hardware.
+		 */
+		clrsetbits_le32(&regs->dsp_ctrl1,
+				M_RK3399_DSP_DP_POL,
+				V_RK3399_DSP_DP_POL(polarity));
+		break;
+
 	default:
 		debug("%s: unsupported output mode %x\n", __func__, mode);
 	}
@@ -71,13 +88,33 @@ static int rk3399_vop_probe(struct udevice *dev)
 	return rk_vop_probe(dev);
 }
 
+/*
+ * max_output_* are Linux's vop_data.max_output values for the two RK3399 VOPs
+ * (rockchip_vop_reg.c: rk3399_vop_lit 2560x1600, rk3399_vop_big 4096x2160).
+ * They are load-bearing here rather than informational: rk3399-base.dtsi
+ * places vopl@ff8f0000 before vopb@ff900000 with no ordering alias, so the
+ * little VOP binds first and is offered the cdn-dp encoder first.  A 4K
+ * monitor's EDID would otherwise be accepted by a VOP that tops out at
+ * 2560x1600.  rk_display_init() uses these to reject the mode early enough
+ * that the encoder stays unclaimed and VOPB can take it.
+ *
+ * out_en_mask includes the RK3399-only DisplayPort enable at SYS_CTRL bit 11,
+ * which is why it is set per-SoC here instead of widening the M_ALL_OUT_EN
+ * macro shared with rk3288/rk3328.
+ */
 struct rkvop_driverdata rk3399_lit_driverdata = {
 	.set_pin_polarity = rk3399_set_pin_polarity,
+	.out_en_mask = M_RK3399_ALL_OUT_EN,
+	.max_output_width = 2560,
+	.max_output_height = 1600,
 };
 
 struct rkvop_driverdata rk3399_big_driverdata = {
 	.features = VOP_FEATURE_OUTPUT_10BIT,
 	.set_pin_polarity = rk3399_set_pin_polarity,
+	.out_en_mask = M_RK3399_ALL_OUT_EN,
+	.max_output_width = 4096,
+	.max_output_height = 2160,
 };
 
 static const struct udevice_id rk3399_vop_ids[] = {

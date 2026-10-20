@@ -51,7 +51,7 @@
 		"fi\0"
 
 #define BOOTENV_DEV_NAME_ROMUSB(devtypeu, devtypel, instance)	\
-		"romusb "
+		"" /* add to preboot, remove for bootstd */
 
 /*
  * Fallback to "USB DFU" boot if script is not at scriptaddr
@@ -62,16 +62,15 @@
  * $ dfu-util -a 0 -D fitImage
  * $ dfu-util -a 0 -e
  */
-#if CONFIG_IS_ENABLED(USB_GADGET) && CONFIG_IS_ENABLED(DFU_RAM)
+#if CONFIG_IS_ENABLED(USB_GADGET) && CONFIG_IS_ENABLED(DFU_OVER_USB)
 	#define BOOTENV_DEV_USB_DFU(devtypeu, devtypel, instance) \
 		"bootcmd_usbdfu=" \
 			"if test \"${boot_source}\" = \"usb\"; then " \
-				"dfu 0 ram 0 60;" \
-				"bootm ${kernel_addr_r};" \
+				"dfu 0 60;" \
 			"fi\0"
 
 	#define BOOTENV_DEV_NAME_USB_DFU(devtypeu, devtypel, instance) \
-		"usbdfu "
+		"" /* add to preboot, remove for bootstd */
 #else
 	#define BOOTENV_DEV_USB_DFU(devtypeu, devtypel, instance)
 	#define BOOTENV_DEV_NAME_USB_DFU(devtypeu, devtypel, instance)
@@ -122,19 +121,65 @@
 	BOOT_TARGET_MMC(func) \
 	BOOT_TARGET_DEVICES_USB(func) \
 	BOOT_TARGET_NVME(func) \
-	BOOT_TARGET_SCSI(func) \
-	BOOT_TARGET_PXE(func) \
-	BOOT_TARGET_DHCP(func)
+	BOOT_TARGET_SCSI(func)
 #endif
 
-#define BOOTM_SIZE		__stringify(0x1700000)
+#if defined(CONFIG_MESON_GX_LIBRE_SECURE_LAYOUT) || \
+    defined(CONFIG_MESON_G12A_LIBRE_SECURE_LAYOUT)
+/*
+ * The libre DRAM load map: design/rules/bootloader/dram-load-map.md.  One set of
+ * offsets for every libre board, from offset 0x04000000 -- above the 16 MiB
+ * secure block both families now reserve from 0 (ramoops at 0x00F00000) and the
+ * headroom GXL moved BL33 to 0x04000000 to buy.  Script, PXE file and overlay are
+ * written only after U-Boot relocates to the top of DRAM, so sharing GXL's text
+ * base with scriptaddr is safe.  loadaddr is restated because env_default.h
+ * emits it from CONFIG_SYS_LOAD_ADDR earlier in default_environment and the
+ * later entry wins; the map's alias is the kernel slot.
+ *
+ * Only the two LIBRE layouts take it.  Every other meson64 build keeps the
+ * values below the #else: a vendor chain still runs BL31 at 0x05100000, which
+ * sits inside this map's kernel slot, and AXG/A1 were never measured against it.
+ *
+ * The kernel slot is 2 MiB-aligned so booti runs an arm64 Image in place
+ * instead of copying it up to the next 2 MiB boundary, and it is 144 MiB
+ * because booti leaves the DECOMPRESSED kernel there: a 6.18 Image declares
+ * 70 MiB and a kernel with a built-in initramfs 130 MiB.  The decompress
+ * buffer is nested in the slot's upper 80 MiB -- a compressed file (at most
+ * KERNEL_COMP_SIZE) sits at the bottom, decompresses above it and is copied
+ * back down -- so it costs the ramdisk nothing.  The *_SLOT_SIZE values are
+ * the budgets, used by the DFU RAM alternates (board-meson.c).
+ *
+ * initrd_high=~0 boots the initramfs where it was loaded.  Unset, booti copies
+ * it into a second free region below U-Boot's top reservation, so one initramfs
+ * holds two copies of its size; on a 512 MiB S805X that halves the ramdisk room.
+ */
+#define SCRIPT_ADDR_R		__stringify(0x04000000)
+#define PXEFILE_ADDR_R		__stringify(0x04100000)
+#define FDTOVERLAY_ADDR_R	__stringify(0x04200000)
+#define FDT_ADDR_R		__stringify(0x04300000)
+#define FDT_SLOT_SIZE		__stringify(0x200000)
+#define KERNEL_ADDR_R		__stringify(0x04600000)
+#define KERNEL_SLOT_SIZE	__stringify(0x9000000)
+#define KERNEL_COMP_ADDR_R	__stringify(0x08600000)
+#define KERNEL_COMP_SIZE	__stringify(0x4000000)
+#define RAMDISK_ADDR_R		__stringify(0x0d600000)
+#define RAMDISK_SLOT_SIZE	__stringify(0x9a00000)
+#define LOADADDR_ENV		"loadaddr=" KERNEL_ADDR_R "\0" \
+				"initrd_high=0xffffffffffffffff\0"
+#else
 #define KERNEL_ADDR_R		__stringify(0x08080000)
+#define KERNEL_SLOT_SIZE	__stringify(0x7f80000)
 #define KERNEL_COMP_ADDR_R	__stringify(0x0d080000)
+#define KERNEL_COMP_SIZE	__stringify(0x2000000)
 #define FDT_ADDR_R		__stringify(0x08008000)
+#define FDT_SLOT_SIZE		__stringify(0x78000)
 #define SCRIPT_ADDR_R		__stringify(0x08000000)
 #define PXEFILE_ADDR_R		__stringify(0x01080000)
 #define FDTOVERLAY_ADDR_R	__stringify(0x01000000)
 #define RAMDISK_ADDR_R		__stringify(0x13000000)
+#define RAMDISK_SLOT_SIZE	__stringify(0x4000000)
+#define LOADADDR_ENV
+#endif
 
 #include <config_distro_bootcmd.h>
 
@@ -150,10 +195,11 @@
 	"stdout=" STDOUT_CFG "\0" \
 	"stderr=" STDOUT_CFG "\0" \
 	"kernel_comp_addr_r=" KERNEL_COMP_ADDR_R "\0" \
-	"kernel_comp_size=0x2000000\0" \
+	"kernel_comp_size=" KERNEL_COMP_SIZE "\0" \
 	"fdt_addr_r=" FDT_ADDR_R "\0" \
 	"scriptaddr=" SCRIPT_ADDR_R "\0" \
 	"kernel_addr_r=" KERNEL_ADDR_R "\0" \
+	LOADADDR_ENV \
 	"pxefile_addr_r=" PXEFILE_ADDR_R "\0" \
 	"fdtoverlay_addr_r=" FDTOVERLAY_ADDR_R "\0" \
 	"ramdisk_addr_r=" RAMDISK_ADDR_R "\0" \

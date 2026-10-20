@@ -12,6 +12,20 @@
 	clocks = <&clkc CLKID_CLK81>, <&clkc CLKID_MALI>;
 	clock-names = "bus", "core";
 
-	assigned-clocks = <&clkc CLKID_GP0_PLL>;
-	assigned-clock-rates = <744000000>;
+	/*
+	 * Two-entry assigned-clocks: entry 0 programs GP0_PLL to 792 MHz;
+	 * entry 1 asks the mali synth to land at 792 MHz. Sync companion
+	 * to linux-6.12.y-lc commit 853663bcde10. NO `assigned-clock-
+	 * parents` -- the OF parents-before-rates SEA hazard the S805X
+	 * stepback resolved (claude:amlogic/software/boot/design/
+	 * lima-clk-mali-fclk-div4-init.md "Stepback 2026-05-13") applies
+	 * here too.
+	 *
+	 * Rate moves from 744 MHz to 792 MHz to match the linux side per
+	 * row 4.4 / O-4 of the DTS sync doc (resolved 2026-05-13 in the
+	 * O-1 merge: 792 MHz is the chosen value for both trees; 744 was
+	 * the original baylibre rate kept on U-Boot side until now).
+	 */
+	assigned-clocks      = <&clkc CLKID_GP0_PLL>, <&clkc CLKID_MALI>;
+	assigned-clock-rates = <792000000>, <792000000>;
 };

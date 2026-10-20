@@ -8,6 +8,7 @@ obj-$(CONFIG_$(PHASE_)OF_CONTROL) += key_matrix.o
 obj-$(CONFIG_$(PHASE_)DM_KEYBOARD) += input.o keyboard-uclass.o
 obj-$(CONFIG_BUTTON_KEYBOARD) += button_kbd.o
 obj-$(CONFIG_CPCAP_POWER_BUTTON) += cpcap_pwrbutton.o
+obj-$(CONFIG_TOUCH_KEYBOARD) += touch_kbd.o
 
 ifndef CONFIG_XPL_BUILD
 

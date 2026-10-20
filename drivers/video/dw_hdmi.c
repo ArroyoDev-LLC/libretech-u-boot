@@ -824,7 +824,35 @@ static int hdmi_read_edid(struct dw_hdmi *hdmi, int block, u8 *buff)
 		if (edid_read_err)
 			return edid_read_err;
 
-		return dm_i2c_read(chip, shift, buff, HDMI_EDID_BLOCK_SIZE);
+		/*
+		 * Retry, symmetrically with the internal-I2CM path below,
+		 * which has always had `trytime = 5`. This branch had exactly
+		 * one attempt, so the same sink got five chances on one
+		 * transport and one on the other -- an asymmetry with no
+		 * stated reason. A DDC slave is allowed to be slow after HPD
+		 * (the EEPROM's own supply may still be ramping, and sinks
+		 * that mux DDC behind an internal switch NAK until it closes),
+		 * and 20 ms between tries is well inside the time the display
+		 * probe already spends.
+		 *
+		 * This does NOT make a hard failure succeed: five NAKs still
+		 * return -EREMOTEIO to the caller, unchanged.
+		 */
+		while (trytime--) {
+			edid_read_err = dm_i2c_read(chip, shift, buff,
+						    HDMI_EDID_BLOCK_SIZE);
+			if (!edid_read_err)
+				break;
+			debug("dw_hdmi: DDC block %d read failed (%d), %u tries left\n",
+			      block, edid_read_err, trytime);
+			/* Not after the last attempt -- there is nothing left
+			 * to wait for, and it was a fifth of the total delay.
+			 */
+			if (trytime)
+				mdelay(20);
+		}
+
+		return edid_read_err;
 	}
 
 	/* set ddc i2c clk which devided from ddc_clk to 100khz */
@@ -975,19 +1003,84 @@ int dw_hdmi_read_edid(struct dw_hdmi *hdmi, u8 *buf, int buf_size)
 	u32 edid_size = HDMI_EDID_BLOCK_SIZE;
 	int ret;
 
+	/*
+	 * buf_size was accepted and then ignored: this function wrote a base
+	 * block, and conditionally a second one, into whatever it was handed.
+	 * Every in-tree caller passes EDID_EXT_SIZE so nothing overflowed, but
+	 * a smaller caller would have, silently.
+	 */
+	if (buf_size < HDMI_EDID_BLOCK_SIZE)
+		return -ENOSPC;
+
 	if (0) {
 		edid_size = sizeof(pre_buf);
 		memcpy(buf, pre_buf, edid_size);
 	} else {
 		ret = hdmi_read_edid(hdmi, 0, buf);
 		if (ret) {
+			/*
+			 * Return the real errno. This used to be a literal -1,
+			 * which threw away the only information distinguishing
+			 * "the DDC i2c bus never probed" from "the monitor
+			 * NAKed" from "the transfer timed out" -- all three
+			 * arrived at the caller as the same opaque number, and
+			 * on a board where an HDMI sink IS attached that is the
+			 * whole question.
+			 *
+			 * The clamp is not decoration: hdmi_read_edid() has TWO
+			 * return conventions. The DM_I2C path returns
+			 * dm_i2c_read()'s negative errno, but the internal-I2CM
+			 * fallback returns a POSITIVE 1 (edid_read_err). The old
+			 * `return -1` flattened both; returning ret unmodified
+			 * would let that +1 out, and callers test `ret < 0` --
+			 * display_read_timing() would then run
+			 * edid_get_timing_validate() over a buffer that was
+			 * never filled. It is caught downstream by a size check,
+			 * but it re-emerges as a flat -EINVAL, which is the
+			 * opaque number this change exists to eliminate.
+			 *
+			 * It does NOT rescue meson, and an earlier version of
+			 * this comment claimed it did. meson_dw_hdmi_read_edid()
+			 * guards its DEBUG block with `if (!ret) return ret;`,
+			 * so -1, +1 and -EIO all fall through alike into
+			 * edid_print_info() over an unfilled buffer. That test
+			 * is inverted and is meson's bug to fix; it is untouched
+			 * here and is not what this clamp is for.
+			 */
 			debug("failed to read edid.\n");
-			return -1;
+			return ret < 0 ? ret : -EIO;
 		}
 
-		if (buf[0x7e] != 0) {
-			hdmi_read_edid(hdmi, 1, buf + HDMI_EDID_BLOCK_SIZE);
-			edid_size += HDMI_EDID_BLOCK_SIZE;
+		/*
+		 * Only claim the extension block if it actually arrived.
+		 *
+		 * The return value used to be discarded while edid_size grew by
+		 * 128 regardless, and that is not a cosmetic accounting error:
+		 * buf is display_read_timing()'s STACK buffer, so on a failed
+		 * read bytes 128..255 are whatever was on the stack.
+		 * edid_get_timing_validate() reads extension_tag out of that,
+		 * and it checks NO checksum on this block -- so a stack byte
+		 * that happens to be 0x02 sends it walking
+		 * EDID_CEA861_DTD_COUNT detailed timings through garbage and
+		 * then setting timing->hdmi_monitor from it, which is what
+		 * picks HDMI signalling over DVI.
+		 *
+		 * This board is the likely one to hit it: its HDMI sink NAKs
+		 * DDC, so partial and failed reads are the normal case here,
+		 * not the exotic one.
+		 *
+		 * A base block whose extension_flag is set but whose extension
+		 * will not read is still a perfectly good base block, so this
+		 * returns 128 rather than an error -- the caller gets the
+		 * preferred timing it came for and never sees the extension.
+		 */
+		if (buf[0x7e] != 0 && buf_size >= 2 * HDMI_EDID_BLOCK_SIZE) {
+			ret = hdmi_read_edid(hdmi, 1, buf + HDMI_EDID_BLOCK_SIZE);
+			if (ret)
+				debug("failed to read edid extension block (%d); reporting the base block only\n",
+				      ret);
+			else
+				edid_size += HDMI_EDID_BLOCK_SIZE;
 		}
 	}
 

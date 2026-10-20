@@ -85,6 +85,8 @@ static inline void scmi_smt_put_channel(struct scmi_smt *smt)
 }
 
 int scmi_dt_get_smt_buffer(struct udevice *dev, struct scmi_smt *smt);
+void scmi_smt_flush(struct scmi_smt *smt);
+void scmi_smt_inval(struct scmi_smt *smt);
 
 /*
  * Write SCMI message to a SMT shared memory

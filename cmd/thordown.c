@@ -67,8 +67,7 @@ int do_thor_down(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
 		}
 	} while (ret == 0);
 exit:
-	g_dnl_unregister();
-	udc_device_put(udc);
+	g_dnl_release(udc);
 done:
 	dfu_free_entities();
 

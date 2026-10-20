@@ -28,11 +28,13 @@ struct sandbox_scmi_pwd {
  * @enabled:	Clock state: true if enabled, false if disabled
  * @rate:	Clock rate in Hertz
  * @perm:	Indicating state/parent/rate permission
+ * @readonly:	RATE_SET is refused with SCMI_DENIED (PLL analog)
  */
 struct sandbox_scmi_clk {
 	bool enabled;
 	ulong rate;
 	u32 perm;
+	bool readonly;
 };
 
 /**

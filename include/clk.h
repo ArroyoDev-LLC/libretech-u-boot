@@ -516,6 +516,27 @@ ulong clk_set_rate(struct clk *clk, ulong rate);
 int clk_set_parent(struct clk *clk, struct clk *parent);
 
 /**
+ * clk_get_phase() - Get the phase shift of a clock relative to its parent.
+ * @clk:	A clock struct that was previously successfully requested by
+ *		clk_request/get_by_*().
+ *
+ * Return: phase in degrees (0..359), or -ve error code (-ENOSYS if the
+ * clock has no phase control).
+ */
+int clk_get_phase(struct clk *clk);
+
+/**
+ * clk_set_phase() - Set the phase shift of a clock relative to its parent.
+ * @clk:	A clock struct that was previously successfully requested by
+ *		clk_request/get_by_*().
+ * @degrees:	Phase shift in degrees (0..359).
+ *
+ * Return: 0 on success, or -ve error code (-ENOSYS if the clock has no
+ * phase control).
+ */
+int clk_set_phase(struct clk *clk, int degrees);
+
+/**
  * clk_enable() - Enable (turn on) a clock.
  * @clk:	A clock struct that was previously successfully requested by
  *		clk_request/get_by_*().
@@ -623,6 +644,16 @@ static inline ulong clk_set_rate(struct clk *clk, ulong rate)
 }
 
 static inline int clk_set_parent(struct clk *clk, struct clk *parent)
+{
+	return -ENOSYS;
+}
+
+static inline int clk_get_phase(struct clk *clk)
+{
+	return -ENOSYS;
+}
+
+static inline int clk_set_phase(struct clk *clk, int degrees)
 {
 	return -ENOSYS;
 }

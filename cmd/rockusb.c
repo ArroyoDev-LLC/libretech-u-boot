@@ -61,9 +61,8 @@ static int do_rockusb(struct cmd_tbl *cmdtp, int flag, int argc,
 	ret = CMD_RET_SUCCESS;
 
 exit:
-	g_dnl_unregister();
+	g_dnl_release(udc);
 	g_dnl_clear_detach();
-	udc_device_put(udc);
 
 	return ret;
 }

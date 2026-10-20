@@ -111,6 +111,10 @@ __weak void ci_init_after_reset(struct ehci_ctrl *ctrl)
 {
 }
 
+__weak void ci_init_after_run(struct ehci_ctrl *ctrl)
+{
+}
+
 /* Init values for USB endpoints. */
 static const struct usb_ep ci_ep_init[5] = {
 	[0] = {	/* EP 0 */
@@ -1027,6 +1031,13 @@ static int ci_pullup(struct usb_gadget *gadget, int is_on)
 		/* Turn on the USB connection by enabling the pullup resistor */
 		setbits_le32(&udc->usbcmd, USBCMD_ITC(MICRO_8FRAME) |
 			     USBCMD_RUN);
+
+		/*
+		 * Going RUNning hands the transceiver to the controller's own
+		 * OTG block, which can undo the setup applied above; give the
+		 * platform a chance to re-apply it.
+		 */
+		ci_init_after_run(controller.ctrl);
 	} else {
 		udc_disconnect();
 	}

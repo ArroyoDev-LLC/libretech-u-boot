@@ -10,6 +10,7 @@
 #include <bloblist.h>
 #include <binman_sym.h>
 #include <bootstage.h>
+#include <chip_serial.h>
 #include <dm.h>
 #include <handoff.h>
 #include <hang.h>
@@ -251,6 +252,11 @@ __weak void __noreturn jump_to_image_optee(struct spl_image_info *spl_image)
 __weak void spl_board_prepare_for_boot(void)
 {
 	/* Nothing to do! */
+}
+
+/* Every boot device failed: a board may reset instead of the hang() below */
+__weak void spl_boot_failed(void)
+{
 }
 
 __weak struct legacy_img_hdr *spl_get_load_buffer(ssize_t offset, size_t size)
@@ -762,6 +768,7 @@ void board_init_r(gd_t *dummy1, ulong dummy2)
 			       ret);
 		else
 			puts(PHASE_PROMPT "failed to boot from all boot devices\n");
+		spl_boot_failed();
 		hang();
 	}
 
@@ -871,6 +878,8 @@ void preloader_console_init(void)
 	puts("\nU-Boot " PHASE_NAME " " PLAIN_VERSION " (" U_BOOT_DATE " - "
 	     U_BOOT_TIME " " U_BOOT_TZ ")\n");
 #endif
+	/* every first stage says which chip it runs on, banner or not */
+	chip_serial_announce();
 #ifdef CONFIG_SPL_DISPLAY_PRINT
 	spl_display_print();
 #endif

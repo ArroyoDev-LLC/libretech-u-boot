@@ -268,6 +268,64 @@ config SPL_LOAD_FIT_ADDRESS
 	  Specify the load address of the fit image that will be loaded
 	  by SPL.
 
+config SPL_FIT_COMP_STAGING_ADDR
+	hex "staging address for compressed FIT payloads in SPL"
+	depends on SPL_LOAD_FIT
+	default 0x0
+	help
+	  Address of the scratch buffer SPL reads a COMPRESSED FIT payload
+	  into before decompressing it to the payload's own load address.
+
+	  Zero, the default, means "use CONFIG_SYS_LOAD_ADDR", which is what
+	  SPL has always done. That value is U-Boot-proper's `loadaddr`: it
+	  describes where a human types `tftp` to, and says nothing about
+	  which parts of DRAM SPL has already filled. On a board where it
+	  falls inside an image loaded earlier from the same FIT, reading the
+	  compressed bytes destroys that image AFTER its hash has passed --
+	  silently, because nothing hashes it again.
+
+	  Set this to a window the board knows is free during SPL if it
+	  carries a compressed payload that is loaded after another image.
+	  It is a first guess only: an overlap with the payload's own
+	  destination is still detected and corrected as before.
+
+	  A board that sets this should also set SPL_FIT_COMP_STAGING_MAX and
+	  SPL_FIT_BUF_MAX, which are what let the build CHECK the claim.
+
+config SPL_FIT_COMP_STAGING_MAX
+	hex "largest compressed FIT payload staged in SPL"
+	depends on SPL_LOAD_FIT
+	default 0x0
+	help
+	  Size of the window SPL_FIT_COMP_STAGING_ADDR must have above it: the
+	  largest COMPRESSED payload the FIT can hold, which in practice is
+	  U-Boot proper. Declare it with headroom -- it is an LZMA size and it
+	  moves with every build.
+
+	  Non-zero makes the build assert that the staging window ends at or
+	  below CONFIG_TEXT_BASE. Without that assertion a later TEXT_BASE
+	  change leaves the staging address where it is and SPL reads over live
+	  .text -- silently, which is exactly the failure the staging address
+	  was introduced to prevent.
+
+	  Zero, the default, skips the check.
+
+config SPL_FIT_BUF_MAX
+	hex "largest FIT image SPL can read into its buffer"
+	depends on SPL_LOAD_FIT
+	default 0x0
+	help
+	  Upper bound on the FIT read into the buffer at
+	  SPL_LOAD_FIT_ADDRESS -- the media's image budget, not the current
+	  image's size. Non-zero makes the build assert that
+	  SPL_FIT_COMP_STAGING_ADDR sits above that buffer's CEILING.
+
+	  The distinction is the point: sizing the gap to the buffer's present
+	  occupancy leaves a board one grown image away from the FIT read and
+	  the staging buffer overlapping, with no diagnostic either side.
+
+	  Zero, the default, skips the check.
+
 config SPL_LOAD_FIT_APPLY_OVERLAY
 	bool "Enable SPL applying DT overlays from FIT"
 	depends on SPL_LOAD_FIT
@@ -2035,6 +2093,358 @@ config SAVE_PREV_BL_INITRAMFS_START_ADDR
 
 	  If no initramfs was provided by previous bootloader, no env variables
 	  will be created.
+
+menu "Board configuration block"
+
+config BOARD_CONFIG
+	bool "Board configuration overrides in a dedicated config block"
+	help
+	  Read a dedicated block that holds plain-text "key=value"
+	  *environment overrides* -- not the environment proper, which stays
+	  on the boot media. The block is re-writable without touching the
+	  firmware image, so a unit can be re-configured in the field.
+
+	  The block may optionally start with a 4-byte little-endian CRC32
+	  over the remainder (the fw_setenv binary layout); if the CRC does
+	  not match, the block is parsed as raw text.
+
+	  The facility itself is transport-independent; each transport that
+	  can carry the block is a separate option below:
+
+	    BOARD_CONFIG_NOR  -- a dedicated SPI NOR erase block, DFU-writable.
+	    BOARD_CONFIG_DRAM -- staged into DRAM by the boot host, for boards
+	                         with no usable NOR.
+
+	  Enable at least one, or the facility has nothing to read.
+
+	  Every console message names the transport it came from
+	  ("board-config-nor:", "board-env-dram:", ...), because the
+	  transports share the same parsing and apply code and an operator
+	  diagnosing a missing overlay needs to know which one ran.
+
+	  Call board_config_env_import() from misc_init_r() to apply the
+	  overrides -- board_r.c runs initr_env() -> misc_init_r() ->
+	  board_late_init(), so misc_init_r() is the first point at which the
+	  environment proper is loaded, and it is where every in-tree board
+	  calls it.
+
+config BOARD_CONFIG_NOR
+	bool "Config block transport: SPI NOR sector"
+	depends on BOARD_CONFIG
+	default DM_SPI_FLASH
+	help
+	  Read the config block from a dedicated SPI NOR erase block, and the
+	  overlay FIT from a second NOR region.
+
+	  The read path comes from four board hooks --
+	  board_nor_clk_enabled(), board_nor_init(), board_nor_probe() and
+	  board_nor_read(), declared in include/board-config.h -- each of
+	  which has a __weak no-op default, so a board implements only what it
+	  needs. A board supplying none of them silently no-ops, so leaving
+	  this y on a board with no flash is harmless -- it just compiles in a
+	  transport that can never read anything.
+
+	  The default follows DM_SPI_FLASH, and that is a HEURISTIC, not a
+	  dependency. What this transport actually requires is a board that
+	  supplies board_nor_read(), and the two in-tree backends need
+	  different things:
+
+	    board/xilinx/zynq/*/board.c  -- reads through
+	      spi_flash_probe_bus_cs(), so it genuinely needs DM_SPI_FLASH.
+	      For those boards the default is causal.
+	    board/libre-computer/common/meson-spifc-nor.c -- bare-metal SPIFC
+	      register reads before driver-model init, since BL2 has already
+	      set up the SPIFC clock and pinmux to boot from NOR. It needs
+	      none of the SPI stack. For those boards DM_SPI_FLASH only
+	      CORRELATES with "a NOR chip is fitted": every LC Amlogic board
+	      that has one also enables the DM stack so the chip can be
+	      written from U-Boot, and the one that has no chip
+	      (libretech-cc, AML-S905X-CC) enables neither.
+
+	  So this is deliberately NOT "depends on DM_SPI_FLASH": a board could
+	  legitimately carry NOR, use the bare-metal backend, and drop the DM
+	  driver entirely. It stays user-selectable -- say y to keep the
+	  transport on such a board, or n on a NOR-less board whose SoC family
+	  otherwise pulls the SPI stack in.
+
+config BOARD_CONFIG_NOR_OFFSET_PIN
+	bool "Pin the config block to a fixed NOR offset"
+	depends on BOARD_CONFIG_NOR
+	help
+	  By default the config block is not placed by a compiled-in constant
+	  at all. It is the LAST 64 KiB of the device that the transport can
+	  address, computed at run time from the capacity the board reports
+	  in board_nor_size():
+
+	    offset = min(size, 16 MiB) - 64 KiB
+
+	  16 MiB is the ceiling of 3-byte (24-bit) addressing, which is what
+	  a bare-metal pre-driver-model backend has: there is no spi-nor
+	  layer that early to negotiate 4-byte mode, so anything above 16 MiB
+	  has nowhere to go in the address phase. See the same constant in
+	  board/libre-computer/common/meson-spifc-nor.c.
+
+	  A board that cannot report a size -- board_nor_size() is __weak 0,
+	  and a backend that only exists after driver-model init has nothing
+	  to answer with at the pre-relocation overlay phase -- takes the
+	  16 MiB term, so the offset is 0xFF0000. That is not a guess about
+	  the part: it is the last block of the window the transport can
+	  address, which is where the block goes on EVERY part big enough for
+	  the question to arise (16 MiB and up all compute to it). Only a part
+	  smaller than the window, on a board that cannot measure it, lands
+	  somewhere unreachable -- and such a board pins.
+
+	  Say y here to place the block at a fixed BOARD_CONFIG_NOR_OFFSET
+	  instead. Two reasons to, and both are real:
+
+	   1. The board's flash layout conflicts with the default. Two in-tree
+	      examples:
+	      - zynq_adrv9009: its PL bitstream occupies 0x300000-0x139C0A0,
+	        which 0xFF0000 lands inside, so a config write there would
+	        destroy PL configuration data while reporting success.
+	      - zynq_e310: 0xFF0000 is inside the "spare" region its DFU alt
+	        map exposes as one 30 MiB alt (0x200000 +0x1e00000), so a
+	        spare write would erase the block. Its three alts tile the
+	        whole 32 MiB device around a block at 0x1F0000.
+	   2. The part is smaller than the addressable window and the board
+	      cannot measure it, so the default would name bytes that do not
+	      exist.
+
+	  A pin always wins over the default.
+
+config BOARD_CONFIG_NOR_OFFSET
+	hex "Byte offset of the config block within the NOR device"
+	depends on BOARD_CONFIG_NOR_OFFSET_PIN
+	default 0x1f0000
+	help
+	  Offset of the config block on the NOR transport. Must be
+	  erase-block aligned so the block can be rewritten without
+	  disturbing the firmware around it.
+
+	  This is consulted only when BOARD_CONFIG_NOR_OFFSET_PIN is set;
+	  otherwise the offset is computed from the device capacity, falling
+	  back to the last block of the addressable window. Whatever
+	  is pinned here must also be what the board's WRITE path uses -- its
+	  DFU alt map, its capsule-update target, and any image-size ceiling
+	  the build enforces. A read offset and a write offset that disagree
+	  produce a config block that is written successfully and never read.
+
+config BOARD_CONFIG_NOR_SIZE
+	hex "Size of the config block in NOR"
+	depends on BOARD_CONFIG_NOR
+	default 0x10000
+	help
+	  Size of the config block in bytes -- normally one erase block.
+
+config BOARD_CONFIG_OVERLAYS
+	bool "Apply DT overlays named by the board config block"
+	depends on BOARD_CONFIG && OF_LIBFDT_OVERLAY
+	default y
+	help
+	  Additionally read an "overlays=" key from the config block, load a
+	  FIT image of pre-compiled .dtbo blobs supplied by the same
+	  transport, and apply each named overlay to the control FDT before
+	  driver-model init.
+
+	  This installs fdtdec_board_setup(), so it must stay disabled on a
+	  board that supplies its own. Say n if the platform wants the
+	  environment overrides but ships no overlay set -- on the NOR
+	  transport the FIT region would then be parsed out of whatever else
+	  happens to live there.
+
+config BOARD_CONFIG_NOR_FIT_OFFSET
+	hex "Byte offset of the DT overlay FIT within the NOR device"
+	depends on BOARD_CONFIG_OVERLAYS && BOARD_CONFIG_NOR
+	default 0x200000
+
+config BOARD_CONFIG_OVERLAY_FIT_MAX_SIZE
+	hex "Maximum accepted size of the DT overlay FIT"
+	depends on BOARD_CONFIG_OVERLAYS
+	default 0x200000
+	help
+	  A FIT whose totalsize exceeds this is rejected rather than read,
+	  which bounds how much of the scratch area can be written. Applies
+	  to every transport.
+
+config BOARD_CONFIG_OVERLAY_SCRATCH_ADDR
+	hex "Scratch DRAM address used to stage the overlay FIT"
+	depends on BOARD_CONFIG_OVERLAYS
+	default 0x0c000000
+	help
+	  Overlay application runs before relocation and before driver-model
+	  init, so it cannot malloc(). Point this at DRAM that is already up
+	  and that nothing else uses at that point. It needs room for
+	  BOARD_CONFIG_OVERLAY_FIT_MAX_SIZE plus the largest single .dtbo --
+	  declare how much is there in BOARD_CONFIG_OVERLAY_SCRATCH_SIZE.
+
+config BOARD_CONFIG_OVERLAY_SCRATCH_SIZE
+	hex "Size of the scratch DRAM region at BOARD_CONFIG_OVERLAY_SCRATCH_ADDR"
+	depends on BOARD_CONFIG_OVERLAYS
+	default 0x400000
+	help
+	  How many bytes at BOARD_CONFIG_OVERLAY_SCRATCH_ADDR the overlay
+	  loader may write. It stages the config block there, then the overlay
+	  FIT, then a writable copy of each .dtbo immediately after the FIT; a
+	  copy that would leave the window aborts that overlay instead of
+	  running off the end of whatever the board put there.
+
+	  Must be at least BOARD_CONFIG_NOR_SIZE, and at least
+	  BOARD_CONFIG_OVERLAY_FIT_MAX_SIZE (rounded up to 64) plus the
+	  largest single .dtbo in the FIT. Both of those are compile-time
+	  checks in boot/board-config.c, so an under-sized value is a build
+	  error rather than a silent overrun at run time.
+
+config BOARD_CONFIG_OVERLAY_FDT_MAX_SIZE
+	hex "Largest control FDT the overlay pass may grow to"
+	depends on BOARD_CONFIG_OVERLAYS
+	default 0x20000
+	help
+	  Overlays are applied to the control FDT in place, before relocation,
+	  so making room for one writes past the end of the blob into whatever
+	  the board's pre-relocation memory map has there. With
+	  CONFIG_OF_SEPARATE the FDT is appended to the U-Boot image and is
+	  followed by the (not yet used) BSS; how much slack that is depends
+	  on the board and cannot be discovered at run time, this early.
+
+	  So it is declared here instead: fdt_open_into() is never asked for
+	  more than this, and an overlay that would need more is skipped with
+	  a message. Lower it on a board with little headroom after the
+	  control FDT; raising it above the real headroom re-opens the
+	  overrun this bounds.
+
+config BOARD_CONFIG_DRAM
+	bool "Config block transport: host-staged DRAM block"
+	depends on BOARD_CONFIG
+	help
+	  Transport for boards that have no usable NOR to hold the config
+	  block. On a USB/BROM boot the host (pyamlboot) can write DRAM after
+	  BL2 has initialized it and before BL33 runs -- the same window it
+	  uses to place the TPL -- so the overrides and the overlay FIT
+	  arrive in memory instead of flash.
+
+	  Say y to make the board-config code look for a host-staged block
+	  at BOARD_CONFIG_DRAM_ADDR:
+
+	    char  magic[8];   /* "LCRAMCFG" */
+	    le32  version;    /* 1 */
+	    le32  env_size;   /* config-block-format payload bytes */
+	    le32  fit_size;   /* DT overlay FIT bytes, 0 = none */
+	    le32  crc32;      /* over the env+fit payload */
+
+	  followed immediately by the env payload and the overlay FIT. The
+	  magic is on the wire between the host tool and U-Boot and is fixed.
+
+	  A valid block takes precedence over the NOR transport: its
+	  "overlays=" key selects DTBOs from the staged FIT, applied to the
+	  control FDT before driver-model init exactly as the NOR flow does,
+	  and its key=value entries are imported on top of any NOR overrides.
+	  Messages from this transport are prefixed "board-config-dram:" and
+	  "board-env-dram:", so which transport ran is visible on the console.
+
+	  Nothing distinguishes an absent block from stale DRAM left by a
+	  previous boot, so the magic and the CRC are the whole gate; a block
+	  that fails either is treated as absent and the NOR transport runs
+	  unchanged. Say n (the default) on a board that boots from flash:
+	  the code then compiles out entirely and the NOR path is bit-for-bit
+	  what it was.
+
+config BOARD_CONFIG_DRAM_ADDR
+	hex "DRAM address of the host-staged config block"
+	depends on BOARD_CONFIG_DRAM
+	default 0x04000000
+	help
+	  Must be clear of the BL33 load address, the running image, BL31,
+	  and BOARD_CONFIG_OVERLAY_SCRATCH_ADDR, and must survive from the
+	  host's write until fdtdec_board_setup() runs.
+
+config BOARD_CONFIG_DRAM_MAX_SIZE
+	hex "Maximum accepted env+FIT payload size"
+	depends on BOARD_CONFIG_DRAM
+	default 0x400000
+	help
+	  A block whose declared payload exceeds this is rejected, which
+	  bounds both the CRC pass over unvalidated DRAM and the memory the
+	  block may claim.
+
+endmenu		# Board configuration block
+
+menu "Boot source reporting"
+
+config BOOTSOURCE
+	bool "Report the BootROM's boot source as one variable on every SoC"
+	default y if SYS_VENDOR = "libre-computer"
+	select EVENT if !SPL && !TPL
+	select OFNODE_MULTI_TREE if !SPL && !TPL
+	help
+	  Say where the BootROM loaded the first stage from, spelled the same
+	  way on every SoC family: the SPL and U-Boot banners print
+	  "Boot source: <SD|eMMC|UFS|SPI NOR|NAND|USB|network|RAM|unknown>",
+	  U-Boot proper sets the environment variable `bootsource` to the
+	  lower-case token (sd / emmc / ufs / spi / nand / usb / net / ram /
+	  unknown) and `bootdevice` to the MMC device index the environment
+	  and boot.ini are read from, and the kernel FDT gets
+	  /chosen/libre-computer,boot-source with the same token.
+
+	  The kernel-FDT write is an EVT_FT_FIXUP spy. image_setup_libfdt
+	  only notifies that event when oftree_from_fdt() of the kernel blob
+	  is valid; without OFNODE_MULTI_TREE that helper returns NULL for
+	  any FDT that is not the control tree, so the spy never runs. EVENT
+	  and OFNODE_MULTI_TREE are selected here so the spy can fire on a
+	  board that keeps a flat control FDT (no OF_LIVE).
+
+	  The token names the MEDIUM the stage came from, never the
+	  controller number, so `if test "${bootsource}" = sd` works on a
+	  board whose SD is mmc0 and on one whose SD is mmc1 alike. It does
+	  not reorder boot_targets: the compiled-in order stands whatever the
+	  firmware booted from. It only tells later stages where THIS stage
+	  came from, which is where the environment and boot.ini follow.
+
+	  Detection is the SoC family's: Rockchip reads BROM_BOOTSOURCE_ID,
+	  Amlogic AO_SEC_GP_CFG0, Allwinner the eGON header's boot_media,
+	  Zynq the SLCR BOOT_MODE strap, MediaTek GPIO_TRAPPING_REG bit 10
+	  (MT8188 eMMC/SPI NOR; MT8189 bits [11:10] UFS/SPI/eMMC). A SoC
+	  whose chain has no documented trap (MT8183, MT8195, MT8365)
+	  reports "unknown" rather than guessing.
+
+config SPL_BOOTSOURCE
+	bool "Print the boot source from SPL"
+	depends on SPL && BOOTSOURCE
+	default y
+	help
+	  Print "Boot source: <name>" once in SPL, as soon as it has a
+	  console, before the "Trying to boot from" lines so those are read
+	  against the medium the SPL itself came from.
+
+config TPL_BOOTSOURCE
+	bool "Print the boot source from TPL"
+	depends on TPL && BOOTSOURCE
+	help
+	  The same banner from the TPL phase. Off by default: on a TPL -> SPL
+	  chain the SPL prints it, and a second copy from the TPL only adds
+	  bytes to a stage that is short of them.
+
+endmenu		# Boot source reporting
+
+config USB_OTG_ROLE
+	bool "Set the OTG port's role in the kernel FDT from env usb_otg"
+	depends on OF_LIBFDT && OF_BOARD_SETUP
+	default y if SYS_VENDOR = "libre-computer" || ARCH_MESON || ROCKCHIP_RK3399
+	help
+	  The environment variable usb_otg (device, host or otg) sets dr_mode
+	  (peripheral, host or otg) on the board's OTG controller in the FDT
+	  the kernel boots, whatever supplied that FDT. The board's control
+	  FDT names the controller with the alias usb-otg; the node at the
+	  same path in the kernel FDT is the one written. Unset, the device
+	  tree's own dr_mode stands, so boot.ini, the NOR config sector or a
+	  saved environment change the role with a plain setenv.
+
+	  The board's ft_board_setup() calls usb_otg_fdt_fixup()
+	  (<usb_otg_role.h>): Meson in arch/arm/mach-meson/board-common.c,
+	  the ROC-RK3399-PC in its board file.
+
+	  An unknown value, a board with no usb-otg alias, or a kernel FDT
+	  without that node is reported on the console and the boot goes on
+	  with the device tree unchanged.
 
 menu "Configuration editor"
 

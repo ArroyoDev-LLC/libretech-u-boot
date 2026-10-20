@@ -439,9 +439,18 @@ int menu_destroy(struct menu *m)
 
 static int bootmenu_conv_shortcut_key(struct bootmenu_data *menu, int ichar)
 {
-	int shortcut_key;
+	int shortcut_key, i;
 
 	ichar = tolower(ichar);
+
+	/* Named keys (bootmenu_key_<n>): the entry that names this key */
+	if (menu->named_keys) {
+		for (i = 0; i < menu->count && i < BOOTMENU_MAX_SHORTCUTS; i++)
+			if (menu->shortcut[i] == ichar)
+				return i;
+		return -1;
+	}
+
 	switch (ichar) {
 	/* a-z for bootmenu entry > 9 */
 	case 'a' ... 'z':

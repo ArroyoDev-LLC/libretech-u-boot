@@ -10,6 +10,7 @@
 #include <dt-bindings/clock/mediatek,mt8365-clk.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/thermal/thermal.h>
 #include <dt-bindings/memory/mediatek,mt8365-larb-port.h>
 #include <dt-bindings/phy/phy.h>
 #include <dt-bindings/power/mediatek,mt8365-power.h>
@@ -491,6 +492,39 @@
 			#clock-cells = <1>;
 		};
 
+		auxadc: auxadc@11001000 {
+			compatible = "mediatek,mt8365-auxadc", "mediatek,mt8173-auxadc";
+			reg = <0 0x11001000 0 0x1000>;
+			clocks = <&infracfg CLK_IFR_AUXADC>;
+			clock-names = "main";
+			#io-channel-cells = <1>;
+		};
+
+		thermal: thermal-sensor@1100b000 {
+			compatible = "mediatek,mt8365-thermal";
+			reg = <0 0x1100b000 0 0x1000>;
+			interrupts = <GIC_SPI 22 IRQ_TYPE_LEVEL_LOW>;
+			clocks = <&infracfg CLK_IFR_THERM>,
+				 <&infracfg CLK_IFR_AUXADC>;
+			clock-names = "therm", "auxadc";
+			mediatek,auxadc = <&auxadc>;
+			mediatek,apmixedsys = <&apmixedsys>;
+			nvmem-cells = <&thermal_calibration>;
+			nvmem-cell-names = "calibration-data";
+			#thermal-sensor-cells = <1>;
+		};
+
+		efuse: efuse@11c50000 {
+			compatible = "mediatek,mt8365-efuse", "mediatek,efuse";
+			reg = <0 0x11c50000 0 0x1000>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			thermal_calibration: calib@180 {
+				reg = <0x180 0xc>;
+			};
+		};
+
 		pwrap: pwrap@1000d000 {
 			compatible = "mediatek,mt8365-pwrap";
 			reg = <0 0x1000d000 0 0x1000>;
@@ -536,10 +570,9 @@
 			#iommu-cells = <1>;
 		};
 
-		infracfg_nao: infracfg@1020e000 {
-			compatible = "mediatek,mt8365-infracfg", "syscon";
+		infracfg_nao: syscon@1020e000 {
+			compatible = "mediatek,mt8365-infracfg-nao", "syscon";
 			reg = <0 0x1020e000 0 0x1000>;
-			#clock-cells = <1>;
 		};
 
 		rng: rng@1020f000 {
@@ -1187,6 +1220,93 @@
 			mediatek,larb-id = <1>;
 		};
 
+		/*
+		 * Vendor (mtk-v5.10 BSP) proprietary-userspace (vpud) HW video
+		 * codec nodes for MT8365 (Genio 350). Driven by the ported
+		 * out-of-tree-style mtk-vcu / mtk-vcodec-mt8167 drivers
+		 * (CONFIG_VIDEO_MEDIATEK_VCU_MT8365 +
+		 * CONFIG_VIDEO_MEDIATEK_VCODEC_MT8167). NOT the mainline
+		 * mtk-vcodec binding. Addresses/phandles adapted to this
+		 * mt8365.dtsi (larb1/larb3, iommu, vdecsys/vencsys, spm power
+		 * domains). The VCU spans VDEC + VENC + VENC_LT register banks.
+		 */
+		vcu: vcu@16000000 {
+			compatible = "mediatek-vcu", "mediatek,mt8183-vcu";
+			mediatek,vcuid = <0>;
+			mediatek,vcuname = "vcu";
+			reg = <0 0x16000000 0 0x40000>,	/* VDEC_BASE */
+			      <0 0x17020000 0 0x10000>,	/* VENC_BASE */
+			      <0 0x19002000 0 0x1000>;	/* VENC_LT */
+			iommus = <&iommu M4U_PORT_HW_VDEC_MC_EXT>;
+		};
+
+		vcodec_dec: codec@16000000 {
+			/* No mt8183 fallback: that compatible is also matched by the
+			 * mainline mtk-vcodec; keep the g350 node vendor-only. */
+			compatible = "mediatek,mt8365-vcodec-dec",
+				     "syscon";
+			reg = <0 0x16000000 0 0x1000>,	/* VDEC_SYS */
+			      <0 0x16025000 0 0x1000>,	/* VDEC_MISC */
+			      <0 0x16020000 0 0x800>,	/* VDEC_VLD */
+			      <0 0x16020800 0 0x800>,	/* VDEC_TOP */
+			      <0 0x16021000 0 0x1000>,	/* VDEC_MC */
+			      <0 0x16022000 0 0x1000>,	/* VDEC_AVC_VLD */
+			      <0 0x16023000 0 0x1000>,	/* VDEC_AVC_MV */
+			      <0 0x16024000 0 0x1000>,	/* VDEC_PP */
+			      <0 0x16027800 0 0x800>,	/* VP8_VLD */
+			      <0 0x16026000 0 0x800>,	/* VP6_VD */
+			      <0 0x16026800 0 0x800>,	/* VP8_VLD2 */
+			      <0 0x16028000 0 0x400>;	/* HEVC_VLD (idx 11) */
+			/*
+			 * VP9_VLD (0x16028400) + IMAGE_RESZ (0x16030000) intentionally
+			 * omitted: the mtk-vcodec framework's reg_base[] holds only
+			 * NUM_MAX_VDEC_REG_BASE (=12) entries, so >12 reg ranges fail the
+			 * mtk_vcodec_dec_drv.c reg-count check. The H.264 backend uses
+			 * indices 0/1/3/4/5 only; VP9/IMAGE_RESZ have no enum slot to map.
+			 */
+			mediatek,larb = <&larb3>;
+			interrupts = <GIC_SPI 177 IRQ_TYPE_LEVEL_LOW>;
+			iommus = <&iommu M4U_PORT_HW_VDEC_MC_EXT>,
+				 <&iommu M4U_PORT_HW_VDEC_PP_EXT>,
+				 <&iommu M4U_PORT_HW_VDEC_PRED_RD_EXT>,
+				 <&iommu M4U_PORT_HW_VDEC_PRED_WR_EXT>,
+				 <&iommu M4U_PORT_HW_VDEC_PPWRAP_EXT>,
+				 <&iommu M4U_PORT_HW_VDEC_TILE_EXT>,
+				 <&iommu M4U_PORT_HW_VDEC_VLD_EXT>,
+				 <&iommu M4U_PORT_HW_VDEC_VLD2_EXT>,
+				 <&iommu M4U_PORT_HW_VDEC_AVC_MV_EXT>,
+				 <&iommu M4U_PORT_HW_VDEC_RG_CTRL_DMA_EXT>;
+			mediatek,vpu = <&vcu>;
+			power-domains = <&spm MT8365_POWER_DOMAIN_VDEC>;
+			clocks = <&vdecsys CLK_VDEC_VDEC>,
+				 <&vdecsys CLK_VDEC_LARB1>;
+			clock-names = "vdec_sel", "normal";
+			#clock-cells = <1>;
+		};
+
+		vcodec_enc: codec@17020000 {
+			/* vendor-only: no mt8183 fallback (mainline matches that). */
+			compatible = "mediatek,mt8365-vcodec-enc";
+			reg = <0 0x17020000 0 0x1000>,
+			      <0 0x17000000 0 0x1000>;
+			mediatek,larb = <&larb1>;
+			interrupts = <GIC_SPI 174 IRQ_TYPE_LEVEL_LOW>;
+			iommus = <&iommu M4U_PORT_VENC_RCPU>,
+				 <&iommu M4U_PORT_VENC_REC>,
+				 <&iommu M4U_PORT_VENC_BSDMA>,
+				 <&iommu M4U_PORT_VENC_SV_COMV>,
+				 <&iommu M4U_PORT_VENC_RD_COMV>,
+				 <&iommu M4U_PORT_VENC_CUR_LUMA>,
+				 <&iommu M4U_PORT_VENC_CUR_CHROMA>,
+				 <&iommu M4U_PORT_VENC_REF_LUMA>,
+				 <&iommu M4U_PORT_VENC_REF_CHROMA>;
+			mediatek,vpu = <&vcu>;
+			power-domains = <&spm MT8365_POWER_DOMAIN_VENC>;
+			clocks = <&vencsys CLK_VENC>;
+			clock-names = "img_venc";
+			#clock-cells = <1>;
+		};
+
 		apu: syscon@19020000 {
 			compatible = "mediatek,mt8365-apu", "syscon";
 			reg = <0 0x19020000 0 0x1000>;
@@ -1252,5 +1372,34 @@
 		interrupts = <GIC_SPI 138 IRQ_TYPE_LEVEL_HIGH>;
 		clocks = <&system_clk>;
 		clock-names = "clk13m";
+	};
+
+	thermal_zones: thermal-zones {
+		cpu_thermal: cpu-thermal {
+			polling-delay = <1000>;
+			polling-delay-passive = <250>;
+			thermal-sensors = <&thermal 0>;
+
+			trips {
+				cpu_passive: cpu-passive {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
+				cpu_crit: cpu-crit {
+					temperature = <100000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu_passive>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
 	};
 };

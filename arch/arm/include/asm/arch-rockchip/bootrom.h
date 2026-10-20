@@ -67,4 +67,23 @@ extern const char * const boot_devices[BROM_LAST_BOOTSOURCE + 1];
 
 u32 read_brom_bootsource_id(void);
 
+/**
+ * rockchip_brom_bootsource() - the BootROM's boot source, read once
+ *
+ * The identifier at BROM_BOOTSOURCE_ID_ADDR lives in IRAM and is overwritten
+ * by the first BL31 SRAM segment SPL loads, so it is read once, on the first
+ * call, and cached. SPL only.
+ */
+u32 rockchip_brom_bootsource(void);
+
+/*
+ * bootsource.c: the BootROM identifier mapped onto the platform vocabulary
+ * (include/bootsource.h), so the SPL banner, the DT property and the env
+ * variable share one spelling with every other SoC family.
+ */
+enum bootsource;
+enum bootsource rockchip_bootsource(u32 id);
+const char *rockchip_bootsource_name(u32 id);
+const char *rockchip_bootsource_token(u32 id);
+
 #endif

@@ -62,7 +62,16 @@ static inline int _spl_load(struct spl_image_info *spl_image,
 	    valid_container_hdr((void *)header))
 		return spl_load_imx_container(spl_image, info, offset);
 
+	/*
+	 * spl_load_legacy_lzma() lives in common/spl/spl_legacy.c, which is
+	 * only built when this phase enables LEGACY_IMAGE_FORMAT. The branch
+	 * is also unreachable without it (it requires a legacy IH_MAGIC
+	 * header), so gate on both or the link fails for an SPL_LZMA board
+	 * that carries no legacy image support -- which is every board using
+	 * LZMA purely for a binman FIT entry.
+	 */
 	if (IS_ENABLED(CONFIG_SPL_LZMA) &&
+	    CONFIG_IS_ENABLED(LEGACY_IMAGE_FORMAT) &&
 	    image_get_magic(header) == IH_MAGIC &&
 	    image_get_comp(header) == IH_COMP_LZMA) {
 		spl_image->flags |= SPL_COPY_PAYLOAD_ONLY;

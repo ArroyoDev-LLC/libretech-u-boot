@@ -14,7 +14,12 @@
 #include <linux/usb/composite.h>
 #include "u_os_desc.h"
 
+/* The EP0 buffer: every control data stage, a DFU block included */
+#if defined(CONFIG_DFU_TRANSFER_SIZE) && CONFIG_DFU_TRANSFER_SIZE > 4096
+#define USB_BUFSIZ	CONFIG_DFU_TRANSFER_SIZE
+#else
 #define USB_BUFSIZ	4096
+#endif
 
 /* Helper type for accessing packed u16 pointers */
 typedef struct { __le16 val; } __packed __le16_packed;

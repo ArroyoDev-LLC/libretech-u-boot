@@ -34,6 +34,7 @@ config SPL_BLK
 config TPL_BLK
 	bool "Support block devices in TPL"
 	depends on TPL_DM && BLK
+	select TPL_SPRINTF
 	help
 	  Enable support for block devices, such as SCSI, MMC and USB
 	  flash sticks. These provide a block-level interface which permits

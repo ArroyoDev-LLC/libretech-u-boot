@@ -49,9 +49,29 @@ int dwc3_uboot_interrupt_status(struct udevice *dev);
 struct phy;
 #if CONFIG_IS_ENABLED(PHY) && CONFIG_IS_ENABLED(DM_USB)
 int dwc3_setup_phy(struct udevice *dev, struct phy_bulk *phys);
+int dwc3_setup_phy_mode(struct udevice *dev, struct phy_bulk *phys,
+			enum usb_dr_mode mode);
+int dwc3_setup_phy_by_name(struct udevice *dev, struct phy_bulk *phys,
+			   const char *name, enum usb_dr_mode mode);
+int dwc3_start_phys(struct phy_bulk *phys, enum usb_dr_mode mode);
 int dwc3_shutdown_phy(struct udevice *dev, struct phy_bulk *phys);
 #else
 static inline int dwc3_setup_phy(struct udevice *dev, struct phy_bulk *phys)
+{
+	return -ENOTSUPP;
+}
+
+static inline int dwc3_setup_phy_mode(struct udevice *dev,
+				      struct phy_bulk *phys,
+				      enum usb_dr_mode mode)
+{
+	return -ENOTSUPP;
+}
+
+static inline int dwc3_setup_phy_by_name(struct udevice *dev,
+					 struct phy_bulk *phys,
+					 const char *name,
+					 enum usb_dr_mode mode)
 {
 	return -ENOTSUPP;
 }

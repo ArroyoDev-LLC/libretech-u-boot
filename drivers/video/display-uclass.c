@@ -68,6 +68,16 @@ int display_read_timing(struct udevice *dev, struct display_timing *timing)
 					display_mode_valid, dev);
 }
 
+int display_detect(struct udevice *dev)
+{
+	struct dm_display_ops *ops = display_get_ops(dev);
+
+	if (!ops || !ops->detect)
+		return -ENOSYS;
+
+	return ops->detect(dev);
+}
+
 bool display_in_use(struct udevice *dev)
 {
 	struct display_plat *disp_uc_plat = dev_get_uclass_plat(dev);

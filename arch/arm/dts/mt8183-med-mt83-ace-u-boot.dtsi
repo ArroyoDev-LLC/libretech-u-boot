@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * MED-MT83-ACE u-boot control-FDT overlay -- intentionally empty.
+ *
+ * Same reasoning as mt8183-pumpkin-u-boot.dtsi: bootefi hands u-boot's own
+ * control DTB to Linux when no separate OS DTB is loaded, so anything placed
+ * here PROPAGATES INTO the OS device tree. The i500 learned this the hard way
+ * -- an overlay forcing dr_mode = "peripheral" and disabling &usb_host leaked
+ * into Linux and killed host USB.
+ *
+ * Keep the shared OF_UPSTREAM ACE nodes unchanged. u-boot's gadget already
+ * works under dr_mode = "otg" (drivers/usb/mtu3/mtu3_plat.c maps
+ * USB_DR_MODE_OTG -> USB_DR_MODE_PERIPHERAL), and board_init() tolerates the
+ * gadget not probing at all (board/mediatek/mt8183/mt8183_pumpkin.c).
+ */

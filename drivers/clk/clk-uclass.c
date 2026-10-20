@@ -657,6 +657,36 @@ int clk_set_parent(struct clk *clk, struct clk *parent)
 	return 0;
 }
 
+int clk_get_phase(struct clk *clk)
+{
+	const struct clk_ops *ops;
+
+	debug("%s(clk=%p)\n", __func__, clk);
+	if (!clk_valid(clk))
+		return 0;
+	ops = clk_dev_ops(clk->dev);
+
+	if (!ops->get_phase)
+		return -ENOSYS;
+
+	return ops->get_phase(clk);
+}
+
+int clk_set_phase(struct clk *clk, int degrees)
+{
+	const struct clk_ops *ops;
+
+	debug("%s(clk=%p, degrees=%d)\n", __func__, clk, degrees);
+	if (!clk_valid(clk))
+		return 0;
+	ops = clk_dev_ops(clk->dev);
+
+	if (!ops->set_phase)
+		return -ENOSYS;
+
+	return ops->set_phase(clk, degrees);
+}
+
 int clk_enable(struct clk *clk)
 {
 	const struct clk_ops *ops;

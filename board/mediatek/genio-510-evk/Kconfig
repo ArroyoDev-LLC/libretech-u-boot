@@ -1,0 +1,9 @@
+if TARGET_MT8188
+
+config SYS_BOARD
+	default "genio-510-evk"
+
+config SYS_CONFIG_NAME
+	default "mt8188"
+
+endif

@@ -25,6 +25,7 @@ obj-$(CONFIG_SYSRESET_TI_SCI) += sysreset-ti-sci.o
 obj-$(CONFIG_$(PHASE_)SYSRESET_TPS65910) += sysreset_tps65910.o
 obj-$(CONFIG_$(PHASE_)SYSRESET_TPS80031) += sysreset_tps80031.o
 obj-$(CONFIG_SYSRESET_SYSCON) += sysreset_syscon.o
+obj-$(CONFIG_$(PHASE_)SYSRESET_ZYNQ) += sysreset_zynq.o
 obj-$(CONFIG_SYSRESET_WATCHDOG) += sysreset_watchdog.o
 obj-$(CONFIG_SYSRESET_RESETCTL) += sysreset_resetctl.o
 obj-$(CONFIG_$(PHASE_)SYSRESET_AT91) += sysreset_at91.o

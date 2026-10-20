@@ -10,5 +10,6 @@
 
 u32 mediatek_sip_segment_name(void);
 u32 mediatek_sip_part_name(void);
+void mtk_setup_serial(void);
 
 #endif /* _MACH_MEDIATEK_CPU_H_ */

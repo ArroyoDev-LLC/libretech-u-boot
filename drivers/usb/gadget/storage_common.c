@@ -234,9 +234,12 @@ struct interrupt_data {
 #define SC_REQUEST_SENSE		0x03
 #define SC_RESERVE			0x16
 #define SC_SEND_DIAGNOSTIC		0x1d
+#define SC_SERVICE_ACTION_IN_16		0x9e
+#define SAI_READ_CAPACITY_16		0x10	/* SERVICE ACTION IN(16) action */
 #define SC_START_STOP_UNIT		0x1b
 #define SC_SYNCHRONIZE_CACHE		0x35
 #define SC_TEST_UNIT_READY		0x00
+#define SC_UNMAP			0x42
 #define SC_VERIFY			0x2f
 #define SC_WRITE_6			0x0a
 #define SC_WRITE_10			0x2a
@@ -247,6 +250,8 @@ struct interrupt_data {
 #define SS_COMMUNICATION_FAILURE		0x040800
 #define SS_INVALID_COMMAND			0x052000
 #define SS_INVALID_FIELD_IN_CDB			0x052400
+#define SS_INVALID_FIELD_IN_PARAMETER_LIST	0x052600
+#define SS_PARAMETER_LIST_LENGTH_ERROR		0x051a00
 #define SS_LOGICAL_BLOCK_ADDRESS_OUT_OF_RANGE	0x052100
 #define SS_LOGICAL_UNIT_NOT_SUPPORTED		0x052500
 #define SS_MEDIUM_NOT_PRESENT			0x023a00
@@ -309,8 +314,8 @@ static struct fsg_lun *fsg_lun_from_dev(struct device *dev)
 /* Number of buffers we will use.  2 is enough for double-buffering */
 #define FSG_NUM_BUFFERS	2
 
-/* Default size of buffer length. */
-#define FSG_BUFLEN	((u32)131072)
+/* Size of each data buffer, and the most one block-device call moves. */
+#define FSG_BUFLEN	((u32)CONFIG_USB_GADGET_MASS_STORAGE_BUFLEN)
 
 /* Maximal number of LUNs supported in mass storage function */
 #define FSG_MAX_LUNS	8
@@ -531,11 +536,46 @@ static struct usb_descriptor_header *fsg_hs_function[] = {
 	NULL,
 };
 
+static struct usb_endpoint_descriptor
+fsg_ss_bulk_in_desc = {
+	.bLength =		USB_DT_ENDPOINT_SIZE,
+	.bDescriptorType =	USB_DT_ENDPOINT,
+
+	.bmAttributes =		USB_ENDPOINT_XFER_BULK,
+	.wMaxPacketSize =	cpu_to_le16(1024),
+};
+
+static struct usb_endpoint_descriptor
+fsg_ss_bulk_out_desc = {
+	.bLength =		USB_DT_ENDPOINT_SIZE,
+	.bDescriptorType =	USB_DT_ENDPOINT,
+
+	.bmAttributes =		USB_ENDPOINT_XFER_BULK,
+	.wMaxPacketSize =	cpu_to_le16(1024),
+};
+
+static struct usb_ss_ep_comp_descriptor fsg_ss_bulk_comp_desc = {
+	.bLength =		USB_DT_SS_EP_COMP_SIZE,
+	.bDescriptorType =	USB_DT_SS_ENDPOINT_COMP,
+};
+
+static struct usb_descriptor_header *fsg_ss_function[] = {
+	(struct usb_descriptor_header *) &fsg_intf_desc,
+	(struct usb_descriptor_header *) &fsg_ss_bulk_in_desc,
+	(struct usb_descriptor_header *) &fsg_ss_bulk_comp_desc,
+	(struct usb_descriptor_header *) &fsg_ss_bulk_out_desc,
+	(struct usb_descriptor_header *) &fsg_ss_bulk_comp_desc,
+	NULL,
+};
+
 /* Maxpacket and other transfer characteristics vary by speed. */
 static struct usb_endpoint_descriptor *
 fsg_ep_desc(struct usb_gadget *g, struct usb_endpoint_descriptor *fs,
-		struct usb_endpoint_descriptor *hs)
+		struct usb_endpoint_descriptor *hs,
+		struct usb_endpoint_descriptor *ss)
 {
+	if (gadget_is_superspeed(g) && g->speed >= USB_SPEED_SUPER)
+		return ss;
 	if (gadget_is_dualspeed(g) && g->speed == USB_SPEED_HIGH)
 		return hs;
 	return fs;

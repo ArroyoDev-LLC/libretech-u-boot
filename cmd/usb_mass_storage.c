@@ -9,9 +9,11 @@
 #include <blk.h>
 #include <command.h>
 #include <console.h>
+#include <dm/device.h>
 #include <errno.h>
 #include <g_dnl.h>
 #include <malloc.h>
+#include <mmc.h>
 #include <part.h>
 #include <usb.h>
 #include <usb_mass_storage.h>
@@ -47,6 +49,63 @@ static int ums_write_sector(struct ums *ums_dev,
 	return blk_dwrite(block_dev, blkstart, blkcnt, buf);
 }
 
+/*
+ * SCSI UNMAP on an MMC LUN. mmc_berase() widens a range that is not
+ * erase-group aligned to whole groups when the card cannot TRIM, which
+ * would erase blocks the host never named; so without TRIM only the
+ * group-aligned middle of the range is erased and its edges are left as
+ * they are. With TRIM, or erase groups of one block (SD), the range is
+ * erased exactly. Any other block device is erased through its driver's
+ * erase op, which works on exact block ranges (blkmap RAM: zeroes).
+ */
+static int ums_erase_sector(struct ums *ums_dev, ulong start, lbaint_t blkcnt)
+{
+	struct blk_desc *block_dev = &ums_dev->block_dev;
+	lbaint_t blkstart = start + ums_dev->start_sector;
+	struct mmc *mmc;
+	lbaint_t grp, first, end;
+	int ret;
+
+	if (!blkcnt)
+		return 0;
+	if (block_dev->uclass_id == UCLASS_MMC) {
+		if (!CONFIG_IS_ENABLED(MMC_WRITE))
+			return -EOPNOTSUPP;
+		mmc = find_mmc_device(block_dev->devnum);
+		if (!mmc)
+			return -ENODEV;
+		grp = mmc->erase_grp_size ? mmc->erase_grp_size : 1;
+		if (!mmc->can_trim && grp > 1) {
+			first = DIV_ROUND_UP(blkstart, grp) * grp;
+			end = (blkstart + blkcnt) / grp * grp;
+			if (end <= first)
+				return 0;
+			blkstart = first;
+			blkcnt = end - first;
+		}
+	}
+
+	ret = blk_dselect_hwpart(block_dev, ums_dev->hwpart);
+	if (ret && ret != -ENOSYS)
+		return ret;
+
+	return blk_derase(block_dev, blkstart, blkcnt) == blkcnt ? 0 : -EIO;
+}
+
+/* Whether this LUN's device can take ums_erase_sector(). */
+static bool ums_can_erase(struct blk_desc *block_dev)
+{
+	if (block_dev->uclass_id == UCLASS_MMC)
+		return CONFIG_IS_ENABLED(MMC_WRITE);
+#if CONFIG_IS_ENABLED(BLK)
+	/* blk-uclass.c's blk_get_ops() is private to it */
+	return block_dev->bdev &&
+	       ((const struct blk_ops *)block_dev->bdev->driver->ops)->erase;
+#else
+	return false;
+#endif
+}
+
 static struct ums *ums;
 static int ums_count;
 
@@ -63,7 +122,7 @@ static void ums_fini(void)
 
 #define UMS_NAME_LEN 16
 
-static int ums_init(const char *devtype, const char *devnums_part_str)
+static int ums_init(const char *devtype, const char *devnums_part_str, bool ro)
 {
 	char *s, *t, *devnum_part_str, *name;
 	struct blk_desc *block_dev;
@@ -113,6 +172,8 @@ static int ums_init(const char *devtype, const char *devnums_part_str)
 
 		ums[ums_count].read_sector = ums_read_sector;
 		ums[ums_count].write_sector = ums_write_sector;
+		ums[ums_count].erase_sector = (!ro && ums_can_erase(block_dev)) ?
+					      ums_erase_sector : NULL;
 
 		name = malloc(UMS_NAME_LEN);
 		if (!name)
@@ -121,6 +182,8 @@ static int ums_init(const char *devtype, const char *devnums_part_str)
 		ums[ums_count].name = name;
 		ums[ums_count].block_dev = *block_dev;
 		ums[ums_count].hwpart = block_dev->hwpart;
+		/* realloc() does not clear the new entry */
+		ums[ums_count].ro = ro;
 
 		printf("UMS: LUN %d, dev %s %d, hwpart %d, sector %#x, count %#x\n",
 		       ums_count, devtype, ums[ums_count].block_dev.devnum,
@@ -153,6 +216,14 @@ static int do_usb_mass_storage(struct cmd_tbl *cmdtp, int flag,
 	struct udevice *udc;
 	int rc;
 	int cable_ready_timeout __maybe_unused;
+	bool ro = false;
+
+	/* -r: every LUN read-only (MODE SENSE WP; WRITE refused, DATA PROTECT) */
+	if (argc > 1 && !strcmp(argv[1], "-r")) {
+		ro = true;
+		argc--;
+		argv++;
+	}
 
 	if (argc < 3)
 		return CMD_RET_USAGE;
@@ -166,7 +237,7 @@ static int do_usb_mass_storage(struct cmd_tbl *cmdtp, int flag,
 		devnum  = argv[2];
 	}
 
-	rc = ums_init(devtype, devnum);
+	rc = ums_init(devtype, devnum, ro);
 	if (rc < 0)
 		return CMD_RET_FAILURE;
 
@@ -254,7 +325,8 @@ static int do_usb_mass_storage(struct cmd_tbl *cmdtp, int flag,
 	}
 
 cleanup_register:
-	g_dnl_unregister();
+	g_dnl_release(udc);
+	goto cleanup_ums_init;
 cleanup_board:
 	udc_device_put(udc);
 cleanup_ums_init:
@@ -263,8 +335,8 @@ cleanup_ums_init:
 	return rc;
 }
 
-U_BOOT_CMD(ums, 4, 1, do_usb_mass_storage,
+U_BOOT_CMD(ums, 5, 1, do_usb_mass_storage,
 	"Use the UMS [USB Mass Storage]",
-	"<USB_controller> [<devtype>] <dev[:part]>  e.g. ums 0 mmc 0\n"
-	"    devtype defaults to mmc"
+	"[-r] <USB_controller> [<devtype>] <dev[:part]>  e.g. ums 0 mmc 0\n"
+	"    devtype defaults to mmc; -r exports every LUN read-only"
 );

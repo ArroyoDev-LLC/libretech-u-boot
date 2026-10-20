@@ -112,8 +112,7 @@ static int do_fastboot_usb(int argc, char *const argv[],
 	ret = CMD_RET_SUCCESS;
 
 exit:
-	udc_device_put(udc);
-	g_dnl_unregister();
+	g_dnl_release(udc);
 	g_dnl_clear_detach();
 
 	return ret;

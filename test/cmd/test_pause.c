@@ -26,6 +26,13 @@ static int lib_test_hush_pause(struct unit_test_state *uts)
 	ut_asserteq_str("Prompt for pause...", uts->actual_str);
 	ut_assert_console_end();
 
+	/* Test that Ctrl-C is reported as a failure, not as "any key" */
+	console_in_puts("\x03");
+	ut_asserteq(1, run_command("pause 'Press Control+C to cancel...'", 0));
+	console_record_readline(uts->actual_str, sizeof(uts->actual_str));
+	ut_asserteq_str("Press Control+C to cancel...", uts->actual_str);
+	ut_assert_console_end();
+
 	/* Test providing more than one params */
 	/* No newline cooked here since the command is expected to fail */
 	ut_asserteq(1, run_command("pause a b", 0));

@@ -8,6 +8,7 @@
 
 obj-y	+= board.o
 obj-y	+= cpu_info.o
+obj-y	+= chip-serial.o
 obj-y	+= dram_helpers.o
 obj-$(CONFIG_SUN6I_PRCM)	+= prcm.o
 obj-$(CONFIG_AXP_PMIC_BUS)	+= pmic_bus.o
@@ -40,6 +41,7 @@ obj-$(CONFIG_DRAM_SUN8I_A83T)	+= dram_sun8i_a83t.o
 obj-$(CONFIG_DRAM_SUN9I)	+= dram_sun9i.o
 obj-$(CONFIG_SPL_SPI_SUNXI)	+= spl_spi_sunxi.o
 obj-$(CONFIG_SUNXI_DRAM_DW)	+= dram_sunxi_dw.o
+obj-$(CONFIG_DRAM_SWEEP)	+= dram_sweep.o
 obj-$(CONFIG_SUNXI_DRAM_DW)	+= dram_timings/
 obj-$(CONFIG_DRAM_SUN50I_H6)	+= dram_sun50i_h6.o dram_dw_helpers.o
 obj-$(CONFIG_DRAM_SUN50I_H6)	+= dram_timings/

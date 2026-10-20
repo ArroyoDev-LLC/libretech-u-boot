@@ -83,15 +83,47 @@ static inline void dwc2_ep0_complete_out(void)
 		__func__, readl(&reg->device_regs.out_endp[EP0_CON].doepctl));
 }
 
+/*
+ * The most one DxEPTSIZ programming of a non-control endpoint carries, in
+ * whole packets. The counters are as wide as the core was built with
+ * (GHWCFG3: PktCnt width = field + 4 bits, XferSize = field + 11, as
+ * Linux's dwc2_get_hwparams() decodes them), at most the register fields:
+ * 10 and 19 bits on Meson G12A/G12B/SM1 and GXL (GHWCFG3 0x02c80468 read on
+ * S905D3, A311D, S905X and S805X), so 1023 x 512 = 523776 B at high speed.
+ * Never less than one packet, so a caller always makes progress: the
+ * narrowest XferSize counter (11 bits, 2047 B) still holds the largest
+ * packet (1024 B).
+ */
+static u32 dwc2_ep_max_xfer(struct dwc2_ep *ep)
+{
+	u32 hw = readl(&reg->global_regs.ghwcfg3);
+	u32 pkt_bits = FIELD_GET(GHWCFG3_PACKET_SIZE_CNTR_WIDTH_MASK, hw) + 4;
+	u32 xfer_bits = FIELD_GET(GHWCFG3_XFER_SIZE_CNTR_WIDTH_MASK, hw) + 11;
+	u32 mps = ep->ep.maxpacket;
+	u32 pkts = min_t(u32, BIT(pkt_bits) - 1, FIELD_MAX(DXEPTSIZ_PKTCNT_MASK));
+	u32 bytes = min_t(u32, BIT(xfer_bits) - 1, FIELD_MAX(DXEPTSIZ_XFERSIZE_MASK));
+
+	if (!mps)
+		return bytes;
+	return max_t(u32, min_t(u32, pkts * mps, bytes / mps * mps), mps);
+}
+
 static int setdma_rx(struct dwc2_ep *ep, struct dwc2_request *req)
 {
 	u32 *buf, ctrl;
 	u32 length, pktcnt;
 	u32 ep_num = ep_index(ep);
 
+	/*
+	 * A bulk OUT request is programmed whole, up to what the size fields
+	 * hold. It was DMA_BUFFER_SIZE (16 KiB) per programming, and each
+	 * 16 KiB then waited for the completion interrupt to be serviced
+	 * before the next was armed -- which a gadget function blocked in a
+	 * storage write (UMS) does not do until the write ends.
+	 */
 	buf = req->req.buf + req->req.actual;
 	length = min_t(u32, req->req.length - req->req.actual,
-		       ep_num ? DMA_BUFFER_SIZE : ep->ep.maxpacket);
+		       ep_num ? dwc2_ep_max_xfer(ep) : ep->ep.maxpacket);
 
 	ep->len = length;
 	ep->dma_buf = buf;
@@ -134,8 +166,16 @@ static int setdma_tx(struct dwc2_ep *ep, struct dwc2_request *req)
 	buf = req->req.buf + req->req.actual;
 	length = req->req.length - req->req.actual;
 
+	/*
+	 * A longer request overflowed the size fields and sent wrong data (a
+	 * 1 MiB UMS read: I/O error). Send it in pieces the fields hold;
+	 * complete_tx() restarts the request from req.actual until it is all
+	 * sent.
+	 */
 	if (ep_num == EP0_CON)
 		length = min(length, (u32)ep_maxpacket(ep));
+	else
+		length = min(length, dwc2_ep_max_xfer(ep));
 
 	ep->len = length;
 	ep->dma_buf = buf;
@@ -161,6 +201,9 @@ static int setdma_tx(struct dwc2_ep *ep, struct dwc2_request *req)
 			DXEPCTL_TXFNUM_MASK | DXEPCTL_NEXTEP_MASK,
 			FIELD_PREP(DXEPCTL_TXFNUM_MASK, ep->fifo_num) |
 			DXEPCTL_EPENA | DXEPCTL_CNAK);
+
+	if (ep_num != EP0_CON)
+		ep->in_hw = true;
 
 	debug_cond(DEBUG_IN_EP,
 		"%s:EP%d TX DMA start : DIEPDMA0 = 0x%x,"
@@ -255,11 +298,22 @@ static void complete_tx(struct dwc2_udc *dev, u8 ep_num)
 	u32 ep_tsr = 0, xfer_size = 0, is_short = 0;
 	u32 last;
 
-	if (dev->ep0state == WAIT_FOR_NULL_COMPLETE) {
+	/*
+	 * GET_STATUS's data stage (dwc2_udc_get_status()) is programmed
+	 * straight into ep0 and leaves ep0 in WAIT_FOR_NULL_COMPLETE. That is
+	 * ep0's state: an XferCompl on any other IN endpoint serviced while it
+	 * holds belongs to that endpoint's request and is completed below.
+	 * Taking it here retired nothing, so the request stayed queued with
+	 * the transfer done and the endpoint never restarted.
+	 */
+	if (ep_num == EP0_CON && dev->ep0state == WAIT_FOR_NULL_COMPLETE) {
 		dev->ep0state = WAIT_FOR_OUT_COMPLETE;
 		dwc2_ep0_complete_out();
 		return;
 	}
+
+	/* The transfer the hardware held is finished; it is handled here */
+	ep->in_hw = false;
 
 	if (list_empty(&ep->queue)) {
 		debug_cond(DEBUG_IN_EP,
@@ -322,6 +376,130 @@ static void complete_tx(struct dwc2_udc *dev, u8 ep_num)
 			"%s: Next Tx request start...\n", __func__);
 		setdma_tx(ep, req);
 	}
+}
+
+/*
+ * Before a cancel (nuke() from usb_ep_disable() or udc_stop, or a dequeue)
+ * hands back the request at the head of a non-control IN endpoint, stop the
+ * transfer the hardware holds for it and set its `actual` to what went out.
+ *
+ * complete_tx() is the only other place `actual` moves, and it runs only when
+ * the XferCompl interrupt is serviced, so a request cancelled first came back
+ * with actual 0 even when the host had read it: a function that re-sends the
+ * unsent part (f_acm's dnlacm ring) sent it twice. And the endpoint stayed
+ * enabled on the request's buffer, so the hardware could still send it after
+ * the request was given back.
+ *
+ * The count is PktCnt, not XferSize: DIEPTSIZn.XferSize drops when the DMA
+ * writes a packet into the TxFIFO, PktCnt when a packet leaves the TxFIFO on
+ * the bus. A packet still in the FIFO here is flushed below and was never
+ * sent. Every packet but the last is maxpacket long, so packets sent times
+ * maxpacket, capped at the programmed length, is the byte count. XferCompl
+ * pending means the whole transfer went out (EPEna is already clear then).
+ *
+ * Whether the head was programmed at all is ep->in_hw, not EPEna. EPEna is
+ * also clear on a transfer that finished, and on one a STALL disabled
+ * part-way (dwc2_udc_ep_set_stall()). PktCnt counts both: 0 left for the
+ * finished one, the unsent packets for the other. Only a head that was never
+ * programmed (queued while the endpoint was halted) counts 0 sent, because
+ * DIEPTSIZn still holds the previous transfer's count then.
+ *
+ * The stop is the databook's IN endpoint disable: SNAK, wait INEPNakEff,
+ * EPDis, wait EPDisbld, flush the endpoint's TxFIFO (dwc2_ep_in_cancel_head()).
+ *
+ * The count is dwc2_ep_in_count_head(): it adds what of the head's transfer
+ * went out to its `actual` and drops in_hw. Its caller makes sure DIEPTSIZn
+ * and DIEPINTn can no longer move (the endpoint is stopped, or the bus is in
+ * reset) and that the endpoint is a non-control IN one with a request queued.
+ */
+static void dwc2_ep_in_count_head(struct dwc2_ep *ep)
+{
+	u32 ep_num = ep_index(ep);
+	struct dwc2_request *req;
+	u32 tsiz, intr, pkts, left, sent;
+
+	req = list_entry(ep->queue.next, struct dwc2_request, queue);
+
+	tsiz = readl(&reg->device_regs.in_endp[ep_num].dieptsiz);
+	intr = readl(&reg->device_regs.in_endp[ep_num].diepint);
+	writel(DXEPINT_XFERCOMPL | DXEPINT_EPDISBLD | DXEPINT_INEPNAKEFF,
+	       &reg->device_regs.in_endp[ep_num].diepint);
+
+	if (!ep->in_hw) {
+		/* Never given to the hardware: nothing of it was sent */
+		sent = 0;
+	} else if (intr & DXEPINT_XFERCOMPL) {
+		sent = ep->len;
+	} else {
+		pkts = ep->len ? (ep->len - 1) / ep->ep.maxpacket + 1 : 1;
+		left = min_t(u32, FIELD_GET(DXEPTSIZ_PKTCNT_MASK, tsiz), pkts);
+		sent = min_t(u32, (pkts - left) * ep->ep.maxpacket, ep->len);
+	}
+	ep->in_hw = false;
+
+	req->req.actual += min(sent, req->req.length - req->req.actual);
+}
+
+/*
+ * A USB bus reset ends every IN transfer, and reconfig_usbd() then
+ * soft-resets the core, which also takes the evidence of what was sent:
+ * the reset clears the endpoint interrupts (a pending XferCompl with them)
+ * and leaves DIEPTSIZn to the core's reset handling. The requests stay
+ * queued -- the host's next SET_CONFIGURATION (composite reset_config ->
+ * usb_ep_disable() -> nuke()) or udc_stop gives them back -- so the cancel
+ * that does would count from registers that no longer describe the
+ * transfer, and could count a head the reset killed as sent.
+ *
+ * So count each programmed IN head here, before the core reset. On the
+ * USBRST path the bus is in reset and nothing can move; on the udc_enable()
+ * path (gadget start) no IN head has been programmed, so there is nothing
+ * to count.  A transfer the host had read
+ * (XferCompl pending, not yet serviced) counts in full, one the reset
+ * killed counts the packets the host acknowledged, normally none. in_hw is
+ * dropped for every endpoint, so the later cancel adds nothing to that.
+ */
+static void dwc2_ep_in_count_before_reset(struct dwc2_udc *dev)
+{
+	int i;
+
+	for (i = 1; i < DWC2_MAX_ENDPOINTS; i++) {
+		struct dwc2_ep *ep = &dev->ep[i];
+
+		if (ep->in_hw && ep_is_in(ep) && !list_empty(&ep->queue))
+			dwc2_ep_in_count_head(ep);
+		ep->in_hw = false;
+	}
+}
+
+/* The cancel: stop the head's transfer, then count it (comment above) */
+static void dwc2_ep_in_cancel_head(struct dwc2_ep *ep)
+{
+	u32 ep_num = ep_index(ep);
+	u32 ctl;
+
+	if (ep_num == EP0_CON || !ep_is_in(ep) || list_empty(&ep->queue))
+		return;
+
+	ctl = readl(&reg->device_regs.in_endp[ep_num].diepctl);
+	if (ctl & DXEPCTL_EPENA) {
+		setbits_le32(&reg->device_regs.in_endp[ep_num].diepctl, DXEPCTL_SNAK);
+		if (wait_for_bit_le32(&reg->device_regs.in_endp[ep_num].diepint,
+				      DXEPINT_INEPNAKEFF, true, 1, false))
+			pr_err("dwc2: ep%u IN NAK did not take effect\n", ep_num);
+
+		/* It may have completed meanwhile: EPDis only on an enabled EP */
+		if (readl(&reg->device_regs.in_endp[ep_num].diepctl) & DXEPCTL_EPENA) {
+			setbits_le32(&reg->device_regs.in_endp[ep_num].diepctl,
+				     DXEPCTL_EPDIS | DXEPCTL_SNAK);
+			if (wait_for_bit_le32(&reg->device_regs.in_endp[ep_num].diepint,
+					      DXEPINT_EPDISBLD, true, 1, false))
+				pr_err("dwc2: ep%u IN did not disable\n", ep_num);
+		}
+		dwc2_flush_tx_fifo(reg, ep->fifo_num);
+	}
+
+	/* Counted once the endpoint is stopped, so the count cannot move */
+	dwc2_ep_in_count_head(ep);
 }
 
 static inline void dwc2_udc_check_tx_queue(struct dwc2_udc *dev, u8 ep_num)

@@ -228,6 +228,7 @@
 enum mtk_phy_version {
 	MTK_TPHY_V1 = 1,
 	MTK_TPHY_V2,
+	MTK_TPHY_V3,
 };
 
 struct tphy_pdata {
@@ -331,9 +332,10 @@ static void u2_phy_instance_init(struct mtk_tphy *tphy,
 			FIELD_PREP(PA6_RG_U2_SQTH, 2));
 
 	/* set HS slew rate */
-	clrsetbits_le32(u2_banks->com + U3P_USBPHYACR5,
-			PA5_RG_U2_HSTX_SRCTRL,
-			FIELD_PREP(PA5_RG_U2_HSTX_SRCTRL, 4));
+	if (tphy->pdata->version < MTK_TPHY_V3)
+		clrsetbits_le32(u2_banks->com + U3P_USBPHYACR5,
+				PA5_RG_U2_HSTX_SRCTRL,
+				FIELD_PREP(PA5_RG_U2_HSTX_SRCTRL, 4));
 
 	u2_phy_pll_26m_set(tphy, instance);
 
@@ -732,6 +734,45 @@ static int mtk_phy_init(struct phy *phy)
 	return 0;
 }
 
+/*
+ * Force the U2 PHY OTG role. u-boot's power_on sets VBUSVALID/AVALID but
+ * leaves IDDIG to the HW comparator, which reads "device" when no Type-C
+ * cable is present -- so the host controller never enumerates the on-board
+ * LAN9512 (mux'd onto the host port). The kernel forces it via the PHY
+ * .set_mode (u2_phy_instance_set_mode); port that. Must run AFTER power_on
+ * (power_on rewrites DTM1 and would drop FORCE_IDDIG otherwise).
+ */
+static void u2_phy_instance_set_mode(struct mtk_tphy *tphy,
+				     struct mtk_phy_instance *instance,
+				     enum phy_mode mode)
+{
+	struct u2phy_banks *u2_banks = &instance->u2_banks;
+
+	switch (mode) {
+	case PHY_MODE_USB_DEVICE:
+		setbits_le32(u2_banks->com + U3P_U2PHYDTM1,
+			     P2C_FORCE_IDDIG | P2C_RG_IDDIG);
+		break;
+	case PHY_MODE_USB_HOST:
+		clrsetbits_le32(u2_banks->com + U3P_U2PHYDTM1,
+				P2C_RG_IDDIG, P2C_FORCE_IDDIG);
+		break;
+	default:
+		break;
+	}
+}
+
+static int mtk_phy_set_mode(struct phy *phy, enum phy_mode mode, int submode)
+{
+	struct mtk_tphy *tphy = dev_get_priv(phy->dev);
+	struct mtk_phy_instance *instance = tphy->phys[phy->id];
+
+	if (instance->type == PHY_TYPE_USB2)
+		u2_phy_instance_set_mode(tphy, instance, mode);
+
+	return 0;
+}
+
 static int mtk_phy_power_on(struct phy *phy)
 {
 	struct mtk_tphy *tphy = dev_get_priv(phy->dev);
@@ -813,6 +854,7 @@ static int mtk_phy_xlate(struct phy *phy,
 		phy_v1_banks_init(tphy, instance);
 		break;
 	case MTK_TPHY_V2:
+	case MTK_TPHY_V3:
 		phy_v2_banks_init(tphy, instance);
 		break;
 	default:
@@ -831,6 +873,7 @@ static const struct phy_ops mtk_tphy_ops = {
 	.exit		= mtk_phy_exit,
 	.power_on	= mtk_phy_power_on,
 	.power_off	= mtk_phy_power_off,
+	.set_mode	= mtk_phy_set_mode,
 	.of_xlate	= mtk_phy_xlate,
 };
 
@@ -900,8 +943,12 @@ static struct tphy_pdata tphy_v2_pdata = {
 	.version = MTK_TPHY_V2,
 };
 
+static struct tphy_pdata tphy_v3_pdata = {
+	.version = MTK_TPHY_V3,
+};
+
 static struct tphy_pdata mt8195_pdata = {
-	.version = MTK_TPHY_V2,
+	.version = MTK_TPHY_V3,
 	.sw_pll_48m_to_26m = true,
 };
 
@@ -913,6 +960,10 @@ static const struct udevice_id mtk_tphy_id_table[] = {
 	{
 		.compatible = "mediatek,generic-tphy-v2",
 		.data = (ulong)&tphy_v2_pdata,
+	},
+	{
+		.compatible = "mediatek,generic-tphy-v3",
+		.data = (ulong)&tphy_v3_pdata,
 	},
 	{
 		.compatible = "mediatek,mt8195-tphy",

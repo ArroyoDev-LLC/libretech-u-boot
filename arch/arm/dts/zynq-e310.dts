@@ -1,0 +1,732 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * ANTSDR E310 (Xilinx Zynq-7020 / AD9363) — U-Boot control DT
+ *
+ * This is the U-Boot built-in control FDT (fdtcontroladdr) that U-Boot hands
+ * to Linux by default (board-bootloader policy §3: no override needed). It
+ * therefore carries the complete PS-side production device tree — both:
+ *
+ *   (a) the SPL/U-Boot-proper boot essentials: memory (1 GB), UART console,
+ *       QSPI + NOR, SD (broken-cd), ethernet (direct MIO RGMII, Marvell
+ *       88E1510 @ MDIO addr 0, MIO46 reset); and
+ *   (b) the Linux-only PS-side AD9361 nodes: the ad9361-phy SPI control node
+ *       on PS SPI0, ad9361-ext-refclk, and fclk-enable=<0xf> to keep the PL
+ *       fabric clocks (FCLK0 clocks the cf_axi cores' s_axi_aclk) on through
+ *       clk_disable_unused.
+ *
+ * ── NO PL-DEPENDENT NODE MAY APPEAR IN THIS TREE ────────────────────────────
+ *
+ * This FDT describes PS hardware ONLY. The PL data path — the fpga-axi wrapper
+ * and its cf-ad9361-lpc / cf-ad9361-dds-core-lpc / rx_dma / tx_dma children —
+ * is deliberately ABSENT and must never be re-added here.
+ *
+ * Userspace owns the PL lifecycle in two ordered steps: the fpga_manager
+ * programs e310-system.bit.bin at service start, and only THEN does configfs
+ * apply the overlay that adds the PL-dependent AXI nodes
+ * (demos/sdr-demo/platforms/antsdr-e310/fpga/, driven by e310-fpga-up). U-Boot
+ * does not touch the PL at all: `preboot` is empty and its `fpga load` is
+ * retired. A base tree that DESCRIBES the PL while nothing has PROGRAMMED it is
+ * the one broken shape — cf_axi register access against dark fabric hangs the
+ * AXI bus — and it also makes the overlay a duplicate instantiation of the same
+ * addresses. Removing these nodes mirrors what linux commit bc815e081a55 did to
+ * the kernel DTS (arch/arm/boot/dts/xilinx/zynq-antsdr-e310.dts); design owner:
+ * demos/sdr-demo/platforms/antsdr-e310/plan/fpga-boot-consolidation-plan.md.
+ *
+ * The overlay resolves &amba / &fpga_full / &ad9361 / &clkc / &intc against
+ * this tree's __symbols__, which the U-Boot dts build emits for the board DTB
+ * (scripts/Makefile.lib adds `dtc -@`) — verified present in the live FDT on
+ * e310-beta. Do not disable it.
+ *
+ * The Linux-only nodes carry NO bootph tag, so fdtgrep strips them from the
+ * SPL DTB (SPL stays minimal); U-Boot-proper keeps the full DTB and hands it
+ * to the kernel. bootph-all stays on the SPL-critical nodes (per
+ * e310-uboot.md §9): amba/slcr/clkc/scutimer already carry it in
+ * zynq-7000.dtsi; this board file adds it to the console UART and the QSPI+NOR
+ * (SPL loads u-boot.img from QSPI). Without the tags, fdtgrep strips them from
+ * the SPL DTB and the SPL panics ("No serial driver found").
+ *
+ * The (a) essentials mirror the confirmed-working stock kernel DT; the (b)
+ * radio nodes are ground-truthed from the STOCK ANTSDR E310 kernel FIT DTB
+ * (mtd3 fdt@1) and kept identical to the ported kernel DTS
+ * (linux: arch/arm/boot/dts/xilinx/zynq-antsdr-e310.dts). Driver match string:
+ *   ad9361.c            spi_device_id "ad9361"      <- "adi,ad9361"
+ * The cf_axi ADC/DDS and axi-dmac match strings live with the overlay that
+ * carries those nodes, not here.
+ */
+/dts-v1/;
+#include "zynq-7000.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/ {
+	/*
+	 * AD9361, not AD9363.  The stock ADI/ANTSDR string said AD9363 and was
+	 * carried over verbatim when this file was written; these are MODIFIED
+	 * boards carrying AD9361 silicon (2R2T), which is why the SPI node
+	 * below binds "adi,ad9361" (9c44bceb939) -- the model string was the
+	 * last place the retired AD9363 naming survived.  Because this FDT is
+	 * the one the boards actually run, this string is what the live system
+	 * reports in /proc/device-tree/model and on the U-Boot banner.  Kept
+	 * identical to the kernel DTS
+	 * (linux: arch/arm/boot/dts/xilinx/zynq-antsdr-e310.dts).
+	 */
+	model = "Analog Devices ANTSDR E310 Rev.C (Z7020/AD9361)";
+	compatible = "adi,zynq-antsdr-e310", "xlnx,zynq-7000";
+
+	aliases {
+		serial0 = &uart1;
+		ethernet0 = &gem0;
+		spi0 = &qspi;
+		mmc0 = &sdhci0;
+	};
+
+	memory@0 {
+		device_type = "memory";
+		/* 1 GB — confirmed against the stock kernel DT (reg = <0x0 0x40000000>) */
+		reg = <0x0 0x40000000>;
+	};
+
+	chosen {
+		/*
+		 * Absolute node path (not a serial0: alias) so the fdtgrep-built
+		 * SPL DTB — which may drop /aliases — still resolves a live stdout.
+		 * The amba bus node is named "axi" in zynq-7000.dtsi.
+		 */
+		stdout-path = "/axi/serial@e0001000:115200n8";
+	};
+
+	/*
+	 * AD9361 external reference clock (40 MHz TCXO on the ANTSDR E310).
+	 * The stock DTB models this as an "adjustable-clock" (an ADI out-of-tree
+	 * clock provider that is NOT ported); the E310 refin is a fixed 40 MHz
+	 * oscillator, so a mainline fixed-clock is the correct in-tree equivalent.
+	 * The ad9361 driver fetches it via devm_clk_get(dev, NULL) = clocks[0], so
+	 * only the phandle order matters (name is informational).
+	 */
+	ad9361_clkin: ad9361-ext-refclk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <40000000>;
+		clock-output-names = "ad9361_ext_refclk";
+	};
+
+	/*
+	 * USB OTG (usb0 @e0002000) ULPI transceiver.
+	 *
+	 * The Zynq-7000 USB core is ChipIdea and talks to its off-chip
+	 * high-speed PHY over ULPI; the SoC side of that link is the ULPI
+	 * VIEWPORT register at controller_base + 0x170 (architectural on
+	 * Zynq-7000, not a board choice). Modelled the same way the ADI
+	 * Zynq SDR boards do it (zynq-pluto-sdr.dts phy0, zynq-dlc20-rev1.0.dts
+	 * usb_phy0) — the E310 is the same ADI-lineage design and its stock
+	 * firmware runs a composite USB gadget (ACM + mass-storage + ethernet)
+	 * off this port.
+	 *
+	 * U-Boot itself does NOT consume this node: drivers/usb/host/ehci-zynq.c
+	 * derives the viewport address from its own reg property and never
+	 * looks at usb-phy or dr_mode. The node is here so the control FDT we
+	 * hand to Linux describes the PHY, and so the binding is documented in
+	 * one place. No phy-reset GPIO is listed: the E310 schematic mapping
+	 * for it is not confirmed, and inventing a MIO number would be worse
+	 * than omitting it.
+	 *
+	 * COMPATIBLE LIST — this FDT is consumed by BOTH projects, so the node
+	 * must satisfy both:
+	 *
+	 *   "ulpi-phy"       Descriptive only. Grepping both trees shows it
+	 *                    matches NO driver in either project: in U-Boot it
+	 *                    appears solely in the ADI-lineage board DTS files
+	 *                    (zynq-pluto-sdr.dts, zynq-dlc20-rev1.0.dts) and in
+	 *                    Linux it has zero hits under drivers/. Kept first
+	 *                    (most-specific-first) to record what the part
+	 *                    actually is and to stay in step with the sibling
+	 *                    ADI Zynq SDR boards.
+	 *
+	 *   "usb-nop-xceiv"  The entry that actually BINDS. In Linux it matches
+	 *                    drivers/usb/phy/phy-generic.c (nop_xceiv_dt_ids),
+	 *                    whose probe calls usb_add_phy_dev() registering a
+	 *                    USB_PHY_TYPE_USB2 transceiver; the ChipIdea core
+	 *                    then picks it up via its last-resort
+	 *                    devm_usb_get_phy(dev->parent, USB_PHY_TYPE_USB2)
+	 *                    in ci_hdrc_probe() (drivers/usb/chipidea/core.c).
+	 *                    Note the mainline Zynq boards zynq-zc702.dts and
+	 *                    zynq-zed.dts model this exact ULPI transceiver the
+	 *                    same way; their `usb-phy = <&usb_phy0>` phandle is
+	 *                    likewise not read by ChipIdea, which is why the
+	 *                    compatible — not the phandle — is what matters.
+	 *                    Every resource phy-generic touches (reset/vbus
+	 *                    GPIOs, main_clk, vcc/vbus regulators) is optional,
+	 *                    so this node probes cleanly as-is.
+	 *                    CONFIG_NOP_USB_XCEIV=y is set in our kernel.
+	 *                    In U-Boot the same string matches
+	 *                    drivers/phy/nop-phy.c (UCLASS_PHY); ehci-zynq.c
+	 *                    never requests a PHY, so that driver is bound but
+	 *                    never probed — no behaviour change on the U-Boot
+	 *                    side, which is why this edit cannot affect boot.
+	 *
+	 * view-port/drv-vbus are retained for documentation only: a grep of the
+	 * whole U-Boot tree finds no reader of either property (ehci_zynq_probe
+	 * hardcodes the viewport at its own reg + 0x170 and drives VBUS
+	 * unconditionally).
+	 */
+	usb_phy0: phy0@e0002000 {
+		compatible = "ulpi-phy", "usb-nop-xceiv";
+		#phy-cells = <0>;
+		reg = <0xe0002000 0x1000>;
+		view-port = <0x0170>;
+		drv-vbus;
+	};
+
+	/*
+	 * XADC die-temperature thermal zone — the board's only over-temperature
+	 * shutdown interlock.
+	 *
+	 * This board boots U-Boot's control FDT (there is no GRUB `devicetree`
+	 * override here, unlike e310-alpha), so a kernel-side DTS change cannot
+	 * reach it: the zone has to live in this tree. Same shape as the sibling
+	 * XC7Z100 board (u-boot a1ae82999c5, zynq-adrv9009.dts).
+	 *
+	 * The 85000 critical trip is the commercial-grade recommended-operating
+	 * junction-temperature ceiling for the Z-7020 die, read from Xilinx
+	 * DS187 v1.21 (1 Dec 2020) Table 2 "Recommended Operating Conditions",
+	 * symbol T_j. It is NOT the 125 degC Table 1 absolute-maximum stress
+	 * rating, which is not a candidate trip value. The fitted temperature
+	 * grade is not software-readable (it is the trailing letter of the
+	 * ordering part number; PSS_IDCODE identifies device+family only), so
+	 * the lowest grade's ceiling is chosen and errs safe for all grades.
+	 *
+	 * No passive trip: cpufreq is live (333/667 MHz) and could be bound as a
+	 * cpufreq-cooling device, but Zynq-7000 scales frequency without scaling
+	 * voltage, so throttling buys roughly linear power reduction at best,
+	 * and this board has no fan to bind as an active cooling device. The
+	 * zone is deliberately a shutdown interlock, not a cooling policy.
+	 *
+	 * Consumed only by Linux (U-Boot has no thermal core), and carrying no
+	 * bootph-* tag it is stripped from the SPL DTB by fdtgrep — verify it on
+	 * U-Boot proper's DTB, not the SPL's.
+	 */
+	thermal-zones {
+		soc-thermal {
+			polling-delay-passive = <1000>;
+			polling-delay = <5000>;
+			thermal-sensors = <&adc>;
+
+			trips {
+				soc_crit: soc-crit {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+	};
+};
+
+/*
+ * The kernel carries #thermal-sensor-cells on adc@f8007100 in its shared
+ * zynq-7000.dtsi (commit 4bbee7b8de705); U-Boot's copy of that .dtsi is kept
+ * upstream-clean, so the property is added here instead. Without it the
+ * thermal-zone above cannot bind to the XADC sensor.
+ */
+&adc {
+	#thermal-sensor-cells = <0>;
+};
+
+/*
+ * On-chip memory -- describe all 256 KB, not the 64 KB zynq-7000.dtsi assumes.
+ *
+ * U-Boot's copy of zynq-7000.dtsi is kept upstream-clean and describes the OCM
+ * the way the OCM_CFG *reset default* leaves it: one 64 KB bank high at
+ * 0xFFFC0000, the other three aliased down at 0x00000000 under DDR.  But
+ * arch/arm/mach-zynq/cpu.c -- i.e. THIS U-Boot, on this board -- writes 0x1F to
+ * SLCR OCM_CFG (0xF8000910), "Mask out the ROM, map ram into upper addresses",
+ * so by the time the control FDT is handed to Linux all four banks are
+ * contiguous at 0xFFFC0000-0xFFFFFFFF.  Read back from silicon on e310-alpha,
+ * OCM_CFG = 0x0000001F.  192 KB of single-cycle-class SRAM was therefore
+ * mapped, writable, and described by nothing.
+ *
+ * Bank 0 (0xFFFC0000 + 0x10000) stays a bare reserved child, exactly as the
+ * dtsi had it, so this cannot regress the existing 64 KB: it holds the ARM
+ * exception vector table the FSBL/U-Boot left there.  Nothing branches into it
+ * once Linux is up (mach-zynq/platsmp.c stages the CPU1 trampoline at physical
+ * 0, i.e. DDR), but the BootROM reloads the FSBL into that bank on every PS
+ * reset, so keeping it out of the allocator costs 64 KB and buys certainty.
+ *
+ * Banks 1-3 carry both `pool` and `export`, which Linux's drivers/misc/sram.c
+ * sram_add_partition() tests independently:
+ *   pool   -- a named genalloc pool an in-kernel client takes with
+ *             of_gen_pool_get(np, "sram", 0); the 802.11 lower-MAC case, where
+ *             NAV/CW/CCA state wants SRAM whose latency does not move with DRAM
+ *             refresh or PL AXI_HP traffic.
+ *   export -- a 0600 sysfs binary attribute, so userspace reaches the same
+ *             192 KB without /dev/mem.
+ *
+ * U-Boot itself consumes NONE of this (it has no mmio-sram driver); the node is
+ * here so the control FDT we hand Linux is complete.  This is the counterpart
+ * of the kernel-side commit 0688336a9b5cc / d450031616fec, which added the same
+ * shape to arch/arm/boot/dts/xilinx/zynq-antsdr-e310.dts for the GRUB-override
+ * boot path.  Board-file &node override rather than a dtsi edit, matching the
+ * &adc stanza above.
+ *
+ * No bootph tag: the SPL has no business handing out OCM partitions, so
+ * fdtgrep strips this from the SPL DTB and the SPL stays minimal.
+ */
+&ocm {
+	reg = <0xfffc0000 0x40000>;
+	ranges = <0 0xfffc0000 0x40000>;
+
+	ocm-lomac@10000 {
+		reg = <0x10000 0x30000>;
+		label = "ocm-lomac";
+		pool;
+		export;
+	};
+};
+
+&uart1 {
+	bootph-all;
+	status = "okay";
+};
+
+&qspi {
+	bootph-all;
+	status = "okay";
+	num-cs = <1>;
+	is-dual = <0>;
+
+	flash@0 {
+		bootph-all;
+		/* W25Q256 (32 MiB); "jedec,spi-nor" autodetects via JEDEC ID/SFDP.
+		 * (Stock DT labels this n25q256a — the generic node works for both.) */
+		compatible = "jedec,spi-nor";
+		reg = <0x0>;
+		spi-tx-bus-width = <1>;
+		spi-rx-bus-width = <4>;
+		spi-max-frequency = <50000000>;
+
+		/*
+		 * The W25Q256 RESET# pin is not wired on this board and the
+		 * Zynq warm reset does not issue a flash software reset, so
+		 * the 4-byte-address-mode latch (EN4B) survives a reboot. The
+		 * BootROM only ever issues 3-byte reads, so a NOR left in EN4B
+		 * is unreadable to it and the board will not boot until it is
+		 * power-cycled — which is exactly how this board was bricked
+		 * on 2026-07-26.
+		 *
+		 * broken-flash-reset is the only thing that prevents that.
+		 * Linux drivers/mtd/spi-nor/core.c:
+		 *   spi_nor_init_flags()  reads of_property_read_bool(np,
+		 *                         "broken-flash-reset") -> sets
+		 *                         SNOR_F_BROKEN_RESET;
+		 *   spi_nor_restore()     exits 4-byte mode on remove/shutdown
+		 *                         ONLY under
+		 *                         `nor->flags & SNOR_F_BROKEN_RESET`;
+		 *   spi_nor_adjust_hwcaps() additionally masks off the
+		 *                         stateful SNOR_HWCAPS_X_X_X modes.
+		 * Property name + semantics per
+		 * Documentation/devicetree/bindings/mtd/jedec,spi-nor.yaml
+		 * (boolean; "denote the absence of a reliable reset
+		 * mechanism").
+		 *
+		 * U-Boot ignores the property entirely (no reader anywhere in
+		 * the tree), so this is a no-op for the bootloader and cannot
+		 * affect the QSPI boot path.
+		 */
+		broken-flash-reset;
+
+		/*
+		 * No `partitions` node, deliberately.
+		 *
+		 * This FDT is what Linux runs (U-Boot hands it over via the EFI
+		 * config table), so a partition table here is the LIVE one. It
+		 * used to carry the ADI map -- qspi-fsbl-uboot @0, qspi-uboot-env
+		 * @0x100000, qspi-nvmfs @0x120000, qspi-linux @0x200000 -- which
+		 * the 2026-07-27 restructure retired. The NOR is now one combined
+		 * bootloader blob at 0x0 (SPL + payload at
+		 * CONFIG_SYS_SPI_U_BOOT_OFFS), a 64 KB config sector at 0x1F0000,
+		 * and spare from 0x200000.
+		 *
+		 * Nothing reads a partition table on this board: the SPL loads
+		 * its payload from a raw offset, flashing is raw `sf write`, and
+		 * the DFU alt map (bootloader/config/spare, in
+		 * board/xilinx/zynq/zynq-e310/board.c set_dfu_alt_info()) is raw
+		 * offsets. The DFU map is the single authoritative description of
+		 * the layout -- a second, contradictory one here is pure drift
+		 * hazard, and it would become actively wrong the moment the
+		 * Linux-side spi-nor probe is fixed (it currently fails -22, so
+		 * no MTD device is created from these labels either way).
+		 */
+	};
+};
+
+&sdhci0 {
+	bootph-all;
+	status = "okay";
+	broken-cd;	/* SD card-detect line dead on this HamGeek clone — poll for a card */
+	disable-wp;	/* no write-protect switch wired */
+	no-1-8-v;	/* Zynq-7000 SDHCI is 3.3V-only, no UHS 1.8V signalling */
+};
+
+/*
+ * USB OTG port, inherited status = "disabled" from zynq-7000.dtsi until now.
+ * Enabled so U-Boot can bind drivers/usb/host/ehci-zynq.c (UCLASS_USB) — which
+ * is also the entry point the ChipIdea *gadget* (CONFIG_CI_UDC) uses: it calls
+ * usb_setup_ehci_gadget(), which re-probes the first UCLASS_USB device with
+ * init_type = USB_INIT_DEVICE. So this one node is what makes `ums`, `dfu` and
+ * `fastboot` over USB possible at all.
+ *
+ * No bootph tag: the SPL has no business touching USB, so fdtgrep strips this
+ * node (and usb_phy0) from the SPL DTB and the SPL stays minimal.
+ */
+&usb0 {
+	status = "okay";
+	dr_mode = "otg";	/* physical micro-USB OTG jack; Linux-side only */
+	usb-phy = <&usb_phy0>;
+};
+
+&gem0 {
+	status = "okay";
+	phy-mode = "rgmii-id";
+	phy-handle = <&ethernet_phy>;
+
+	/* GEM RGMII + MDIO are DIRECT on MIO (muxed by ps7_init/FSBL) — NOT the
+	 * openwifi gmii2rgmii/EMIO shim. PHY is a Marvell 88E1510 at MDIO addr 0;
+	 * MIO46 is its reset (which also re-straps the MDIO address to 0). */
+	ethernet_phy: ethernet-phy@0 {
+		reg = <0>;
+		compatible = "ethernet-phy-ieee802.3-c22";
+		/* NOTE: stock DTB encodes flag 0x1 = GPIO_ACTIVE_LOW (88E1510 RESET_N
+		 * is active-low). Task KEY FACTS said GPIO_ACTIVE_HIGH — see report. */
+		reset-gpios = <&gpio0 46 GPIO_ACTIVE_LOW>;
+	};
+};
+
+/*
+ * ── Linux-only AD9361 SDR nodes (NO bootph — stripped from the SPL DTB) ──
+ * Kept byte-for-byte in step with the kernel production DTS
+ * (linux: arch/arm/boot/dts/xilinx/zynq-antsdr-e310.dts).
+ */
+
+/*
+ * AD9361 RF transceiver SPI control interface (PS SPI0 @e0006000).
+ *
+ * The AD936x driver binds by SPI modalias ONLY -- ad9361.c has no
+ * of_match_table, so the SPI core's compatible-minus-vendor fallback
+ * ("adi,ad9361" -> "ad9361") is the entire binding path, and that one string
+ * selects the variant. It is load-bearing, not cosmetic: ad9361_probe() does
+ *
+ *   if (spi_get_device_id(spi)->driver_data == ID_AD9364) {
+ *           phy->pdata->rx2tx2 = false;
+ *           phy->pdata->rx1tx1_mode_use_rx_num = 1;
+ *           phy->pdata->rx1tx1_mode_use_tx_num = 1;
+ *   }
+ *
+ * i.e. "adi,ad9364" OVERRIDES the adi,2rx-2tx-mode-enable property below and
+ * pins the part to one RX / one TX chain. These are MODIFIED boards carrying
+ * AD9361 silicon (2R2T), and the PL is synthesized 2R2T -- axi_ad9361
+ * ADI_REG_CONFIG bit 4 (ADI_MODE_1R1T) reads CLEAR and CHAN_CNTRL(0..3) decode
+ * while (4..7) return 0xDEADDEAD -- so "adi,ad9364" was throwing away a second
+ * RX chain the hardware has. Cost of 2R2T: the per-chain max sample rate
+ * halves (61.44 -> 30.72 MHz, ad9361.c: 61440000U / (rx2tx2 ? 2 : 1)); the
+ * board already runs at 30.72 MHz, so nothing reachable is lost.
+ */
+&spi0 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	ad9361: ad9361-phy@0 {
+		/*
+		 * No #address-cells/#size-cells here: the eight children
+		 * (ad9361_{rx,tx}_ant_port_{a,b}, adi_{rx,tx}_band_setting_{0,1})
+		 * carry no reg and are reached only by phandle, and this node has
+		 * no ranges/dma-ranges, so of_n_addr_cells() never consults them.
+		 * #clock-cells IS load-bearing -- the AD9361 is a clock provider
+		 * (rx_sampl_clk / tx_sampl_clk).
+		 */
+		#clock-cells = <1>;
+		compatible = "adi,ad9361";
+
+		/* SPI Setup */
+		reg = <0>;
+		spi-cpha;
+		spi-max-frequency = <10000000>;
+
+		/* Clocks */
+		clocks = <&ad9361_clkin>;
+		clock-names = "ad9361_ext_refclk";
+		clock-output-names = "rx_sampl_clk", "tx_sampl_clk";
+
+		/* Digital Interface Control */
+		adi,pp-tx-swap-enable;
+		adi,pp-rx-swap-enable;
+		adi,rx-frame-pulse-mode-enable;
+		adi,xo-disable-use-ext-refclk-enable;
+		adi,full-port-enable;
+		adi,digital-interface-tune-fir-disable;
+		adi,digital-interface-tune-skip-mode = <0>;
+		adi,tx-fb-clock-delay = <0>;
+		adi,tx-data-delay = <9>;
+		adi,swap-ports-enable;
+
+		/* ENSM Mode */
+		adi,frequency-division-duplex-mode-enable;
+
+		adi,rx-rf-port-input-select = <0>;
+		adi,rx-rf-port-input-select-lock-enable;
+		adi,tx-rf-port-input-select = <0>;
+		adi,tx-rf-port-input-select-lock-enable;
+		adi,tx-attenuation-mdB = <10000>;
+		adi,tx-lo-powerdown-managed-enable;
+
+		adi,rf-rx-bandwidth-hz = <18000000>;
+		adi,rf-tx-bandwidth-hz = <18000000>;
+		adi,rx-synthesizer-frequency-hz = /bits/ 64 <2400000000>;
+		adi,tx-synthesizer-frequency-hz = /bits/ 64 <2450000000>;
+
+		/*				BBPLL     ADC        R2CLK     R1CLK    CLKRF    RSAMPL  */
+		adi,rx-path-clock-frequencies = <983040000 245760000 122880000 61440000 30720000 30720000>;
+		/*				BBPLL     DAC        T2CLK     T1CLK    CLKTF    TSAMPL  */
+		adi,tx-path-clock-frequencies = <983040000 122880000 122880000 61440000 30720000 30720000>;
+
+		/* Gain Control */
+		adi,gc-rx1-mode = <2>;
+		adi,gc-rx2-mode = <2>;
+		adi,gc-adc-ovr-sample-size = <4>;
+		adi,gc-adc-small-overload-thresh = <47>;
+		adi,gc-adc-large-overload-thresh = <58>;
+		adi,gc-lmt-overload-high-thresh = <800>;
+		adi,gc-lmt-overload-low-thresh = <704>;
+		adi,gc-dec-pow-measurement-duration = <8192>;
+		adi,gc-low-power-thresh = <24>;
+
+		/* Manual Gain Control Setup */
+		adi,mgc-inc-gain-step = <2>;
+		adi,mgc-dec-gain-step = <2>;
+		adi,mgc-split-table-ctrl-inp-gain-mode = <0>;
+
+		/* Automatic Gain Control Setup */
+		adi,agc-attack-delay-extra-margin-us = <1>;
+		adi,agc-outer-thresh-high = <5>;
+		adi,agc-outer-thresh-high-dec-steps = <2>;
+		adi,agc-inner-thresh-high = <10>;
+		adi,agc-inner-thresh-high-dec-steps = <1>;
+		adi,agc-inner-thresh-low = <12>;
+		adi,agc-inner-thresh-low-inc-steps = <1>;
+		adi,agc-outer-thresh-low = <18>;
+		adi,agc-outer-thresh-low-inc-steps = <2>;
+		adi,agc-adc-small-overload-exceed-counter = <10>;
+		adi,agc-adc-large-overload-exceed-counter = <10>;
+		adi,agc-adc-large-overload-inc-steps = <2>;
+		adi,agc-lmt-overload-large-exceed-counter = <10>;
+		adi,agc-lmt-overload-small-exceed-counter = <10>;
+		adi,agc-lmt-overload-large-inc-steps = <2>;
+		adi,agc-gain-update-interval-us = <1000>;
+
+		/* Fast AGC */
+		adi,fagc-dec-pow-measurement-duration = <64>;
+		adi,fagc-lp-thresh-increment-steps = <1>;
+		adi,fagc-lp-thresh-increment-time = <5>;
+		adi,fagc-energy-lost-stronger-sig-gain-lock-exit-cnt = <8>;
+		adi,fagc-final-overrange-count = <3>;
+		adi,fagc-gain-index-type-after-exit-rx-mode = <0>;
+		adi,fagc-lmt-final-settling-steps = <1>;
+		adi,fagc-lock-level = <10>;
+		adi,fagc-lock-level-gain-increase-upper-limit = <5>;
+		adi,fagc-lock-level-lmt-gain-increase-enable;
+		adi,fagc-lpf-final-settling-steps = <1>;
+		adi,fagc-optimized-gain-offset = <5>;
+		adi,fagc-power-measurement-duration-in-state5 = <64>;
+		adi,fagc-rst-gla-engergy-lost-goto-optim-gain-enable;
+		adi,fagc-rst-gla-engergy-lost-sig-thresh-below-ll = <10>;
+		adi,fagc-rst-gla-engergy-lost-sig-thresh-exceeded-enable;
+		adi,fagc-rst-gla-if-en-agc-pulled-high-mode = <0>;
+		adi,fagc-rst-gla-large-adc-overload-enable;
+		adi,fagc-rst-gla-large-lmt-overload-enable;
+		adi,fagc-rst-gla-stronger-sig-thresh-above-ll = <10>;
+		adi,fagc-rst-gla-stronger-sig-thresh-exceeded-enable;
+		adi,fagc-state-wait-time-ns = <260>;
+		adi,fagc-use-last-lock-level-for-set-gain-enable;
+
+		/* RSSI */
+		adi,rssi-restart-mode = <3>;
+		adi,rssi-delay = <1>;
+		adi,rssi-wait = <1>;
+		adi,rssi-duration = <1000>;
+
+		/* Control Outputs */
+		adi,ctrl-outs-index = <0>;
+		adi,ctrl-outs-enable-mask = <0xFF>;
+
+		/* AuxADC Temp Sense Control */
+		adi,temp-sense-measurement-interval-ms = <1000>;
+		adi,temp-sense-offset-signed = <0xCE>;
+		adi,temp-sense-periodic-measurement-enable;
+
+		/* AuxDAC Control */
+		adi,aux-dac-manual-mode-enable;
+		adi,aux-dac1-default-value-mV = <0>;
+		adi,aux-dac1-rx-delay-us = <0>;
+		adi,aux-dac1-tx-delay-us = <0>;
+		adi,aux-dac2-default-value-mV = <0>;
+		adi,aux-dac2-rx-delay-us = <0>;
+		adi,aux-dac2-tx-delay-us = <0>;
+
+		/* Control GPIOs (ANTSDR E310 map, from stock DTB) */
+		en_agc-gpios = <&gpio0 66 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio0 67 GPIO_ACTIVE_HIGH>;
+
+		/* External band-control GPIOs (stock ANTSDR map) */
+		adi,band-ctl-0-gpio = <&gpio0 86 GPIO_ACTIVE_HIGH>;
+		adi,band-ctl-1-gpio = <&gpio0 87 GPIO_ACTIVE_HIGH>;
+		adi,band-ctl-2-gpio = <&gpio0 88 GPIO_ACTIVE_HIGH>;
+		adi,band-ctl-3-gpio = <&gpio0 89 GPIO_ACTIVE_HIGH>;
+		adi,band-ctl-4-gpio = <&gpio0 90 GPIO_ACTIVE_HIGH>;
+		adi,band-ctl-5-gpio = <&gpio0 91 GPIO_ACTIVE_HIGH>;
+		adi,band-ctl-6-gpio = <&gpio0 92 GPIO_ACTIVE_HIGH>;
+		adi,band-ctl-7-gpio = <&gpio0 93 GPIO_ACTIVE_HIGH>;
+
+		/* Mode Setup */
+		adi,2rx-2tx-mode-enable;
+
+		ad9361_rx_ant_port_a: ad9361_rx_ant_port_a {
+			adi,rx-rf-port-input-select = <0>;
+		};
+
+		ad9361_rx_ant_port_b: ad9361_rx_ant_port_b {
+			adi,rx-rf-port-input-select = <1>;
+		};
+
+		ad9361_tx_ant_port_a: ad9361_tx_ant_port_a {
+			adi,tx-rf-port-input-select = <0>;
+		};
+
+		ad9361_tx_ant_port_b: ad9361_tx_ant_port_b {
+			adi,tx-rf-port-input-select = <1>;
+		};
+
+		/*
+		 * ── EXTERNAL BAND CONTROL ────────────────────────────────────
+		 *
+		 * U-Boot consumes NONE of this; it is here because this FDT is
+		 * what Linux runs.  The consumer is the kernel's
+		 * ad9361_ext_band_ctrl.c (built when
+		 * CONFIG_AD9361_EXT_BAND_CONTROL is set; enabled for this board
+		 * by 830e41c50).  ad9361.c calls
+		 * ad9361_adjust_{rx,tx}_ext_band_settings() on every LO change,
+		 * which picks the child whose [lo-freq-min, lo-freq-max) contains
+		 * the new LO and applies it.
+		 *
+		 * HOW adi,gpio-settings IS ENCODED -- read off the driver, not
+		 * off a harness's 8-bit GPIO word:
+		 *
+		 *   ad9361_populate_objs() takes devm_gpiod_get(dev,
+		 *   "adi,band-ctl-N", 0) for N = 0,1,... until -ENOENT, so
+		 *   ngpios = 8 and array index N is exactly the
+		 *   adi,band-ctl-N-gpio = <&gpio0 (86+N)> above.
+		 *
+		 *   ad9361_parse_gpio_settings() reads the property as a u32
+		 *   array of EXACTLY ngpios entries -- a short list is -EINVAL --
+		 *   index-aligned to N.
+		 *
+		 *   Each entry is an OPCODE from the kernel's
+		 *   include/dt-bindings/iio/adc/adi,ad9361.h: 0 = OP_LOW,
+		 *   1 = OP_HIGH, 2 = OP_INPUT, 3 = OP_NOP.  It is NOT a bitmask.
+		 *
+		 *   ad9361_apply_gpio_settings() drives them with
+		 *   gpiod_direction_output_raw(), i.e. RAW: the GPIO_ACTIVE_HIGH
+		 *   flag on the adi,band-ctl-N-gpio phandles above is BYPASSED,
+		 *   so opcode 1 is a physical high on the ball.
+		 *
+		 * BALL MAP for gpio0 86..93 (PL ps_gpio_o[39:32]):
+		 *   idx 0 VCRX1_H  idx 1 VCRX1_L  idx 2 VCTX1_H  idx 3 VCTX1_L
+		 *   idx 4 VCRX2_H  idx 5 VCRX2_L  idx 6 VCTX2_H  idx 7 VCTX2_L
+		 *
+		 * WHICH WAY ROUND -- MEASURED, and the reason these four nodes no
+		 * longer match the stock ADI/ANTSDR DTB.  The stock data had
+		 * adi_rx_band_setting_0 (0-3 GHz, the band that CONTAINS 2.4 GHz)
+		 * as <0 1 3 3 0 1 3 3>, i.e. _H = LOW / _L = HIGH -- pattern
+		 * 0x22, which is the 3-6 GHz path.  Receive-only on both E310s,
+		 * 2400-2484 MHz, 3 passes, both attenuators floored and the TX LO
+		 * down, with the released 0x00 state taken first AND last as a
+		 * drift control (claude repo: demos/sdr-demo/platforms/
+		 * antsdr-e310/tests/e310-rx-band-isolation.sh and .../incidents/
+		 * 2026-08-02-band-control-belongs-in-the-kernel.md), whole-band
+		 * mean dBFS vs released:
+		 *
+		 *   0x11  _H=1/_L=0  (low path)  +7.01/+6.89 alpha  +6.13/+6.48 beta
+		 *   0x22  _H=0/_L=1  (high path) -3.08/-3.76 alpha  -3.23/-3.18 beta
+		 *
+		 * So the stock 0-3 GHz setting was not merely suboptimal, it was
+		 * the worst of the four states measured -- ~3 dB below doing
+		 * nothing and ~10 dB below the correct path.  The two settings
+		 * are simply swapped for this board's front end, on RX and TX
+		 * alike.  Drift between the two 0x00 controls was 0.02-1.23 dB,
+		 * far below the effect.
+		 *
+		 * adi,band-ctl-post IS SWAPPED WITH THEM, and deliberately.  The
+		 * post hook selects the AD9361 RF port, and
+		 * ad9361_apply_rx_port_settings() calls ad9361_set_rx_port()
+		 * DIRECTLY (ad9361.c:3164).  The
+		 * adi,rx-rf-port-input-select-lock-enable guard above lives only
+		 * in ad9361_set_rf_port() (ad9361.c:7701), the sysfs path, so it
+		 * does NOT stop the band controller.  The stock data would move
+		 * 0-3 GHz onto RF port B, which is not the configuration any
+		 * measurement on this board was taken in -- every one was on port
+		 * A, this node's adi,{rx,tx}-rf-port-input-select = <0>.  Pointing
+		 * the 0-3 GHz settings at port A keeps the proven pairing (low
+		 * path + port A) and leaves the untested port-B combination out
+		 * of the demo band.
+		 *
+		 * NOTHING ON A BOARD CHANGES UNTIL THE NOR IS REFLASHED.  Both
+		 * E310s take their runtime DT from this control FDT in NOR, so
+		 * this correction reaches them only through a NOR write.  Until
+		 * then the live correction is the runtime configfs overlay
+		 * (claude repo: demos/sdr-demo/platforms/antsdr-e310/fpga/
+		 * e310-n27-gpio.dts, deployed as e310-pl-gpio.dtbo), which
+		 * carries the identical values and is applied while ad9361 is
+		 * unbound.  After a reflash the overlay becomes redundancy rather
+		 * than the sole copy of the correction.
+		 */
+
+		/* Receive Side */
+		adi_rx_band_setting_0 {
+			adi,lo-freq-min = /bits/ 64 <0>;
+			adi,lo-freq-max = /bits/ 64 <3000000000>;
+			/* 0-3 GHz: _H = 1, _L = 0 (the low path) + RF port A */
+			adi,gpio-settings = <1 0 3 3 1 0 3 3>;
+			adi,band-ctl-post = <&ad9361_rx_ant_port_a 0>;
+		};
+
+		adi_rx_band_setting_1 {
+			adi,lo-freq-min = /bits/ 64 <3000000000>;
+			adi,lo-freq-max = /bits/ 64 <6000000000>;
+			/* 3-6 GHz: the complement */
+			adi,gpio-settings = <0 1 3 3 0 1 3 3>;
+			adi,band-ctl-post = <&ad9361_rx_ant_port_b 0>;
+		};
+
+		/* Transmit Side */
+		adi_tx_band_setting_0 {
+			adi,lo-freq-min = /bits/ 64 <0>;
+			adi,lo-freq-max = /bits/ 64 <3000000000>;
+			adi,gpio-settings = <3 3 1 0 3 3 1 0>;
+			adi,band-ctl-post = <&ad9361_tx_ant_port_a 0>;
+		};
+
+		adi_tx_band_setting_1 {
+			adi,lo-freq-min = /bits/ 64 <3000000000>;
+			adi,lo-freq-max = /bits/ 64 <6000000000>;
+			adi,gpio-settings = <3 3 0 1 3 3 0 1>;
+			adi,band-ctl-post = <&ad9361_tx_ant_port_b 0>;
+		};
+	};
+};
+
+&clkc {
+	/* Pin all PL fabric clocks on (matches the stock ANTSDR fdt@1). Without this
+	 * the board inherits fclk-enable=<0> from zynq-7000.dtsi and clk_disable_unused
+	 * gates off FCLK0 -- which clocks the cf_axi cores' s_axi_aclk -- so the first
+	 * cf_axi_adc register read hard-hangs the AXI bus. */
+	fclk-enable = <0xf>;
+};

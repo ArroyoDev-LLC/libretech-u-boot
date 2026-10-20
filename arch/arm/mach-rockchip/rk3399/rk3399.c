@@ -16,6 +16,7 @@
 #include <asm/arch-rockchip/gpio.h>
 #include <asm/arch-rockchip/grf_rk3399.h>
 #include <asm/arch-rockchip/hardware.h>
+#include <asm/arch-rockchip/usbflash-alts.h>
 #include <asm/gpio.h>
 #include <linux/bitops.h>
 #include <linux/printk.h>
@@ -232,6 +233,9 @@ void __weak led_setup(void)
 void spl_board_init(void)
 {
 	led_setup();
+	/* On a MaskROM boot: the USB flash session, then the boot goes on */
+	if (CONFIG_IS_ENABLED(USBFLASH))
+		rockchip_spl_usbflash();
 }
 #endif
 #endif

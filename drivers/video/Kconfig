@@ -941,6 +941,13 @@ config VIDEO_SEPS525
 	  Enable support for the Syncoam PM-OLED display driver (RGB 160x128).
 	  Currently driver is supporting only SPI interface.
 
+config VIDEO_ILI9486
+	bool "ILI9486 SPI display driver"
+	depends on DM_SPI && VIDEO && DM_GPIO
+	help
+	  Enable support for ILI9486 SPI TFT display (320x480 RGB565).
+	  Uses CYCLIC for periodic frame refresh when CONFIG_CYCLIC is enabled.
+
 source "drivers/video/zynqmp/Kconfig"
 source "drivers/video/nexell/Kconfig"
 
@@ -1134,11 +1141,34 @@ config BMP
 
 config VIDEO_BMP_GZIP
 	bool "Gzip compressed BMP image support"
-	depends on BMP || SPLASH_SCREEN
+	depends on GZIP && (BMP || SPLASH_SCREEN)
 	help
 	  If this option is set, additionally to standard BMP
 	  images, gzipped BMP images can be displayed via the
 	  splashscreen support or the bmp command.
+
+config VIDEO_LOGO_GZIP
+	bool "Gzip the built-in logo bitmap"
+	depends on VIDEO_LOGO && VIDEO_BMP_GZIP
+	default y
+	help
+	  Store the built-in logo (tools/Makefile LOGO_BMP, embedded as
+	  bmp_logo_bitmap[]) as a gzip stream rather than as the raw BMP.
+	  Leave this off on a board whose U-Boot proper is itself packed
+	  compressed (an LZMA/LZ4 FIT, FIT_UBOOT_COMP != "none"): the outer
+	  compressor already shrinks the raw bitmap, a gzip stream inside it
+	  is incompressible, and the board then also skips one gunzip at
+	  every splash. Only the built-in asset is affected -- with
+	  VIDEO_BMP_GZIP still set, a gzipped bitmap loaded at run time (a
+	  customer's own boot.bmp) is decoded as before.
+
+#config VIDEO_BMP_LZMA
+#	bool "LZMA compressed BMP image support"
+#	depends on LZMA && (BMP || SPLASH_SCREEN)
+#	help
+#	  If this option is set, additionally to standard BMP
+#	  images, lzma compressed BMP images can be displayed
+#	  via the splashscreen support or the bmp command.
 
 config VIDEO_LOGO_MAX_SIZE
 	hex "Maximum size of the bitmap logo in bytes"
@@ -1168,6 +1198,8 @@ config BMP_32BPP
 	bool "32-bit-per-pixel BMP image support"
 	help
 	  Support display of bitmaps file with 32-bit-per-pixel.
+
+source "drivers/video/mediatek/Kconfig"
 
 endif # VIDEO
 

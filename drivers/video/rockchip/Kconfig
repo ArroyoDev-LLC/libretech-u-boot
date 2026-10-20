@@ -42,6 +42,130 @@ config VIDEO_ROCKCHIP_MAX_YRES
 
 if VIDEO_ROCKCHIP
 
+config DISPLAY_ROCKCHIP_DP
+	bool "Cadence MHDP DisplayPort"
+	depends on VIDEO_ROCKCHIP && ROCKCHIP_RK3399
+	help
+	  This enables the Cadence MHDP DisplayPort controller found on the
+	  RK3399 (cdn-dp), driving DP out of a Type-C port.
+
+	  This controller has no host-driven register interface for link
+	  training: a ucpu embedded in it runs a firmware image, and the host
+	  talks to that firmware over a mailbox. Without the firmware there is
+	  no AUX, no DPCD, no EDID and no link.
+
+choice
+	prompt "cdn-dp ucpu firmware source"
+	depends on DISPLAY_ROCKCHIP_DP
+	default CDN_DP_FW_FIT
+	help
+	  Where rockchip/dptx.bin comes from. There is deliberately NO runtime
+	  fallback between these: a silent fall back to a network fetch would
+	  hide a corrupt NOR image behind a working display, which is the one
+	  failure mode a bring-up must never mask.
+
+config CDN_DP_FW_FIT
+	bool "FIT image node, decompressed by SPL"
+	depends on SPL_LOAD_FIT && SPL_LZMA
+	help
+	  Ship dptx.bin as an LZMA-compressed node in u-boot.itb. SPL already
+	  reads, sha256-verifies and LZMA-decompresses U-Boot from that same
+	  FIT, so this reuses machinery that exists: U-Boot proper does no FIT
+	  parsing, no 'sf read' and no binman lookup -- it reads the blob where
+	  SPL left it, at CDN_DP_FW_FIT_ADDR.
+
+	  Costs about 33 KB of the SPI NOR budget rather than the blob's full
+	  98,320 bytes (measured: u-boot.itb 896,000 compressed vs 961,536
+	  uncompressed, with BL31 present). Needs no operator step, no network
+	  and no storage, so it works on a bench board with nothing attached.
+
+	  The board's -u-boot.dtsi must add a 'dptx' image node AND name it in
+	  fit,firmware BEFORE "u-boot". A node that is present but not named
+	  there is emitted into the FIT and never loaded, and SPL stages every
+	  COMPRESSED image through CONFIG_SYS_LOAD_ADDR -- which is inside
+	  decompressed U-Boot -- so a compressed node listed after "u-boot"
+	  lands on live .text. See the LANDMINE comments in the board DTSI.
+
+	  The board DTSI must ALSO set fit,firmware-strict on that
+	  configuration. binman picks `firmware` as the first name in
+	  fit,firmware that is VALID, not the first name, so with dptx listed
+	  before "u-boot" a build with no rockchip/bl31.elf would make atf-1
+	  invalid, elect dptx as the boot image, and SPL would treat the ucpu
+	  blob as U-Boot (reproduced). With the directive binman refuses that
+	  build outright, naming the missing entry. Do not "fix" the ordering
+	  instead: with LZMA kept, listing dptx after "u-boot" breaks the
+	  HEALTHY build too.
+
+config CDN_DP_FW_SCRIPT
+	bool "U-Boot environment script (filesystem or TFTP)"
+	depends on SUPPORTS_FW_LOADER
+	select FW_LOADER
+	help
+	  Load dptx.bin at runtime via lib/fw_loader.c, by running an
+	  environment script named 'cdn_dp_fw'. This keeps the blob a separate,
+	  unmodified, merely-aggregated file, which is what sidesteps
+	  LICENCE.rockchip's patent grant covering the software "alone, or in
+	  combination with an operating system" -- a bootloader is arguably not
+	  an operating system. It is the licence escape hatch, and it costs no
+	  image bytes.
+
+	  It needs an operator to publish the file. ROC-RK3399-PC has no
+	  onboard storage and cannot saveenv (ENV_IS_IN_FAT with no MMC), so in
+	  practice every boot needs a fetch and a re-entered script. This
+	  U-Boot has no CONFIG_CMD_NFS, so the fleet route is TFTP:
+
+	    setenv cdn_dp_fw 'dhcp ${loadaddr} rk3399/dptx.bin && \
+	        setenv cdn_dp_fw_addr ${fileaddr} && \
+	        setenv cdn_dp_fw_size ${filesize}'
+
+	  NOTE the variable names. include/fw_loader.h documents 'fw_addr' and
+	  'fw_size', but lib/fw_loader.c builds "%s_addr"/"%s_size" from the
+	  script name. A script following the header comment silently yields
+	  -EINVAL.
+
+	  ${loadaddr} is 0x800800 here (include/env_default.h defines
+	  loadaddr from CONFIG_SYS_LOAD_ADDR; the board sets no CONFIG_LOADADDR
+	  and does not need to). That is the same address as CONFIG_TEXT_BASE +
+	  2 KiB, and it is NOT the hazard it looks like: this script runs from
+	  the U-Boot prompt, long after relocation moved the monitor to the top
+	  of DRAM (board_get_usable_ram_top(), ~0xf8000000), so 0x800800 is
+	  ordinary free DRAM by then. Nor does the buffer have to survive:
+	  request_firmware_into_buf_via_script() memcpy()s the blob into a
+	  driver-owned buffer on the line after the script returns.
+
+	  Do not carry the SPL rule over to here. The board's -u-boot.dtsi
+	  argues at length that 0x800800 is dangerous, and it is -- in SPL,
+	  where decompressed U-Boot really is live at CONFIG_TEXT_BASE while
+	  the FIT is still being unpacked around it. The two contexts share an
+	  address and share nothing else.
+
+endchoice
+
+config CDN_DP_FW_FIT_ADDR
+	hex "Address SPL decompressed dptx.bin to"
+	depends on CDN_DP_FW_FIT
+	default 0x00400000
+	help
+	  Must equal the 'load' property of the FIT's dptx node. The board DTSI
+	  takes this symbol directly, so the two cannot drift.
+
+	  0x00400000 sits in the free window [0x202000, 0x800000): above the
+	  SPL FIT structure at CONFIG_SPL_LOAD_FIT_ADDRESS, below
+	  CONFIG_TEXT_BASE, and clear of TZRAM, BL31, the SCMI shmem and
+	  U-Boot's pre-relocation stack at CONFIG_CUSTOM_SYS_INIT_SP_ADDR.
+
+	  The buffer is NOT reserved from Linux. It only has to survive
+	  SPL -> cdn_dp probe and must not be relied on after booti.
+
+config CMD_CDN_DP
+	bool "cdn_dp bring-up command"
+	depends on DISPLAY_ROCKCHIP_DP
+	help
+	  A 'cdn_dp' command for driving the DisplayPort controller by hand
+	  during bring-up, so it can be exercised without being wired into the
+	  VOP's output-port walk. Scaffolding; remove once DP comes up on its
+	  own.
+
 config DISPLAY_ROCKCHIP_EDP
 	bool "EDP Port"
 	depends on VIDEO_ROCKCHIP

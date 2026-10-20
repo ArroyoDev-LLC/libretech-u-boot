@@ -1,0 +1,69 @@
+if TARGET_ROC_PC_RK3399
+
+config SYS_BOARD
+	default "roc-rk3399-pc"
+
+config SYS_VENDOR
+	default "libre-computer"
+
+config SYS_CONFIG_NAME
+	default "roc-rk3399-pc"
+
+config ROC_RK3399_PC_REVFIX
+	bool "Detect the board revision from the LPDDR4 rank count and fix up the kernel DT"
+	default y
+	select OF_BOARD_SETUP
+	help
+	  ROC-RK3399-PC V1.2A carries two 200-ball LPDDR4 packages (one rank
+	  per channel); V1.0 / V1.1-A carry one 366-pin package (two ranks per
+	  channel). TPL publishes the detected rank in PMUGRF_OS_REG2, so the
+	  revision is readable here without any strap or ID resistor. One
+	  rank is reported as v1.2. Two ranks are reported as v1.1: that
+	  population shipped as V1.1-A, and a V1.0 reads the same. This
+	  sets $board_rev, prints the revision, and in ft_board_setup()
+	  prepends libre-computer,roc-rk3399-pc-v1.2 or -v1.1 to the root
+	  compatible. On a V1.2A it also
+	  replaces the mps,mp8859 node's dc_12v with a root regulator-fixed
+	  (the V1.2A part is an SC8903 with no i2c and no SoC-driven enable),
+	  re-pointing sys_12v at it and disabling the mp8859 node.
+
+config ROC_RK3399_PC_CPU_L_MHZ
+	int "U-Boot proper's little-cluster clock in MHz (0: leave it at 600)"
+	depends on ROC_RK3399_PC_REVFIX
+	default 0
+	help
+	  0, 1008, 1200 or 1416. U-Boot runs on an A53 that the clock setup
+	  leaves at 600 MHz; work bound by that core (LZMA unpacking a DFU
+	  download, hashing, decompressing a kernel) scales with its clock.
+	  Proper raises vdd_cpu_l to the RK3399 cluster-0 OPP voltage for the
+	  rate first (925 / 1000 / 1125 mV, Linux rk3399.dtsi), then the PLL.
+	  The kernel's cpufreq takes over from there. An SPL with the RK808
+	  (SPL_REGULATOR_RK8XX) does the same before its MaskROM USB flash
+	  session.
+
+config ROC_RK3399_PC_BENCH_CLKCAP
+	bool "bench_clkcap env: cap the kernel DT's CPU/GPU OPP tables (bench only)"
+	depends on ROC_RK3399_PC_REVFIX
+	default y
+	help
+	  When the environment variable bench_clkcap is set to 1,
+	  ft_board_setup() deletes every opp-* node above 816 MHz from the
+	  arm,cortex-a53 OPP table, above 1008 MHz from the arm,cortex-a72
+	  table and above 500 MHz from the arm,mali-t860 table of the device
+	  tree handed to the OS (booti/bootm and the EFI path alike), so a
+	  foreign kernel on a hub-VBUS-powered bench cannot brown the rail
+	  out. Nodes are judged by opp-hz, not by name. Unset, nothing
+	  happens: the product boot is unaffected. Never set bench_clkcap in
+	  a defconfig or a product environment.
+
+config ROC_RK3399_PC_REVFIX_CMD
+	bool "roc_revfix_test command (bench only)"
+	depends on ROC_RK3399_PC_REVFIX
+	default n
+	help
+	  Adds `roc_revfix_test <fdt_addr>`, which runs ft_board_setup() on a
+	  device tree blob at that address so the fixup can be inspected with
+	  `fdt print` on a board with nothing to boot. Never enable this in a
+	  product defconfig.
+
+endif

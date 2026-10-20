@@ -10,6 +10,7 @@
 
 #include <command.h>
 #include <env.h>
+#include <asm/arch/mem.h>
 #include <asm/arch/sm.h>
 #include <stdlib.h>
 #include <display_options.h>
@@ -152,12 +153,39 @@ free_buffer:
 	return ret;
 }
 
+#if defined(CONFIG_MESON_GX_LIBRE_SECURE_LAYOUT) || \
+    defined(CONFIG_MESON_G12A_LIBRE_SECURE_LAYOUT)
+/*
+ * Hand an OP-TEE image already in memory -- the v2-header file LBS publishes
+ * as out/<target>.tee.bin -- to TF-A's one-shot loader.  The libre chain's
+ * OP-TEE is optional and lives outside the boot image; board_late_init()
+ * loads optee/tee.bin from MMC by itself, so this is for an image delivered
+ * another way (DFU, network).
+ */
+static int do_sm_optee(struct cmd_tbl *cmdtp, int flag, int argc,
+		       char *const argv[])
+{
+	if (argc < 3)
+		return CMD_RET_USAGE;
+
+	if (meson_libre_optee_load(simple_strtoul(argv[1], NULL, 16),
+				   simple_strtoul(argv[2], NULL, 16)))
+		return CMD_RET_FAILURE;
+
+	return CMD_RET_SUCCESS;
+}
+#endif
+
 static struct cmd_tbl cmd_sm_sub[] = {
 	U_BOOT_CMD_MKENT(serial, 2, 1, do_sm_serial, "", ""),
 	U_BOOT_CMD_MKENT(reboot_reason, 1, 1, do_sm_reboot_reason, "", ""),
 	U_BOOT_CMD_MKENT(efuseread, 4, 1, do_efuse_read, "", ""),
 	U_BOOT_CMD_MKENT(efusewrite, 4, 0, do_efuse_write, "", ""),
 	U_BOOT_CMD_MKENT(efusedump, 3, 1, do_efuse_dump, "", ""),
+#if defined(CONFIG_MESON_GX_LIBRE_SECURE_LAYOUT) || \
+    defined(CONFIG_MESON_G12A_LIBRE_SECURE_LAYOUT)
+	U_BOOT_CMD_MKENT(optee, 3, 0, do_sm_optee, "", ""),
+#endif
 };
 
 static int do_sm(struct cmd_tbl *cmdtp, int flag, int argc,
@@ -188,4 +216,8 @@ U_BOOT_CMD(
 	"sm efuseread <offset> <size> <address> - read efuse to memory address\n"
 	"sm efusewrite <offset> <size> <address> - write into efuse from memory address\n"
 	"sm efusedump <offset> <size> - dump efuse data range to console"
+#if defined(CONFIG_MESON_GX_LIBRE_SECURE_LAYOUT) || \
+    defined(CONFIG_MESON_G12A_LIBRE_SECURE_LAYOUT)
+	"\nsm optee <address> <size> - hand an OP-TEE image in memory to TF-A"
+#endif
 );

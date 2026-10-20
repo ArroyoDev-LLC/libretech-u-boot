@@ -11,6 +11,8 @@
 
 #define DDR0_PUB_PIR	(DDR0_PUB_REG_BASE + (0x01 << 2))
 
+/* PGCR0 @ PUB 0x04 (before PGCR1@0x05); ACS t_pub_pgcr0=0x07d81e3f */
+#define DDR0_PUB_PGCR0	(DDR0_PUB_REG_BASE + (0x04 << 2))
 #define DDR0_PUB_PGCR1	(DDR0_PUB_REG_BASE + (0x05 << 2))
 #define DDR0_PUB_PGCR2	(DDR0_PUB_REG_BASE + (0x06 << 2))
 #define DDR0_PUB_PGCR3	(DDR0_PUB_REG_BASE + (0x07 << 2))
@@ -25,6 +27,8 @@
 #define DDR0_PUB_ACBDLR1	(DDR0_PUB_REG_BASE + (0x151 << 2))
 #define DDR0_PUB_ACBDLR2	(DDR0_PUB_REG_BASE + (0x152 << 2))
 #define DDR0_PUB_ACBDLR3	(DDR0_PUB_REG_BASE + (0x153 << 2))
+#define DDR0_PUB_ACBDLR4	(DDR0_PUB_REG_BASE + (0x154 << 2))
+#define DDR0_PUB_ACBDLR5	(DDR0_PUB_REG_BASE + (0x155 << 2))
 #define DDR0_PUB_ACBDLR6	(DDR0_PUB_REG_BASE + (0x156 << 2))
 #define DDR0_PUB_ACBDLR7	(DDR0_PUB_REG_BASE + (0x157 << 2))
 #define DDR0_PUB_ACBDLR8	(DDR0_PUB_REG_BASE + (0x158 << 2))
@@ -67,6 +71,24 @@
 #define DDR0_PUB_DTAR1	(DDR0_PUB_REG_BASE + (0x83 << 2))
 #define DDR0_PUB_DTAR2	(DDR0_PUB_REG_BASE + (0x84 << 2))
 #define DDR0_PUB_DTAR3	(DDR0_PUB_REG_BASE + (0x85 << 2))
+/*
+ * Product bist post @0x48cc writes PUB 0x86..0x89 (after DTAR).  No vendor
+ * file names these four words, so they carry no name here.
+ */
+#define DDR0_PUB_UNNAMED_0X86	(DDR0_PUB_REG_BASE + (0x86 << 2))
+#define DDR0_PUB_UNNAMED_0X87	(DDR0_PUB_REG_BASE + (0x87 << 2))
+#define DDR0_PUB_UNNAMED_0X88	(DDR0_PUB_REG_BASE + (0x88 << 2))
+#define DDR0_PUB_UNNAMED_0X89	(DDR0_PUB_REG_BASE + (0x89 << 2))
+/*
+ * Data Training Eye Data Registers, per the vendor's cmd_ddr_test.c
+ * (A311D_Linux2603V2.5 bl33/v2019/cmd/amlogic/cmd_ddr_test.c:1297-1299):
+ * DTEDR0 0x08c, DTEDR1 0x08d, DTEDR2 0x08e.  They used to be named at
+ * 0x88/0x89 here; under a DTCR0 rank/lane select it is 0x8c..0x8e that
+ * change (claude amlogic n1212).
+ */
+#define DDR0_PUB_DTEDR0	(DDR0_PUB_REG_BASE + (0x8c << 2))
+#define DDR0_PUB_DTEDR1	(DDR0_PUB_REG_BASE + (0x8d << 2))
+#define DDR0_PUB_DTEDR2	(DDR0_PUB_REG_BASE + (0x8e << 2))
 
 #define DDR0_PUB_RANKIDR	(DDR0_PUB_REG_BASE + (0x137 << 2))
 
@@ -80,13 +102,52 @@
 
 #define DDR0_PUB_ZQ0PR	(DDR0_PUB_REG_BASE + (0x1a1 << 2))
 #define DDR0_PUB_ZQ1PR	(DDR0_PUB_REG_BASE + (0x1a5 << 2))
+
+/*
+ * ZQ calibration RESULT registers, i.e. what the PHY actually converged to as
+ * opposed to what PUB_ZQ0PR/ZQ1PR asked for.  Nothing in this tree has ever
+ * read them, which is why the PHY drive/ODT/ZQ settings are on record as
+ * "never measured" (N46).
+ *
+ * Provenance, per the register-name rule -- the ADDRESS is the fact and it was
+ * resolved in a vendor-authored map, not inferred from the name:
+ *
+ *   0xC883668C  DDR0_PUB_ZQ0SR   amlogic/cmd_ddr_test.c:898  [g12a, g12b]
+ *   0xC883669C  DDR0_PUB_ZQ1SR   amlogic/cmd_ddr_test.c:902  [g12a, g12b]
+ *
+ * The BSP names them for g12a/g12b rather than GXL, and the reason they carry
+ * here is structural rather than assumed: GXL shares DDR0_PUB_REG_BASE with
+ * those SoCs and this header already places ZQ0PR/ZQ1PR/ZQCR at exactly the
+ * block indices that arithmetic implies (0x1a1/0x1a5/0x1a0), so the ZQ block
+ * layout is the same PUB IP.  GXBB's is NOT -- it puts ZQCR at 0x90 -- which is
+ * the case that would have made a blind copy wrong.
+ */
+#define DDR0_PUB_ZQ0SR	(DDR0_PUB_REG_BASE + (0x1a3 << 2))
+#define DDR0_PUB_ZQ1SR	(DDR0_PUB_REG_BASE + (0x1a7 << 2))
 #define DDR0_PUB_ZQ2PR	(DDR0_PUB_REG_BASE + (0x1a9 << 2))
 #define DDR0_PUB_ZQ3PR	(DDR0_PUB_REG_BASE + (0x1ad << 2))
 
+#define DDR0_PUB_DX0GCR0	(DDR0_PUB_REG_BASE + (0x1c0 << 2))
 #define DDR0_PUB_DX0GCR1	(DDR0_PUB_REG_BASE + (0x1c1 << 2))
 #define DDR0_PUB_DX0GCR2	(DDR0_PUB_REG_BASE + (0x1c2 << 2))
 #define DDR0_PUB_DX0GCR3	(DDR0_PUB_REG_BASE + (0x1c3 << 2))
 #define DDR0_PUB_DX0GCR4	(DDR0_PUB_REG_BASE + (0x1c4 << 2))
+#define DDR0_PUB_DX0GCR5	(DDR0_PUB_REG_BASE + (0x1c5 << 2))
+/*
+ * Per-bit delay lines.  The vendor names word 0x1d6 BDLR5, NOT BDLR6:
+ *   BDLR0 0x1d0  BDLR1 0x1d1  BDLR2 0x1d2  [hole 0x1d3]
+ *   BDLR3 0x1d4  BDLR4 0x1d5  BDLR5 0x1d6  [hole 0x1d7]  BDLR6 0x1d8
+ * -- BSP A311D_Linux2603V2.5 uboot/bl33/v2019/cmd/amlogic/cmd_ddr_test.c:1085-1091,
+ * inside the GXL guard at :1062 whose DDR0_PUB_REG_BASE (:880) is our 0xc8836000.
+ * Corroborated by the gen-2 map in drivers/ram/k3-am654-ddrss.h:372-378, whose
+ * byte offsets give the identical layout including BOTH holes:
+ * (0x758 - 0x700) / 4 = 0x16 = BDLR5 and (0x760 - 0x700) / 4 = 0x18 = BDLR6.
+ * These four symbols were named BDLR6 until 2026-09-01; the ADDRESS is unchanged
+ * and no read moves, only the name.  BDLR6 (0x1d8, +0x40/lane) is deliberately
+ * NOT defined here -- nothing reads it, and defining it would silently redirect
+ * the existing reader in dram-gx.c.
+ */
+#define DDR0_PUB_DX0BDLR5	(DDR0_PUB_REG_BASE + (0x1d6 << 2))
 #define DDR0_PUB_DX0LCDLR0	(DDR0_PUB_REG_BASE + (0x1e0 << 2))
 #define DDR0_PUB_DX0LCDLR2	(DDR0_PUB_REG_BASE + (0x1e2 << 2))
 
@@ -95,10 +156,32 @@
 #define DDR0_PUB_DX2GTR		(DDR0_PUB_REG_BASE + (0x270 << 2))
 #define DDR0_PUB_DX3GTR		(DDR0_PUB_REG_BASE + (0x2b0 << 2))
 
+/*
+ * DXnGSR* — per-byte-lane PHY general status (gate/WL window, rank state).
+ * Addresses from vendor BL2 RE (gxl_bl2_ddr_deep.c serial_print of train err):
+ *   DX0GSR0 @ PUB 0x1f8 → 0xc88367e0, DX1 @ 0x238, DX2 @ 0x278, DX3 @ 0x2b8
+ *   DX0GSR2 @ 0x1fa, DX0GSR3 @ 0x1fb (+0x40 per lane)
+ */
+#define DDR0_PUB_DX0GSR0	(DDR0_PUB_REG_BASE + (0x1f8 << 2))
+#define DDR0_PUB_DX0GSR2	(DDR0_PUB_REG_BASE + (0x1fa << 2))
+#define DDR0_PUB_DX0GSR3	(DDR0_PUB_REG_BASE + (0x1fb << 2))
+#define DDR0_PUB_DX1GSR0	(DDR0_PUB_REG_BASE + (0x238 << 2))
+#define DDR0_PUB_DX1GSR2	(DDR0_PUB_REG_BASE + (0x23a << 2))
+#define DDR0_PUB_DX1GSR3	(DDR0_PUB_REG_BASE + (0x23b << 2))
+#define DDR0_PUB_DX2GSR0	(DDR0_PUB_REG_BASE + (0x278 << 2))
+#define DDR0_PUB_DX2GSR2	(DDR0_PUB_REG_BASE + (0x27a << 2))
+#define DDR0_PUB_DX2GSR3	(DDR0_PUB_REG_BASE + (0x27b << 2))
+#define DDR0_PUB_DX3GSR0	(DDR0_PUB_REG_BASE + (0x2b8 << 2))
+#define DDR0_PUB_DX3GSR2	(DDR0_PUB_REG_BASE + (0x2ba << 2))
+#define DDR0_PUB_DX3GSR3	(DDR0_PUB_REG_BASE + (0x2bb << 2))
+
+#define DDR0_PUB_DX1GCR0	(DDR0_PUB_REG_BASE + (0x200 << 2))
 #define DDR0_PUB_DX1GCR1	(DDR0_PUB_REG_BASE + (0x201 << 2))
 #define DDR0_PUB_DX1GCR2	(DDR0_PUB_REG_BASE + (0x202 << 2))
 #define DDR0_PUB_DX1GCR3	(DDR0_PUB_REG_BASE + (0x203 << 2))
 #define DDR0_PUB_DX1GCR4	(DDR0_PUB_REG_BASE + (0x204 << 2))
+#define DDR0_PUB_DX1GCR5	(DDR0_PUB_REG_BASE + (0x205 << 2))
+#define DDR0_PUB_DX1BDLR5	(DDR0_PUB_REG_BASE + (0x216 << 2))
 #define DDR0_PUB_DX1LCDLR0	(DDR0_PUB_REG_BASE + (0x220 << 2))
 #define DDR0_PUB_DX1LCDLR2	(DDR0_PUB_REG_BASE + (0x222 << 2))
 
@@ -107,6 +190,8 @@
 #define DDR0_PUB_DX2GCR2	(DDR0_PUB_REG_BASE + (0x242 << 2))
 #define DDR0_PUB_DX2GCR3	(DDR0_PUB_REG_BASE + (0x243 << 2))
 #define DDR0_PUB_DX2GCR4	(DDR0_PUB_REG_BASE + (0x244 << 2))
+#define DDR0_PUB_DX2GCR5	(DDR0_PUB_REG_BASE + (0x245 << 2))
+#define DDR0_PUB_DX2BDLR5	(DDR0_PUB_REG_BASE + (0x256 << 2))
 #define DDR0_PUB_DX2LCDLR0	(DDR0_PUB_REG_BASE + (0x260 << 2))
 #define DDR0_PUB_DX2LCDLR2	(DDR0_PUB_REG_BASE + (0x262 << 2))
 
@@ -115,6 +200,8 @@
 #define DDR0_PUB_DX3GCR2	(DDR0_PUB_REG_BASE + (0x282 << 2))
 #define DDR0_PUB_DX3GCR3	(DDR0_PUB_REG_BASE + (0x283 << 2))
 #define DDR0_PUB_DX3GCR4	(DDR0_PUB_REG_BASE + (0x284 << 2))
+#define DDR0_PUB_DX3GCR5	(DDR0_PUB_REG_BASE + (0x285 << 2))
+#define DDR0_PUB_DX3BDLR5	(DDR0_PUB_REG_BASE + (0x296 << 2))
 #define DDR0_PUB_DX3LCDLR0	(DDR0_PUB_REG_BASE + (0x2a0 << 2))
 #define DDR0_PUB_DX3LCDLR2	(DDR0_PUB_REG_BASE + (0x2a2 << 2))
 
@@ -188,6 +275,14 @@
 #define DDR0_SOFT_RESET	(DDR_MMC_BASE + 0x20)
 
 #define AM_DDR_PLL_STS	(DDR_MMC_BASE + 0x18)
+/*
+ * The vendor's P_DDR0_CLK_CTRL on GXL: cmd/amlogic/cmd_ddr_test.c's
+ * P_DDR_PHY_905X arm has DDR_CLK_CNTL = MMC_REG_BASE + (0x7 << 2), then
+ * "#define P_DDR0_CLK_CTRL DDR_CLK_CNTL".  One register, two vendor names.
+ */
 #define DDR_CLK_CNTL	(DDR_MMC_BASE + 0x1c)
 #define DDR0_APD_CTRL	(DDR_MMC_BASE + 0x24)
+
+/* GXBB-only, and this will get optimized out by the compiler */
+#define DDR0_CLK_CTRL	0
 #endif

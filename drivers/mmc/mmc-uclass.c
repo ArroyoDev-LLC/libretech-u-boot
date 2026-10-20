@@ -250,6 +250,17 @@ int mmc_of_parse(struct udevice *dev, struct mmc_config *cfg)
 	 */
 	cfg->f_max = dev_read_u32_default(dev, "max-frequency", cfg->f_max);
 
+	/*
+	 * Downstream-only extension, the twin of the kernel fork's
+	 * mmc_of_parse(): "max-frequency-tuned" is a higher ceiling the host's
+	 * card-clock fallback ladder can safely step down from, while
+	 * "max-frequency" stays the upstream-safe value. The DT is the opt-in:
+	 * it must only appear on a host that has the ladder.
+	 */
+	val = dev_read_u32_default(dev, "max-frequency-tuned", 0);
+	if ((uint)val > cfg->f_max)
+		cfg->f_max = val;
+
 	if (dev_read_bool(dev, "cap-sd-highspeed"))
 		cfg->host_caps |= MMC_CAP(SD_HS);
 	if (dev_read_bool(dev, "cap-mmc-highspeed"))

@@ -109,6 +109,7 @@ obj-$(CONFIG_SPL_YMODEM_SUPPORT) += crc16-ccitt.o
 obj-$(CONFIG_$(PHASE_)HASH) += crc16-ccitt.o
 obj-$(CONFIG_MMC_SPI_CRC_ON) += crc16-ccitt.o
 obj-y += net_utils.o
+obj-$(CONFIG_SPL_CIRCBUF) += circbuf.o
 endif
 obj-$(CONFIG_ADDR_MAP) += addr_map.o
 obj-y += qsort.o
@@ -138,6 +139,7 @@ obj-$(CONFIG_TRACE) += trace.o
 obj-$(CONFIG_LIB_UUID) += uuid.o
 obj-$(CONFIG_LIB_RAND) += rand.o
 obj-y += panic.o
+obj-y += chip_serial.o
 
 ifeq ($(CONFIG_XPL_BUILD),y)
 # SPL U-Boot may use full-printf, tiny-printf or none at all

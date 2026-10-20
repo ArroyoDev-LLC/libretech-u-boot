@@ -4,6 +4,17 @@
  * Author: Julien Masson <jmasson@baylibre.com>
  */
 
+/*
+ * USB gadget 0 is the port the BootROM downloads over (ssusb0, Type-C P0), so
+ * `fastboot usb 0` / `ums 0` name it on every MT8188 board. Without the alias
+ * gadgets number in bind order and ssusb1 (0x11201000) sorts first.
+ */
+/ {
+	aliases {
+		usb_gadget0 = &ssusb0;
+	};
+};
+
 &u3phy0 {
 	compatible = "mediatek,mt8188-tphy", "mediatek,generic-tphy-v3",
 		     "mediatek,generic-tphy-v2";

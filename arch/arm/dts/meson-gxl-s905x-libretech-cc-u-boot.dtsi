@@ -5,3 +5,92 @@
  */
 
 #include "meson-gxl-u-boot.dtsi"
+
+#if defined(CONFIG_TPL_MESON_GX_LOAD_MMC)
+/*
+ * The v1 half of the marks landed for the CC-V2 in 1d86113be35 (N29).  The
+ * reasoning is identical and is written out in full in
+ * meson-gxl-s905x-libretech-cc-v2-u-boot.dtsi; the short form:
+ *
+ * `soc { bootph-all; }` in meson-gx-u-boot.dtsi marks the BUS, not its
+ * children, so without these three marks the MMC arm's pruned TPL device tree
+ * carries /chosen, /soc and /soc/vpu@d0100000 and nothing else -- no
+ * apb@d0000000, no controller, no /aliases.  A loader that is linked into the
+ * stage and has no controller to bind is a silent nothing.
+ *
+ * apb@d0000000 needs its own mark because dm_scan_fdt_node() does not recurse
+ * into a node that fails ofnode_pre_reloc(), so an unmarked simple-bus hides
+ * every child even when fdtgrep left the child in the DTB.
+ *
+ * /aliases is NOT marked and does not need to be: fdtgrep runs with -T and
+ * fdt_add_alias_regions() adds back exactly the alias properties whose target
+ * node survived the grep.
+ *
+ * WHICH CONTROLLER IS WHICH, from this board's own .dts (which labels the two
+ * nodes in so many words, and disagrees with meson-gx.dtsi's alias comments
+ * exactly as the CC-V2's does):
+ *   mmc0 -> /soc/apb@d0000000/mmc@74000 = &sd_emmc_c = eMMC
+ *   mmc1 -> /soc/apb@d0000000/mmc@72000 = &sd_emmc_b = SD card
+ *
+ * mmc@70000 (sd_emmc_a) is deliberately NOT marked: SDIO, not a boot medium,
+ * and every marked controller costs stage bytes under the 45056 B ceiling.
+ *
+ * bootph-pre-sram, not bootph-all: pre-sram is the TPL phase's own tag, so the
+ * DRAM SPL stage's device tree does not grow for a stage that is not the one
+ * doing the reading.
+ *
+ * There is no &cbus / &spifc hunk here, and that is not an omission: this
+ * board has no SPI NOR part and libretech-cc_libre_defconfig sets no
+ * MESON_SPIFC, so its TPL has exactly one pull medium.
+ */
+&apb {
+	bootph-pre-sram;
+};
+
+/* SD card -- alias mmc1, BOOT_DEVICE_SD */
+&sd_emmc_b {
+	bootph-pre-sram;
+};
+
+/* eMMC -- alias mmc0, BOOT_DEVICE_EMMC */
+&sd_emmc_c {
+	bootph-pre-sram;
+};
+#endif
+
+#if defined(CONFIG_SPL_DFU)
+#include "meson-gxl-libretech-spl-usbflash-u-boot.dtsi"
+#endif
+
+/ {
+	smbios {
+		compatible = "u-boot,sysinfo-smbios";
+
+		smbios {
+			system {
+				manufacturer = "libre-computer";
+				product = "aml-s905x-cc";
+			};
+
+			baseboard {
+				manufacturer = "libre-computer";
+				product = "aml-s905x-cc";
+			};
+
+			chassis {
+				manufacturer = "libre-computer";
+				product = "aml-s905x-cc";
+			};
+		};
+	};
+};
+
+/*
+ * Open-chain SCMI (aml-s905x-cc / libretech-cc).
+ * Merged only when CONFIG_SCMI_FIRMWARE is enabled (see amlogic/libretech-cc-scmi.config).
+ * MHU + AHB shmem already exist in meson-gx.dtsi; this overlay adds firmware/scmi
+ * and disables vendor SCPI for the U-Boot DTB only.
+ */
+#ifdef CONFIG_SCMI_FIRMWARE
+#include "meson-gxl-scmi-u-boot.dtsi"
+#endif

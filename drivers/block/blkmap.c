@@ -83,6 +83,17 @@ struct blkmap_slice {
 		       lbaint_t blknr, lbaint_t blkcnt, const void *buffer);
 
 	/**
+	 * @erase: - Erase (discard) part of the slice, or NULL if it cannot
+	 *
+	 * @erase.bm: Blkmap to which this slice belongs
+	 * @erase.bms: This slice
+	 * @erase.blknr: Start block number to erase, relative to the slice
+	 * @erase.blkcnt: Number of blocks to erase, within the slice
+	 */
+	ulong (*erase)(struct blkmap *bm, struct blkmap_slice *bms,
+		       lbaint_t blknr, lbaint_t blkcnt);
+
+	/**
 	 * @destroy: - Tear down slice
 	 *
 	 * @read.bm: Blkmap to which this slice belongs
@@ -171,6 +182,15 @@ static ulong blkmap_linear_write(struct blkmap *bm, struct blkmap_slice *bms,
 	return blk_write(bml->blk, bml->blknr + blknr, blkcnt, buffer);
 }
 
+static ulong blkmap_linear_erase(struct blkmap *bm, struct blkmap_slice *bms,
+				 lbaint_t blknr, lbaint_t blkcnt)
+{
+	struct blkmap_linear *bml = container_of(bms, struct blkmap_linear, slice);
+	long n = blk_erase(bml->blk, bml->blknr + blknr, blkcnt);
+
+	return n < 0 ? 0 : n;
+}
+
 int blkmap_map_linear(struct udevice *dev, lbaint_t blknr, lbaint_t blkcnt,
 		      struct udevice *lblk, lbaint_t lblknr)
 {
@@ -199,6 +219,7 @@ int blkmap_map_linear(struct udevice *dev, lbaint_t blknr, lbaint_t blkcnt,
 
 			.read = blkmap_linear_read,
 			.write = blkmap_linear_write,
+			.erase = blkmap_linear_erase,
 		},
 
 		.blk = lblk,
@@ -252,6 +273,17 @@ static ulong blkmap_mem_write(struct blkmap *bm, struct blkmap_slice *bms,
 	return blkcnt;
 }
 
+/* Erasing RAM: the blocks read back as zero. */
+static ulong blkmap_mem_erase(struct blkmap *bm, struct blkmap_slice *bms,
+			      lbaint_t blknr, lbaint_t blkcnt)
+{
+	struct blkmap_mem *bmm = container_of(bms, struct blkmap_mem, slice);
+	struct blk_desc *bd = dev_get_uclass_plat(bm->blk);
+
+	memset(bmm->addr + (blknr << bd->log2blksz), 0, blkcnt << bd->log2blksz);
+	return blkcnt;
+}
+
 static void blkmap_mem_destroy(struct blkmap *bm, struct blkmap_slice *bms)
 {
 	struct blkmap_mem *bmm = container_of(bms, struct blkmap_mem, slice);
@@ -279,6 +311,7 @@ int __blkmap_map_mem(struct udevice *dev, lbaint_t blknr, lbaint_t blkcnt,
 
 			.read = blkmap_mem_read,
 			.write = blkmap_mem_write,
+			.erase = blkmap_mem_erase,
 			.destroy = blkmap_mem_destroy,
 		},
 
@@ -387,9 +420,46 @@ static ulong blkmap_blk_write(struct udevice *dev, lbaint_t blknr,
 	return total;
 }
 
+/*
+ * Erase across slices. Unlike read and write, each slice's share is bounded
+ * by what is left of the slice after the start block, so an erase never
+ * runs past a mapping. Stops at a gap or at a slice that cannot erase.
+ */
+static ulong blkmap_blk_erase(struct udevice *dev, lbaint_t blknr,
+			      lbaint_t blkcnt)
+{
+	struct blkmap *bm = dev_get_plat(dev->parent);
+	struct blkmap_slice *bms;
+	lbaint_t nr, cnt, done, total = 0;
+
+	while (blkcnt) {
+		bool found = false;
+
+		list_for_each_entry(bms, &bm->slices, node) {
+			if (blkmap_slice_contains(bms, blknr)) {
+				found = true;
+				break;
+			}
+		}
+		if (!found || !bms->erase)
+			break;
+		nr = blknr - bms->blknr;
+		cnt = min(blkcnt, bms->blkcnt - nr);
+		done = bms->erase(bm, bms, nr, cnt);
+		total += done;
+		if (done != cnt)
+			break;
+		blknr += cnt;
+		blkcnt -= cnt;
+	}
+
+	return total;
+}
+
 static const struct blk_ops blkmap_blk_ops = {
 	.read	= blkmap_blk_read,
 	.write	= blkmap_blk_write,
+	.erase	= blkmap_blk_erase,
 };
 
 U_BOOT_DRIVER(blkmap_blk) = {

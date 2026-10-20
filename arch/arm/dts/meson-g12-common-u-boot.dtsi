@@ -2,23 +2,32 @@
 /*
  * Copyright (c) 2019 BayLibre, SAS.
  * Author: Maxime Jourdan <mjourdan@baylibre.com>
+ *
+ * G12A/G12B/SM1 shared u-boot.dtsi.  Binman open-chain packing mirrors
+ * meson-gx-u-boot.dtsi; amlimage -n is SoC-specific (g12a / g12b / sm1)
+ * and is overridden in per-SoC or per-board dtsi.  Default here is g12a
+ * (same 0xf000 payload as sm1/g12b).
  */
 
 / {
-	/* Keep HW order from U-Boot */
 	aliases {
-		/delete-property/ mmc0;
-		/delete-property/ mmc1;
-		/delete-property/ mmc2;
+		/* the OTG port env usb_otg sets the role of (boot/usb_otg_role.c) */
+		usb-otg = &usb;
 	};
 
 	soc {
 		bootph-all;
 	};
+
+#if defined(CONFIG_BINMAN)
+	binman: binman {
+		multiple-images;
+	};
+#endif
 };
 
 &vpu {
-	reg = <0x0 0xff900000 0x0 0x100000>,
+	reg = <0x0 0xff900000 0x0 0x40000>,
 	      <0x0 0xff63c000 0x0 0x1000>,
 	      <0x0 0xff638000 0x0 0x400>;
 	reg-names = "vpu", "hhi", "dmc";
@@ -30,3 +39,300 @@
 	      <0x0 0x3c000 0x0 0x1000>;
 	reg-names = "hdmitx", "hhi";
 };
+
+#if defined(CONFIG_BINMAN)
+/* binman open image: SPL amlimage + FIT (ATF + SCP + U-Boot) */
+
+&binman {
+	u-boot-amlogic {
+		filename = "u-boot-meson-with-spl.bin";
+		pad-byte = <0xff>;
+
+		mkimage {
+			/* Override -n in sm1 / g12b board dtsi as needed */
+			args = "-n", "g12a", "-T", "amlimage";
+#if defined(CONFIG_MESON_G12A_XPL_CHAIN)
+			/*
+			 * Chain: BootROM-loaded stage is TPL (AHB 0xf000).
+			 * SPL is NOT amlimage-signed -- TPL fetches it.
+			 */
+			filename = "tpl/u-boot-tpl-signed.bin";
+
+			u-boot-tpl {
+			};
+#else
+			filename = "spl/u-boot-spl-signed.bin";
+
+			u-boot-spl {
+			};
+#endif
+		};
+
+#if defined(CONFIG_MESON_G12A_XPL_CHAIN)
+		/*
+		 * DRAM stage in the pad between signed TPL (ends 0x10000) and
+		 * FIT.  Same layout for USB payload / MMC / NOR offsets.
+		 */
+		u-boot-spl {
+			offset = <CONFIG_MESON_G12A_SPL_OFFSET>;
+		};
+#endif
+
+		fit: fit {
+			description = "ATF and U-Boot images";
+			#address-cells = <1>;
+			fit,fdt-list = "of-list";
+			fit,external-offset = <CONFIG_FIT_EXTERNAL_OFFSET>;
+			fit,align = <512>;
+			offset = <CONFIG_MESON_G12A_FIT_OFFSET>;
+
+			images {
+				u-boot {
+					description = "U-Boot";
+					type = "standalone";
+					os = "u-boot";
+					arch = "arm64";
+					/*
+					 * BL33 compression ladder: LZ4 first, LZMA only
+					 * where LZ4's ratio does not fit the size
+					 * requirement, then none.  Same order, same
+					 * reason and the same text as
+					 * arch/arm/dts/meson-gx-u-boot.dtsi, and the
+					 * policy in design/rules/bootloader/
+					 * bootloader-checklist.md section 1.  GZIP is not
+					 * offered: strictly dominated -- worse ratio than
+					 * LZMA, slower to decompress than LZ4.
+					 *
+					 * Compressed only when the SPL can actually
+					 * decompress it, so the gate is the SPL-phase
+					 * symbol, never the host-tool one.  Until this
+					 * ladder existed the node was a literal
+					 * compression = "none", so CONFIG_SPL_LZ4=y would
+					 * have built, shrunk nothing, and said so nowhere
+					 * -- the same failure the Rockchip FIT_UBOOT_COMP
+					 * ladder had before u-boot 68f56355136.
+					 *
+					 * SPL_LZMA is affordable here because
+					 * MESON_G12A_XPL_CHAIN runs the SPL phase from
+					 * DRAM at CONFIG_SPL_TEXT_BASE 0x08000000 with
+					 * CONFIG_SPL_MAX_SIZE 0x40000 -- the SRAM
+					 * ceiling that keeps LZMA off the GXL
+					 * single-stage path does not exist on this
+					 * family.  LZ4's decompressor is still the
+					 * smaller of the two.
+					 *
+					 * LZMA compresses BETTER than 50%, which is why
+					 * the LZMA arm below does NOT carry
+					 * decomp-in-place: it does not need to.  LZMA
+					 * records its decompressed length, so
+					 * spl_decomp_size() returns it and
+					 * load_simple_fit() re-stages the compressed
+					 * copy clear of the decompressed image before
+					 * decompressing -- out-of-place, exactly.  That
+					 * is a loader property, not a ratio property,
+					 * so no ratio assert applies.
+					 *
+					 * u-boot is 71.4% of this FIT, which is what this
+					 * is for.  spl_fit.c dispatches IH_COMP_LZ4 under
+					 * CONFIG_SPL_LZ4 and IH_COMP_LZMA under
+					 * CONFIG_SPL_LZMA.
+					 */
+#if defined(CONFIG_SPL_LZ4)
+					compression = "lz4";
+#elif defined(CONFIG_SPL_LZMA)
+					compression = "lzma";
+#else
+					compression = "none";
+#endif
+					load = <CONFIG_TEXT_BASE>;
+					entry = <CONFIG_TEXT_BASE>;
+
+					u-boot-nodtb {
+#if defined(CONFIG_SPL_LZ4)
+						compress = "lz4";
+						/*
+						 * SPL decompresses this image from a
+						 * staging buffer that OVERLAPS the
+						 * destination, and for LZ4 it cannot
+						 * do otherwise: spl_decomp_size()
+						 * returns 0 for a format that records
+						 * no decompressed length, so
+						 * load_simple_fit()'s exact re-stage
+						 * is skipped by construction and the
+						 * compressed copy stays at
+						 * load_addr + compressed_size.  LZ4's
+						 * in-place criterion then reduces to
+						 * 2 * compressed > decompressed --
+						 * the ratio must stay WORSE than 50%.
+						 * Better than that and u-boot
+						 * decompresses over its own unread
+						 * tail, with no diagnostic: the FIT
+						 * hash is verified over the
+						 * COMPRESSED bytes, before any of this
+						 * runs.  Assert it here, where both
+						 * numbers are known and the build can
+						 * still be stopped.  LZ4 gets ~59% on
+						 * this image; LZMA's better-than-50%
+						 * ratio is why the arm below never
+						 * reaches this property -- it re-stages
+						 * out-of-place instead.
+						 */
+						decomp-in-place;
+#elif defined(CONFIG_SPL_LZMA)
+						compress = "lzma";
+#endif
+					};
+
+#if CONFIG_IS_ENABLED(FIT_SIGNATURE) && CONFIG_IS_ENABLED(SHA256)
+					hash {
+						algo = "sha256";
+					};
+#endif
+				};
+
+				atf {
+					description = "ARM Trusted Firmware";
+					type = "firmware";
+					os = "arm-trusted-firmware";
+					arch = "arm64";
+					/* Same ladder as u-boot above, same reason. */
+#if defined(CONFIG_SPL_LZ4)
+					compression = "lz4";
+#elif defined(CONFIG_SPL_LZMA)
+					compression = "lzma";
+#else
+					compression = "none";
+#endif
+#if defined(CONFIG_MESON_G12A_LIBRE_SECURE_LAYOUT)
+					/*
+					 * Open TF-A: BL31_BASE 0x00100000, the
+					 * second megabyte of the DRAM-start
+					 * secure block (plat/amlogic/g12a/
+					 * g12a_def.h, and g12b's identical
+					 * copy).  The block's low map is
+					 * GXL's exactly: ramoops is the TOP
+					 * megabyte -- see arch/arm/include/
+					 * asm/arch-meson/g12a.h.
+					 */
+					load = <0x100000>;
+					entry = <0x100000>;
+#else
+					/* G12A/SM1 vendor BL31 load (same class as GXL 0x5100000) */
+					load = <0x5100000>;
+					entry = <0x5100000>;
+#endif
+
+					atf-bl31 {
+						filename = "bl31.bin";
+#if defined(CONFIG_SPL_LZ4)
+						compress = "lz4";
+						/*
+						 * Same reason as the u-boot image
+						 * above: load_simple_fit() runs this
+						 * path for EVERY compressed image in
+						 * the FIT, not just the big one, and
+						 * under LZ4 it has no decompressed
+						 * length to re-stage against.  BL31
+						 * is the TIGHTEST node on this family
+						 * -- a311d measures 53.63% against
+						 * the 50% wall -- which is the
+						 * argument for asserting it, not
+						 * against.  Under LZMA the node is
+						 * re-staged out-of-place from its
+						 * recorded decompressed length, so the
+						 * assert does not apply and is absent.
+						 */
+						decomp-in-place;
+#elif defined(CONFIG_SPL_LZMA)
+						compress = "lzma";
+#endif
+					};
+
+#if CONFIG_IS_ENABLED(FIT_SIGNATURE) && CONFIG_IS_ENABLED(SHA256)
+					hash {
+						algo = "sha256";
+					};
+#endif
+				};
+
+				scp {
+					description = "SCP BL30 Firmware";
+					type = "scp";
+					arch = "arm"; /* Cortex-M3 SC */
+					compression = "none";
+					/*
+					 * DELIBERATELY UNMOVED by
+					 * CONFIG_MESON_G12A_LIBRE_SECURE_LAYOUT,
+					 * unlike the GXL scp node -- and the
+					 * asymmetry is not an oversight.
+					 *
+					 * On GXL this address is a CONTRACT
+					 * WITH BL31: SPL writes the loadable
+					 * here and BL31 later reads it from
+					 * AML_SCP_BL30_BASE, so the two must
+					 * agree or aml_scpi_upload_scp_fw()
+					 * SHAs whatever happens to be there.
+					 *
+					 * On G12A/G12B/SM1 the reader is SPL
+					 * ITSELF.  board_fit_image_post_process()
+					 * (arch/arm/mach-meson/spl-g12a-scp.c)
+					 * fires as this image is loaded and
+					 * copies it into AHB SRAM at 0xFFFD0000
+					 * / 0xFFFE1800, then hands the SC SCPI
+					 * SET_FW_ADDR + FW_SIZE -- which is what
+					 * the vendor BL2 does at 0xfffab014,
+					 * before BL31 is entered.  BL31's own
+					 * g12a_scp_ensure_ready() upload path
+					 * needs scp_image_info[] in the BL2
+					 * parameter block, which a generic
+					 * U-Boot SPL does not supply (h.size is
+					 * 48), so it is never taken.
+					 *
+					 * So this is an SPL-lifetime scratch
+					 * buffer, consumed before the jump to
+					 * BL31 and read by nothing afterwards.
+					 * It needs no reservation and no TF-A
+					 * constant, and 0x013C0000 already sits
+					 * outside the 16 MiB block (which ends
+					 * at 0x01000000), clear of the FIT
+					 * staging buffer at 0x02000000, BL33 at
+					 * 0x01000000 and the DRAM stage at
+					 * 0x08000000.  Moving it would buy
+					 * nothing and cost a boot.
+					 */
+					load = <0x13c0000>;
+
+					scp {
+						filename = "scp.bin";
+					};
+					hash {
+						algo = "sha256";
+					};
+				};
+
+				@fdt-SEQ {
+					description = "NAME";
+					type = "flat_dt";
+					compression = "none";
+
+#if CONFIG_IS_ENABLED(FIT_SIGNATURE) && CONFIG_IS_ENABLED(SHA256)
+					hash {
+						algo = "sha256";
+					};
+#endif
+				};
+
+			};
+			configurations {
+				default = "@config-DEFAULT-SEQ";
+				@config-SEQ {
+					description = "NAME.dtb";
+					fdt = "fdt-SEQ";
+					firmware = "atf";
+					loadables = "scp", "u-boot";
+				};
+			};
+		};
+	};
+};
+#endif

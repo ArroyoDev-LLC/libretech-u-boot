@@ -1,0 +1,20 @@
+if TARGET_ROC_RK3328_CC
+
+config SYS_BOARD
+	string "Board name"
+	default "roc-rk3328-cc"
+	help
+	  The board directory under board/libre-computer/ and the name of
+	  the built-in splash logo (<board>.bmp) tools/Makefile bakes in.
+	  Prompted so a defconfig for a board variant that shares this
+	  directory (roc-rk3328-cc-v2, a symlink to it) can name its own
+	  logo; without a prompt the defconfig's CONFIG_SYS_BOARD line is
+	  silently dropped.
+
+config SYS_VENDOR
+	default "libre-computer"
+
+config SYS_CONFIG_NAME
+	default "roc-rk3328-cc"
+
+endif

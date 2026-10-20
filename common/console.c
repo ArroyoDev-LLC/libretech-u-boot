@@ -29,6 +29,51 @@ DECLARE_GLOBAL_DATA_PTR;
 
 #define CSI "\x1b["
 
+/*
+ * SPL_USB_GADGET_DNL_ACM: an xPL phase has no stdio, so the CDC ACM console
+ * the download gadget carries beside DFU cannot be a stdout device as in
+ * U-Boot proper (`dnlacm`). Every console byte is teed into its ring
+ * instead, whichever output (serial or debug UART) the phase uses; the ring
+ * keeps bytes only once the phase started it (acm_dnl_console_start()).
+ */
+#if defined(CONFIG_XPL_BUILD) && CONFIG_IS_ENABLED(USB_GADGET_DNL_ACM)
+#include <g_dnl.h>
+
+/*
+ * The ring's state is in BSS, which crt0 clears only after board_init_f():
+ * before board_init_r() it holds whatever the previous stage left there (on
+ * the G12A/SM1 DRAM stage, SRAM the TPL used), so a byte teed then would
+ * follow a garbage pointer. The tee asks f_acm whether the ring was started
+ * (a flag outside BSS), which happens only after the clear. It used to test
+ * GD_FLG_FULL_MALLOC_INIT, which an SPL on malloc_simple never sets: there
+ * (RK3399) the ring stayed empty and the ACM console sent nothing.
+ */
+static bool console_acm_tee_ready(void)
+{
+	return acm_dnl_console_on();
+}
+
+static void console_acm_tee_putc(const char c)
+{
+	if (console_acm_tee_ready())
+		acm_dnl_console_putc(c);
+}
+
+static void console_acm_tee_puts(const char *s)
+{
+	if (console_acm_tee_ready())
+		acm_dnl_console_puts(s);
+}
+#else
+static inline void console_acm_tee_putc(const char c)
+{
+}
+
+static inline void console_acm_tee_puts(const char *s)
+{
+}
+#endif
+
 static int on_console(const char *name, const char *value, enum env_op op,
 	int flags)
 {
@@ -717,12 +762,69 @@ static inline void pre_console_puts(const char *s) {}
 static inline void print_pre_console_buffer(int flushpoint) {}
 #endif
 
+#ifdef CONFIG_SILENT_CONSOLE
+/*
+ * A silent console suppresses a SUCCESSFUL boot, never a failing one.
+ *
+ * U-Boot's only runtime un-silence is the keypress abort in abortboot()
+ * (common/autoboot.c), so a board built with CONFIG_SILENT_CONSOLE that fails
+ * to reach an OS prints nothing at all: on the bench and in a customer's hands
+ * it is indistinguishable from a board that is simply dead. Every one of those
+ * failures is a class the bootloader already knows about and can name in one
+ * line.
+ *
+ * This is that line. Callers invoke it at the points where the bootloader has
+ * established that the boot did not happen; from there on the console is live
+ * again, so the failure text that follows -- and the prompt the operator drops
+ * to -- are visible.
+ *
+ * It is idempotent, and no FAILURE path re-silences the console: a boot that
+ * has failed once has nothing left to be quiet for. It is NOT one-way. The
+ * 'silent' environment variable is untouched -- both so the next power-on is
+ * quiet again, and because `setenv silent 1` at the prompt still goes through
+ * on_silent() above and re-asserts GD_FLG_SILENT. That is deliberate: an
+ * operator who has read the failure and asked for quiet gets quiet.
+ *
+ * It also FLUSHES the pre-console buffer, and that is the half that makes it
+ * useful before the environment exists. With SILENT_CONSOLE_UNTIL_ENV, putc()
+ * and puts() route everything into the pre-console buffer from console_init_f()
+ * until initr_env(); the buffer is normally replayed by console_init_r(). A
+ * failure that never REACHES console_init_r() -- a panic() in board_f/board_r,
+ * which resets the board -- would otherwise take the whole record of what went
+ * wrong with it. Un-silencing alone does not recover that text, because it was
+ * already buffered rather than printed. This is why the function lives here,
+ * below print_pre_console_buffer(), rather than beside on_silent().
+ *
+ * Two limits worth knowing: the buffer is CONFIG_PRE_CON_BUF_SZ (4096 on
+ * rk3399) and circular, so a very chatty pre-console phase loses its earliest
+ * lines; and none of this exists when PRE_CONSOLE_BUFFER is off, where the
+ * flush compiles to nothing and un-silencing only affects what follows.
+ */
+void console_silent_defeat(const char *why)
+{
+	if (!(gd->flags & GD_FLG_SILENT))
+		return;
+
+	gd->flags &= ~GD_FLG_SILENT;
+	printf("\n*** Boot failure: %s -- console un-silenced ***\n",
+	       why ? why : "unknown");
+
+	/*
+	 * Serial only. FLUSHPOINT2 goes through console_puts_select(stdout),
+	 * which needs the stdio devices console_init_r() installs -- and the
+	 * case this exists for is precisely the one that never got there.
+	 */
+	print_pre_console_buffer(PRE_CONSOLE_FLUSHPOINT1_SERIAL);
+}
+#endif
+
 void putc(const char c)
 {
 	if (!gd)
 		return;
 
 	console_record_putc(c);
+	console_acm_tee_putc(c);
 
 	/* sandbox can send characters to stdout before it has a console */
 	if (IS_ENABLED(CONFIG_SANDBOX) && !(gd->flags & GD_FLG_SERIAL_READY)) {
@@ -764,6 +866,7 @@ void puts(const char *s)
 		return;
 
 	console_record_puts(s);
+	console_acm_tee_puts(s);
 
 	/* sandbox can send characters to stdout before it has a console */
 	if (IS_ENABLED(CONFIG_SANDBOX) && !(gd->flags & GD_FLG_SERIAL_READY)) {
@@ -1024,7 +1127,7 @@ int console_announce_r(void)
 
 	display_options_get_banner(false, buf, sizeof(buf));
 
-	console_puts_select(stdout, false, buf);
+	console_puts_select(stdout, true, buf);
 #endif
 
 	return 0;

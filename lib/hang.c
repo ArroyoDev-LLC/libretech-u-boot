@@ -8,6 +8,7 @@
  */
 
 #include <bootstage.h>
+#include <console.h>
 #include <hang.h>
 #include <stdio.h>
 #include <os.h>
@@ -25,6 +26,15 @@ void hang(void)
 #if !defined(CONFIG_XPL_BUILD) || \
 		(CONFIG_IS_ENABLED(LIBCOMMON_SUPPORT) && \
 		 CONFIG_IS_ENABLED(SERIAL))
+	/*
+	 * Same reason as panic(): a hang is a boot that did not happen, and a
+	 * silent console would swallow both this line and everything the
+	 * pre-console buffer holds -- with no reset to even hint at it. Unlike
+	 * panic() the board then sits there forever, so this is the failure
+	 * MOST likely to be read as "dead board". No-op when not silent, and
+	 * compiled out without CONFIG_SILENT_CONSOLE.
+	 */
+	console_silent_defeat("hang");
 	puts("### ERROR ### Please RESET the board ###\n");
 #endif
 	bootstage_error(BOOTSTAGE_ID_NEED_RESET);

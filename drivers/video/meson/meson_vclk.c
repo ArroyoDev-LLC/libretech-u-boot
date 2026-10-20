@@ -85,6 +85,9 @@ enum {
 #define HDMI_PLL_LOCK		BIT(31)
 #define HDMI_PLL_LOCK_G12A	(3 << 30)
 
+#define HDMI_PLL_LOCK_TIMEOUT_US	10000
+#define HDMI_PLL_LOCK_G12A_MAX_TRIES	100
+
 #define FREQ_1000_1001(_freq)	DIV_ROUND_CLOSEST(_freq * 1000, 1001)
 
 /* VID PLL Dividers */
@@ -228,7 +231,8 @@ static void meson_venci_cvbs_clock_config(struct meson_vpu_priv *priv)
 
 		/* Poll for lock bit */
 		readl_poll_timeout(priv->hhi_base + HHI_HDMI_PLL_CNTL, val,
-				   (val & HDMI_PLL_LOCK), 10);
+				   (val & HDMI_PLL_LOCK),
+				   HDMI_PLL_LOCK_TIMEOUT_US);
 	} else if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_GXM) ||
 		   meson_vpu_is_compatible(priv, VPU_COMPATIBLE_GXL)) {
 		hhi_write(HHI_HDMI_PLL_CNTL, 0x4000027b);
@@ -246,7 +250,8 @@ static void meson_venci_cvbs_clock_config(struct meson_vpu_priv *priv)
 
 		/* Poll for lock bit */
 		readl_poll_timeout(priv->hhi_base + HHI_HDMI_PLL_CNTL, val,
-				   (val & HDMI_PLL_LOCK), 10);
+				   (val & HDMI_PLL_LOCK),
+				   HDMI_PLL_LOCK_TIMEOUT_US);
 	} else if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
 		hhi_write(HHI_HDMI_PLL_CNTL, 0x1a0504f7);
 		hhi_write(HHI_HDMI_PLL_CNTL2, 0x00010000);
@@ -261,7 +266,7 @@ static void meson_venci_cvbs_clock_config(struct meson_vpu_priv *priv)
 		/* Poll for lock bit */
 		readl_poll_timeout(priv->hhi_base + HHI_HDMI_PLL_CNTL, val,
 			((val & HDMI_PLL_LOCK_G12A) == HDMI_PLL_LOCK_G12A),
-			10);
+			HDMI_PLL_LOCK_TIMEOUT_US);
 	}
 
 	/* Disable VCLK2 */
@@ -449,7 +454,8 @@ void meson_hdmi_pll_set_params(struct meson_vpu_priv *priv, unsigned int m,
 
 		/* Poll for lock bit */
 		readl_poll_timeout(priv->hhi_base + HHI_HDMI_PLL_CNTL, val,
-				   (val & HDMI_PLL_LOCK), 10);
+				   (val & HDMI_PLL_LOCK),
+				   HDMI_PLL_LOCK_TIMEOUT_US);
 	} else if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_GXM) ||
 		   meson_vpu_is_compatible(priv, VPU_COMPATIBLE_GXL)) {
 		hhi_write(HHI_HDMI_PLL_CNTL, 0x40000200 | m);
@@ -467,7 +473,8 @@ void meson_hdmi_pll_set_params(struct meson_vpu_priv *priv, unsigned int m,
 
 		/* Poll for lock bit */
 		readl_poll_timeout(priv->hhi_base + HHI_HDMI_PLL_CNTL, val,
-				   (val & HDMI_PLL_LOCK), 10);
+				   (val & HDMI_PLL_LOCK),
+				   HDMI_PLL_LOCK_TIMEOUT_US);
 	} else if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
 		hhi_write(HHI_HDMI_PLL_CNTL, 0x0b3a0400 | m);
 
@@ -495,7 +502,8 @@ void meson_hdmi_pll_set_params(struct meson_vpu_priv *priv, unsigned int m,
 			hhi_write(HHI_HDMI_PLL_CNTL7, 0x50540000);
 		}
 
-		do {
+		for (int tries = 0; tries < HDMI_PLL_LOCK_G12A_MAX_TRIES;
+		     tries++) {
 			/* Reset PLL */
 			hhi_update_bits(HHI_HDMI_PLL_CNTL,
 					HDMI_PLL_RESET_G12A,
@@ -509,9 +517,10 @@ void meson_hdmi_pll_set_params(struct meson_vpu_priv *priv, unsigned int m,
 			if (!readl_poll_timeout(
 					priv->hhi_base + HHI_HDMI_PLL_CNTL, val,
 					((val & HDMI_PLL_LOCK_G12A)
-						== HDMI_PLL_LOCK_G12A), 100))
+						== HDMI_PLL_LOCK_G12A),
+					HDMI_PLL_LOCK_TIMEOUT_US))
 				break;
-		} while (1);
+		}
 	}
 
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_GXBB))

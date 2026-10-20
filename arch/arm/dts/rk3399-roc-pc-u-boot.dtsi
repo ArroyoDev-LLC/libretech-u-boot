@@ -6,35 +6,133 @@
 #include "rk3399-u-boot.dtsi"
 #include "rk3399-sdram-lpddr4-100.dtsi"
 
+/*
+ * The board DTB that the FIT `fdt-1` node at the bottom of this file packs,
+ * as binman's of-list name. This file is included by every -u-boot.dtsi of
+ * the rk3399-roc-pc family (mezzanine, v1.2), and a build only ever compiles
+ * the DTBs in its own CONFIG_OF_LIST (scripts/Makefile.dts) -- so a family
+ * member that leaves these at the bare board's defaults ships a FIT
+ * description naming a tree its build never produced, and binman refuses the
+ * whole image: "Filename 'rockchip/rk3399-roc-pc.dtb' not found in input
+ * path", after every object has compiled. That was the mezzanine build on
+ * lc-master until 2026-09-15. An including file #defines BOTH before the
+ * #include; they are one fact, so they are defaulted as one.
+ */
+#ifndef ROC_PC_FIT_FDT_FILE
+#define ROC_PC_FIT_FDT_FILE	"rockchip/rk3399-roc-pc.dtb"
+#define ROC_PC_FIT_FDT_DESC	"fdt-rockchip/rk3399-roc-pc"
+#endif
+
 / {
+	/*
+	 * Same shape as rk3328-roc-cc-u-boot.dtsi. CONFIG_SYSINFO_SMBIOS
+	 * binds on this compatible; without the node the board reports the
+	 * generic U-Boot strings and `smbios` has nothing to print.
+	 */
+	smbios {
+		compatible = "u-boot,sysinfo-smbios";
+
+		smbios {
+			system {
+				manufacturer = "Libre Computer";
+				product = "ROC-RK3399-PC";
+			};
+
+			baseboard {
+				manufacturer = "Libre Computer";
+				product = "ROC-RK3399-PC";
+			};
+
+			chassis {
+				manufacturer = "Libre Computer";
+				product = "ROC-RK3399-PC";
+			};
+		};
+	};
+};
+
+/ {
+	/*
+	 * ROC-RK3399-PC boots SPI NOR first, then eMMC, then SD (schematic
+	 * "Boot Configuration"), but rk3399-u-boot.dtsi lists only
+	 * "same-as-spl", &sdhci, &sdmmc -- so SPL never tried the NOR the
+	 * board is designed to boot from, and CONFIG_SPL_SPI_LOAD /
+	 * CONFIG_SYS_SPI_U_BOOT_OFFS were both set and unreachable.
+	 * Measured on a V1.0 with no eMMC module and no SD card: SPL reported
+	 * only "mmc init failed" / "Card did not respond to voltage select!"
+	 * and then "failed to boot from all boot devices", never touching spi1.
+	 */
+	chosen {
+		/*
+		 * No stdout-path here. rk3399-roc-pc.dtsi in dts/upstream now
+		 * carries "serial2:115200n8" itself, so an override in this
+		 * file would only be a second copy of the same answer -- and
+		 * the copy that does NOT reach a kernel booted from its own
+		 * DTB, which was the whole residual.
+		 */
+
+		/*
+		 * Name the flash CHILD, not the spi controller. SPL resolves
+		 * this list through spl_node_to_boot_device(), which maps
+		 * UCLASS_SPI_FLASH -> BOOT_DEVICE_SPI; the controller node is
+		 * UCLASS_SPI and matches nothing, so naming &spi1 silently
+		 * yields no SPI attempt at all (measured: the DTB carried
+		 * "/spi@ff1d0000" and SPL still tried only MMC1 then MMC2).
+		 */
+		u-boot,spl-boot-order = "same-as-spl",
+					&{/spi@ff1d0000/flash@0},
+					&sdhci, &sdmmc;
+	};
+
 	config {
 		sysreset-gpio = <&gpio1 RK_PA6 GPIO_ACTIVE_HIGH>;
 	};
 
-	vcc_hub_en: vcc_hub_en-regulator {
-		compatible = "regulator-fixed";
-		enable-active-high;
-		gpio = <&gpio2 RK_PA4 GPIO_ACTIVE_HIGH>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&hub_rst>;
-		regulator-name = "vcc_hub_en";
-		regulator-always-on;
-	};
+	/*
+	 * The SCMI agent (shmem@100000 + firmware/scmi) is hardware
+	 * description and lives in dts/upstream's rk3399-roc-pc.dtsi, shared
+	 * with the kernel, so a kernel-DTB boot carries it too. Policy: this
+	 * file is for bootph-* and /config only.
+	 */
+
+	/*
+	 * vcc_hub_en deliberately removed.
+	 *
+	 * It was a full regulator node claiming GPIO2_A4 and the &hub_rst
+	 * pinctrl group. This file's additions are handed to Linux verbatim --
+	 * the control FDT IS the kernel's device tree by default -- so it
+	 * collided with the kernel's own vcc5v0_host, which already takes
+	 * &hub_rst in its pinctrl. Linux grants the pin to whichever probes
+	 * first and refuses the other:
+	 *
+	 *   gpio2-4 already requested by vcc_hub...
+	 *   error -EINVAL: pin-68 ... (gpio2-4) from group hub-rst
+	 *   reg-fixed-voltage ...: setting, reverse things back
+	 *   ... could not add device link regulator.5: -ENOENT
+	 *
+	 * and the loser is the regulator powering the USB host rail.
+	 *
+	 * It is also redundant: hub_rst is pcfg_output_high, so applying the
+	 * group is what releases the hub from reset, and vcc5v0_host
+	 * (regulator-boot-on in the shared dtsi) already applies it.
+	 */
 };
 
 /*
- * should be placed inside mp8859, but not until mp8859 has
- * its own dt-binding.
+ * No &dc_12v override. This file used to re-type the shared dtsi's
+ * mp8859_dcdc child as `compatible = "regulator-fixed"` "until mp8859 has
+ * its own dt-binding", and it never did anything on any path: U-Boot has no
+ * mps,mp8859 driver, so the parent node is never bound and DM never scans
+ * its children (dm_scan_fdt_dev descends only through bound devices) -- the
+ * child was not a regulator in U-Boot with or without the compatible, and
+ * nothing in U-Boot consumes dc_12v (this regulator uclass does not chain
+ * vin-supply). Linux matches an mp8859 child by node name / the deprecated
+ * regulator-compatible (drivers/regulator/of_regulator.c) and ignores a
+ * `compatible` on it; every other property the override set is already in
+ * the shared node. On V1.2A (no MP8859) ft_board_setup() reads the child's
+ * name, limits, flags and vin-supply, re-creates it as /regulator-dc-12v and
+ * disables mp8859 -- from values the shared dtsi already carries.
  */
-&dc_12v {
-	compatible = "regulator-fixed";
-	regulator-name = "dc_12v";
-	regulator-always-on;
-	regulator-boot-on;
-	regulator-min-microvolt = <12000000>;
-	regulator-max-microvolt = <12000000>;
-	vin-supply = <&vcc_vbus_typec0>;
-};
 
 &gpio4 {
 	bootph-pre-ram;
@@ -59,19 +157,567 @@
 	bootph-pre-ram;
 };
 
-&vcc5v0_host {
-	regulator-always-on;
-};
-
-&vcc_sdio {
-	regulator-always-on;
-};
-
-&vcc_sys {
-	regulator-always-on;
-};
-
+/*
+ * Hardware content that stays here on purpose (B15, 2026-09-13), and why.
+ *
+ * regulator-init-microvolt is a U-Boot-only binding
+ * (doc/device-tree-bindings/regulator/regulator.txt); regulator_autoset()
+ * programs it before enabling and Linux does not parse it. It is the ONLY
+ * thing that ever sets the PWM-fed VDD_LOG: nothing in Linux consumes
+ * vdd_log, so the kernel's pwm-regulator reads the duty back and leaves it.
+ *
+ * The 430000 floor is the endpoint of the duty map U-Boot computes that
+ * setting from -- pwm_regulator.c: duty% = (init - min) * 100 / (max - min)
+ * = (950000 - 430000) * 100 / 970000 = 53 % -- and that 53 % has been the
+ * physical rail on every boot since 2019. The shared dtsi's 450000 would make
+ * it 52 %, i.e. a lower VDD_LOG by one duty step, and neither number is a
+ * measurement: upstream's 450000 (linux c38d8009ed6c4, "results in a
+ * vdd_log of 953 mV") is 450000 + 0.53 x 950000, the kernel's DECODE of this
+ * duty, not a meter reading, exactly as the 1118 mV it replaced was
+ * 800000 + 0.53 x 600000. Handed to the kernel via $fdtcontroladdr the floor
+ * only changes that decode (944 mV against 953.5 mV), never the rail.
+ *
+ * So the floor is kept where the duty comes from until VDD_LOG is read with
+ * an instrument; a floor moved blind is a voltage change nobody measured.
+ * Then the measured endpoints go into the shared dtsi and this node loses
+ * its min line.
+ */
 &vdd_log {
 	regulator-min-microvolt = <430000>;
 	regulator-init-microvolt = <950000>;
+};
+
+/*
+ * No &cdn_dp here. The shared rk3399-roc-pc.dtsi in dts/upstream carries
+ * `status = "okay"` exactly as the kernel's copy does, so both the control
+ * FDT and a kernel-DTB boot enable it.
+ *
+ * 🔴 Do NOT add a /delete-node/ for the VOP<->DP endpoints here to keep
+ * U-Boot's VOP away from the DP driver: an earlier revision of this file
+ * did, and because U-Boot hands its own control FDT to Linux (`booti <addr>
+ * - $fdtcontroladdr`) it stripped the VOP<->DP link out of the tree LINUX
+ * receives, taking DP away from the OS. U-Boot's own side is handled in the
+ * driver, not the DT; DisplayPort is this board's working 4K output in both.
+ */
+
+/*
+ * The cdn-dp ucpu firmware, as an UNCOMPRESSED FIT node that SPL copies
+ * straight to CONFIG_CDN_DP_FW_FIT_ADDR.
+ *
+ * Board-scoped on purpose: fit_template lives in rockchip-u-boot.dtsi and is
+ * shared by every Rockchip board, so overriding it here changes only this
+ * board's u-boot.itb.
+ *
+ * REDISTRIBUTION NOTICE. The data is Rockchip's dptx.bin, redistributed
+ * byte-identically under LICENCE.rockchip, which requires the copyright
+ * notice and disclaimer to accompany the binary. The `description` below is
+ * that notice travelling INSIDE the image, so a u-boot.itb separated from
+ * the tree it was built in still carries it (`mkimage -l` prints it). The
+ * node stores the 98,320 bytes verbatim, so the FIT payload IS the file.
+ * LBS also ships LICENCE.rockchip beside the built image.
+ */
+#if defined(HAS_FIT) && defined(CONFIG_CDN_DP_FW_FIT)
+&fit_template {
+	images {
+		/*
+		 * 🔴 LANDMINE 1: this node existing is NOT enough. binman's
+		 * fit.py _process_firmware_prop() builds `loadables` from the
+		 * fit,firmware names AFTER the first, plus split-ELF names --
+		 * an image node named nowhere is emitted into the FIT and then
+		 * never loaded. The fit,firmware override below is the half
+		 * that makes this node do anything.
+		 *
+		 * Deliberately absent, each for its own reason:
+		 *   `os`    -- spl_fit.c only appends a control FDT when
+		 *              os_takes_devicetree() is true; with no os the
+		 *              type stays IH_OS_INVALID and it is not.
+		 *   `entry` -- spl_fit.c adopts an image's entry_point as the
+		 *              boot entry if none is set yet. There is none
+		 *              to give: this is data for a ucpu, not A72
+		 *              code. dptx is listed after atf-1, which has
+		 *              already supplied the entry in any build that
+		 *              has a BL31 -- but an invented one here would
+		 *              still be a lie waiting for the next reorder,
+		 *              and in a BL31-less build atf-1 is dropped and
+		 *              dptx is what SPL boots (LANDMINE 2), which is
+		 *              precisely when a bogus entry would be used.
+		 *   `arch`  -- a Cadence ucpu image is not arm64, and saying so
+		 *              would be false. The in-tree @fdt-SEQ node
+		 *              carries no arch either.
+		 */
+		dptx {
+			description = "Cadence MHDP DisplayPort ucpu firmware (rockchip/dptx.bin). Copyright (c) 2016, Fuzhou Rockchip Electronics Co.Ltd. Redistribution and use in binary form, without modification, are permitted provided the copyright notice and the disclaimer in LICENCE.rockchip accompany the distribution. No reverse engineering, decompilation, or disassembly. THIS SOFTWARE IS PROVIDED AS IS; see LICENCE.rockchip for the full disclaimer.";
+			type = "firmware";
+
+			/*
+			 * LZMA, which is the whole point: SPL already reads,
+			 * hash-verifies and LZMA-decompresses U-Boot out of
+			 * this same FIT, so dptx costs ~33 KB of SPI NOR
+			 * instead of the blob's full 98,320 bytes (u-boot.itb
+			 * 896,000 vs 961,536 with BL31 present, measured).
+			 *
+			 * It also makes the load order in `configurations`
+			 * below load-bearing, which is a real cost and is
+			 * accepted with eyes open. spl_fit.c picks the source
+			 * buffer by compression: a COMPRESSED image is read
+			 * into a staging buffer at CONFIG_SYS_LOAD_ADDR
+			 * (0x800800, i.e. 2 KiB into decompressed U-Boot at
+			 * CONFIG_TEXT_BASE) and relocated away only when that
+			 * staging range overlaps the image's OWN destination
+			 * -- which for a 0x400000 load it never does. So dptx
+			 * must be listed BEFORE "u-boot", where its scratch is
+			 * harmlessly overwritten moments later. Uncompressing
+			 * it would dissolve that constraint (an uncompressed
+			 * image is read straight to its load address) at a
+			 * cost of 64 KiB; the LZMA form was chosen instead.
+			 */
+			compression = "lzma";
+
+			/*
+			 * Taken from the Kconfig symbol rather than written
+			 * twice: the driver reads CONFIG_CDN_DP_FW_FIT_ADDR,
+			 * and if the two ever differ SPL puts the blob
+			 * somewhere the driver does not look.
+			 */
+			load = <CONFIG_CDN_DP_FW_FIT_ADDR>;
+
+			blob-ext {
+				filename = "rockchip/dptx.bin";
+				compress = "lzma";
+			};
+
+			/*
+			 * MANDATORY, not decorative. SPL's per-image check is
+			 * the ONLY thing standing between NOR corruption and
+			 * a ucpu executing whatever the NOR handed back:
+			 * nothing downstream validates dptx.bin, because
+			 * LICENCE.rockchip forbids the reverse engineering
+			 * that knowing its internal structure would require.
+			 * Without this subnode there is nothing to check.
+			 *
+			 * Guarded like the five instances in rockchip-u-boot.dtsi
+			 * because FIT_HASH_ALGO is only #defined under
+			 * CONFIG_SPL_FIT_SIGNATURE, which this board gets from an
+			 * `imply` and never sets explicitly. Unguarded, turning
+			 * that off left the bare token in the preprocessed DTS and
+			 * failed in dtc, pointing at a DTS line rather than at the
+			 * Kconfig change that caused it. The #warning exists
+			 * because silently dropping the hash is the more dangerous
+			 * half -- an unhashed node builds, boots, and looks
+			 * identical right up to the point where a bad NOR page
+			 * is what the DisplayPort ucpu runs.
+			 */
+#ifdef FIT_HASH_ALGO
+			hash {
+				algo = FIT_HASH_ALGO;
+			};
+#else
+#warning "cdn-dp dptx node has no hash: SPL will hand unverified NOR bytes to the DP ucpu"
+#endif
+		};
+	};
+
+	configurations {
+		@config-SEQ {
+			/*
+			 * 🔴 LANDMINE 2: "dptx" is listed SECOND, before
+			 * "u-boot", and that position is what a BL31-less
+			 * build used to turn into a silent jump into the ucpu
+			 * blob. The order is load-bearing for two independent
+			 * reasons -- the LZMA staging above, and this one --
+			 * and fit,firmware-strict below is what makes the
+			 * second one a build failure instead of a boot hazard.
+			 *
+			 * binman's fit.py _process_firmware_prop() does not
+			 * emit `firmware = <first name>`. It emits the first
+			 * name that is in valid_entries -- and an entry is
+			 * valid only if CheckMissing()/CheckOptional() come
+			 * back empty. atf-bl31 in rockchip-u-boot.dtsi has no
+			 * `optional;`, so a build with no rockchip/bl31.elf
+			 * marks it missing, the OP_SPLIT_ELF generator emits
+			 * nothing, and "atf-1" never enters valid_entries.
+			 * The U-Boot Makefile passes --allow-missing
+			 * --fake-ext-blobs always and adds --ignore-missing
+			 * under BINMAN_ALLOW_MISSING (which LBS sets), so
+			 * binman exits 0 and the FIT is still written.
+			 *
+			 * With dptx listed second, that FIT said
+			 * `firmware = "dptx"`. SPL then loads dptx as the
+			 * boot image; the node has no `os`, so spl_fit.c's
+			 *
+			 *   if (!spl_fit_image_get_os(...)) ... else
+			 *           spl_image->os = IH_OS_U_BOOT;
+			 *
+			 * calls the ucpu blob U-Boot, plants the control FDT
+			 * just past it, and jumps to 0x400000. Nothing on
+			 * that path prints anything alarming.
+			 *
+			 * fit,firmware-strict is what closes it: binman now
+			 * REFUSES the build when "atf-1" -- the first name --
+			 * is not a valid entry, instead of electing the next
+			 * one. A BL31-less build fails at binman with the
+			 * missing entry named, which is the only correct
+			 * outcome for an image that could not boot anyway.
+			 * The order, the LZMA node and the NOR budget are all
+			 * unchanged.
+			 *
+			 * Do NOT replace the directive by moving dptx after
+			 * "u-boot": that removes the fall-through but is safe
+			 * ONLY if the node is ALSO made uncompressed -- a
+			 * COMPRESSED image is read via a staging buffer at
+			 * CONFIG_SYS_LOAD_ADDR (0x800800, inside decompressed
+			 * U-Boot), so a compressed dptx loaded after U-Boot
+			 * splatters live .text in the HEALTHY build, not
+			 * merely the degraded one. `compression` in the
+			 * images node and this property are ONE decision --
+			 * never change either alone. Uncompressing costs
+			 * 64 KiB of SPI NOR (u-boot.itb 896,000 -> 961,536,
+			 * measured with BL31 present); the directive costs
+			 * nothing.
+			 *
+			 * `optional;` on the dptx blob-ext is NOT an
+			 * alternative fix either: _process_firmware_prop()
+			 * already excludes a missing non-optional entry, so
+			 * the flag changes nothing when dptx.bin is PRESENT --
+			 * which is precisely the case that broke.
+			 */
+			fit,firmware = "atf-1", "dptx", "u-boot";
+			fit,firmware-strict;
+		};
+	};
+};
+#endif /* HAS_FIT && CONFIG_CDN_DP_FW_FIT */
+
+/*
+ * The control FDT, as an LZMA FIT node.
+ *
+ * This board's u-boot-rockchip.bin has to fit the 1 MiB ahead of partition 1
+ * (lib/target-size.sh), and it did not: 1,047,552 B against a 1,015,808 B
+ * budget. The FDT was the largest uncompressed thing in the image at
+ * 101,224 B -- it is big legitimately, being the FULL board tree that this
+ * board hands to Linux verbatim via `booti ... $fdtcontroladdr`, so trimming
+ * it would trim the OS's device tree. Compressing it costs nothing anyone can
+ * observe and returns more than twice the overrun: 101,224 B in, 24,423 B of
+ * `Data Size` out, saving 76,801 B. (An earlier revision of this comment said
+ * "returns 85,708 B"; that figure described an artifact that is not in the
+ * image and is WITHDRAWN. The saving moves build to build with the tree -- it
+ * is the shipped `dumpimage -l` line that is authoritative, not a number
+ * frozen in a comment.)
+ *
+ * Written out as an explicit node rather than compressing the shared
+ * @fdt-SEQ generator in rockchip-u-boot.dtsi, for two reasons:
+ *
+ *   - binman cannot compress a GENERATED node at all. Both generators
+ *     (_gen_fdt_nodes and _gen_split_elf in tools/binman/etype/fit.py) write
+ *     `fsw.property('data', data)` with the raw bytes; `compress` is an
+ *     Entry property, and a generated node has no Entry. Only a real entry
+ *     subnode -- u-boot-nodtb, blob-ext, or u-boot-dtb here -- goes through
+ *     Entry.CompressData(). So the node has to stop being generated.
+ *   - fit_template is shared by every Rockchip board, and the safety of a
+ *     compressed node is a per-board memory-map question (below). It is not
+ *     ours to answer for rk3288 or rk3588.
+ *
+ * 🔴 DO NOT "SIMPLIFY" THE `blob` BELOW BACK INTO A `u-boot-dtb` ENTRY. An
+ * earlier revision of this comment said u-boot-dtb was "byte-identical to
+ * u-boot.dtb" and quoted a hash (ad0cdf77...) for it. That claim is WITHDRAWN:
+ * it contradicted the node comment fifteen lines below in this same file,
+ * which records the measurement that `u-boot-dtb` captured a MID-RUN snapshot
+ * still carrying bootph-* properties and the SPI pack's image-pos annotations,
+ * a different tree and a different size from the one LBS publishes beside the
+ * image. Following the withdrawn paragraph reintroduces that snapshot, and it
+ * reintroduces it silently -- both trees boot. The `blob` naming the board DTB
+ * by path is the whole point of this node; see the comment on it below for the
+ * measurement.
+ *
+ * `of-list` here is CONFIG_OF_LIST = "rockchip/rk3399-roc-pc", the single board
+ * DTB, which is where the generator would have got its bytes and where the
+ * `blob` gets them -- named through ROC_PC_FIT_FDT_FILE (top of this file) so
+ * the mezzanine and v1.2 -u-boot.dtsi, which include this file, pack THEIR
+ * tree rather than a bare-board DTB their build never compiles. The name
+ * `fdt-1` is not cosmetic: @config-SEQ in the template emits
+ * `fdt = "fdt-SEQ"`, which SEQ-substitutes to "fdt-1", so the configuration
+ * keeps resolving.
+ *
+ * The node is compressed with FIT_UBOOT_COMP, the same macro U-Boot proper
+ * uses in rockchip-u-boot.dtsi, so it is LZMA exactly where the board's SPL
+ * has CONFIG_SPL_LZMA to undo it (this board: yes) and "none" where it does
+ * not (the mezzanine defconfig sets neither SPL_LZMA nor the staging address
+ * below, so a hard-coded "lzma" there would have shipped a node its SPL could
+ * not decompress). A board that turns SPL_LZMA on inherits the staging
+ * hazard below and must set CONFIG_SPL_FIT_COMP_STAGING_ADDR with it.
+ *
+ * What is checked, per build, is that the node in the image IS the tree LBS
+ * publishes -- decompress the node and compare it to out/<target>.dtb. Measured
+ * on the SPI build of this commit: node 7 decompresses to 101,312 B hashing
+ * sha256 f2d162279f071ab472e4f6252e69c112df500b18d1c0272dc3866d1bdbca0020,
+ * equal to both u-boot.dtb and out/roc-rk3399-pc-spi.dtb.
+ *
+ * 🔴 WHY THIS NEEDS CONFIG_SPL_FIT_COMP_STAGING_ADDR, set in
+ * roc-pc-rk3399_defconfig. A compressed FIT node is read into a staging
+ * buffer first (load_simple_fit(), common/spl/spl_fit.c) and the historical
+ * staging address is CONFIG_SYS_LOAD_ADDR = 0x00800800 -- 2 KiB into
+ * decompressed U-Boot at CONFIG_TEXT_BASE. The existing guard there only
+ * moves the buffer when it collides with the node's OWN destination, and the
+ * FDT's destination is ALIGN(U-Boot end, 8) = ~0x00959_8E0, nowhere near it.
+ * So the guard would not fire and SPL would read the compressed FDT -- 24,423 B
+ * as shipped -- straight over live U-Boot .text. (An earlier revision said
+ * 15,516 B; that described an artifact not in this image and is WITHDRAWN. The
+ * hazard is the address, not the size: any number of bytes landing there is
+ * fatal.)
+ *
+ * The FDT cannot dodge this by being loaded earlier, either:
+ * spl_fit_append_fdt() is called from the branch that has just loaded the
+ * U-Boot image, so "after U-Boot" is structural, not an ordering accident.
+ * That is the same hazard the dptx node above documents and dodges by
+ * ordering; the FDT has no such option, so the staging address is fixed
+ * instead -- which is where the defect actually lives.
+ *
+ * 0x00500000 is free for the whole of SPL, from the measured layout: SPL
+ * text 0x0-0x23C74 (+ heap/stack/BSS at 0x03E00000-0x04000000), BL31
+ * 0x40000-0x62000, the FIT buffer from 0x00200000
+ * (CONFIG_SPL_LOAD_FIT_ADDRESS), dptx 0x00400000-0x00418000, and U-Boot +
+ * FDT from 0x00800000 (CONFIG_TEXT_BASE). The largest thing staged is
+ * compressed U-Boot: 524,265 B in this build's `dumpimage -l`, reaching
+ * 0x0057FFE9, 2.5 MiB clear of 0x00800000.
+ *
+ * ⚠️ THREE different values for that one quantity have been written down --
+ * 523,224 B / 0x0057FBD8 in the commit message, 523,258 B / 0x0057FC7A here
+ * (which does not even reduce: 0x57FC7A - 0x500000 = 523,386). Both are
+ * WITHDRAWN in favour of the transcribed 524,265 B above, and none of the
+ * three is a constant: it is the LZMA size of U-Boot proper and it moves with
+ * every build. That is precisely why the safety argument must not rest on a
+ * number in a comment.
+ *
+ * 🔴 THE CLEARANCE THAT MATTERS IS BELOW, NOT ABOVE. The 2.5 MiB quoted here
+ * is to U-Boot; the tighter side is the FIT buffer underneath, and it was
+ * measured against that buffer's CURRENT occupancy (818,176 B) rather than its
+ * bound. The buffer holds whatever the media budget delivers, and the SPI
+ * target's budget is 0x1F0000 -- so the bound is 0x00200000 + 0x1F0000 =
+ * 0x003F0000 and the real clearance is 0x110000, 1.06 MiB, against a staging
+ * need of ~512 KiB that grows with U-Boot. Neither bound is enforced by
+ * anything a comment can do, which is why both are now _Static_assert()ed in
+ * common/spl/spl_fit.c against CONFIG_SPL_FIT_COMP_STAGING_MAX and
+ * CONFIG_SPL_FIT_BUF_MAX, declared in this board's defconfig. A
+ * CONFIG_TEXT_BASE bump, a bigger budget, or a variant SPL layout now fails
+ * the BUILD instead of splattering .text at runtime, which is the failure
+ * this whole node exists to avoid and the one that "will not announce itself".
+ */
+#ifdef HAS_FIT
+&fit_template {
+	images {
+		/delete-node/ @fdt-SEQ;
+
+		fdt-1 {
+			description = ROC_PC_FIT_FDT_DESC;
+			type = "flat_dt";
+
+			/*
+			 * `compression` is what SPL reads and `compress` is
+			 * what actually compresses the bytes. They are one
+			 * decision -- setting either alone ships a payload
+			 * whose label and contents disagree, which is the
+			 * exact bug rockchip-u-boot.dtsi's FIT_UBOOT_COMP
+			 * macro exists to make impossible -- so both use it.
+			 */
+			compression = FIT_UBOOT_COMP;
+
+			/*
+			 * The board DTB by its of-list name, NOT the
+			 * `u-boot-dtb` etype.
+			 *
+			 * They are the same bytes in principle -- of-list here
+			 * is the one entry "rockchip/rk3399-roc-pc", which is
+			 * where u-boot.dtb is copied from -- but not at the
+			 * same INSTANT. binman rewrites u-boot.dtb between
+			 * images to record each pack's offsets, so
+			 * `u-boot-dtb` captured a mid-run snapshot: measured,
+			 * the FIT then carried a 101,189 B tree still holding
+			 * bootph-* properties and the SPI pack's image-pos
+			 * annotations, while the 101,280 B u-boot.dtb that LBS
+			 * publishes as out/roc-rk3399-pc.dtb held the final
+			 * ones. Both boot, but the artifact beside the image
+			 * would no longer describe the tree inside it, and
+			 * this board hands that tree to Linux.
+			 */
+			blob {
+				filename = ROC_PC_FIT_FDT_FILE;
+				compress = FIT_UBOOT_COMP;
+			};
+
+			/*
+			 * Guarded exactly like the five instances in
+			 * rockchip-u-boot.dtsi and the dptx node above:
+			 * FIT_HASH_ALGO is only #defined under
+			 * CONFIG_SPL_FIT_SIGNATURE, which this board gets
+			 * from an `imply` and never sets explicitly.
+			 */
+#ifdef FIT_HASH_ALGO
+			hash {
+				algo = FIT_HASH_ALGO;
+			};
+#else
+#warning "control FDT node has no hash: SPL will decompress unverified bytes"
+#endif
+		};
+	};
+};
+#endif /* HAS_FIT */
+
+/*
+ * BL31, as LZMA FIT nodes.
+ *
+ * The generic @atf-SEQ template in rockchip-u-boot.dtsi emits one node per
+ * BL31 ELF segment with `compression = "none"`, and binman's split-elf
+ * generator had no way to compress a generated node (the same limitation the
+ * fdt-1 node above works around by ceasing to be generated). `fit,compress`
+ * is that way: it LZMA-compresses each segment's bytes and labels the node
+ * from the one directive, so the label and the payload cannot disagree.
+ *
+ * Why: the SD/eMMC image has to fit the 1 MiB ahead of partition 1 (the
+ * 1,015,808 B LBS budget) and did not -- 1,039,360 B, over by 23,552 B -- with
+ * the .ro segment of BL31 the largest uncompressed thing left in it at
+ * 143,360 B. Measured with binman's own lzma_alone flags (-lc1 -lp0 -pb0),
+ * the five segments go 143,360 / 73 / 8,024 / 12,288 / 4,096 -> 38,755 / 34 /
+ * 2,612 / 3,421 / 39 B; every one shrinks, so the whole ELF takes the same
+ * algorithm rather than a per-segment threshold. (The shipped `dumpimage -l`
+ * line is authoritative; these numbers move with every TF-A build.)
+ *
+ * Board-scoped, for the same reason as fdt-1: whether a compressed loadable is
+ * safe is a memory-map question. spl_fit.c reads a compressed node into the
+ * staging window first, and this board names that window
+ * (CONFIG_SPL_FIT_COMP_STAGING_ADDR = 0x00500000, checked at build time
+ * against CONFIG_TEXT_BASE and the FIT buffer). A board without that symbol
+ * stages at CONFIG_SYS_LOAD_ADDR -- 2 KiB into U-Boot proper -- and atf-2..N
+ * are loaded AFTER u-boot (`loadables` order: dptx, u-boot, atf-2, ...), so on
+ * such a board this directive would read compressed BL31 segments over live
+ * U-Boot .text after its hash had passed. Do not lift it into the shared
+ * template.
+ *
+ * Every BL31 segment is clear of the staging window and of each other:
+ * atf-1 0x00040000+0x23000 (.ro, DRAM), atf-2 0x00063000+0x49 (.data),
+ * atf-3 0xff3b0000+0x1f58 (PMUSRAM), atf-4 0xff8c0000+0x3000 and atf-5
+ * 0xff8c3000+0x1000 (SRAM) -- read from `readelf -l bl31.elf`. The SRAM and
+ * PMUSRAM segments are plain memory the uncompressed path already memmove()s
+ * into; the LZMA decoder writes the same bytes to the same addresses, only
+ * through its own output pointer. Nothing of SPL's is in either SRAM: its
+ * initial stack (CUSTOM_SYS_INIT_SP_ADDR 0x03f00000), BSS (0x03f80000) and
+ * relocated stack + malloc pool (SPL_STACK_R_ADDR 0x03e00000,
+ * SPL_STACK_R_MALLOC_SIMPLE_LEN 0x200000) are all DRAM, read from the built
+ * .config; the ~14 KB probability table each decode malloc()s comes from
+ * that 2 MiB pool, which is in effect by the time the FIT is loaded, and
+ * malloc_simple never frees, so five more decodes cost ~70 KB of it.
+ *
+ * Bootloader policy (design/rules/bootloader/policy.md, "BL33 compression"):
+ * every payload the SPL loads out of the FIT ships compressed with the
+ * algorithm the SPL decompresses -- FIT_UBOOT_COMP, the same macro U-Boot
+ * proper, dptx and fdt-1 use, so BL31 is LZMA exactly where CONFIG_SPL_LZMA
+ * can undo it and "none" where the board's SPL carries no decompressor.
+ */
+#ifdef HAS_FIT
+&fit_template {
+	images {
+		@atf-SEQ {
+			fit,compress = FIT_UBOOT_COMP;
+		};
+	};
+};
+#endif /* HAS_FIT */
+
+/*
+ * The SPL USB flash session of a MaskROM boot (CONFIG_SPL_USBFLASH,
+ * arch/arm/mach-rockchip/spl-usbflash.c) runs the Type-C0 DWC3 as a gadget
+ * at high speed on its USB 2 PHY alone (dwc3-generic.c,
+ * dwc3_generic_xpl_usb2_only()): the controller, its glue and that PHY are in
+ * the SPL tree; the Type-C PHY and the port manager stay U-Boot proper's.
+ * A build without the session binds nothing to them in SPL.
+ */
+&usbdrd3_0 {
+	bootph-pre-ram;
+};
+
+&usbdrd_dwc3_0 {
+	bootph-pre-ram;
+};
+
+&u2phy0 {
+	bootph-pre-ram;
+};
+
+&u2phy0_otg {
+	bootph-pre-ram;
+};
+
+/*
+ * SuperSpeed in the SPL session: the Type-C PHY's USB3 port, and the
+ * connector graph to the FUSB302, so the SPL measures the plug's
+ * orientation (fusb302-cc.c) and maps the lanes before the host trains.
+ * The gadget falls back to high speed when SuperSpeed does not connect
+ * (SPL_USB_DWC3_SS_FALLBACK_MS).
+ */
+&tcphy0 {
+	bootph-pre-ram;
+};
+
+&tcphy0_usb3 {
+	bootph-pre-ram;
+};
+
+&tcphy0_typec_ss {
+	bootph-pre-ram;
+};
+
+&usb_con0 {
+	bootph-pre-ram;
+};
+
+&usb_con0_ss {
+	bootph-pre-ram;
+};
+
+&fusb0 {
+	bootph-pre-ram;
+};
+
+&i2c7 {
+	bootph-pre-ram;
+};
+
+&i2c7_xfer {
+	bootph-pre-ram;
+};
+
+/*
+ * The OTG port's phy-supply: with SPL_DM_REGULATOR, a phandle to a node the
+ * SPL tree dropped fails generic_phy_get() and with it the gadget.
+ */
+&vcc_vbus_typec0 {
+	bootph-pre-ram;
+};
+
+/*
+ * vdd_cpu_l in the SPL, for the session's CPU clock (roc-rk3399-pc.c,
+ * roc_pc_cpu_l_clock()); bound only by an SPL with SPL_REGULATOR_RK8XX.
+ */
+&i2c0 {
+	bootph-pre-ram;
+};
+
+&i2c0_xfer {
+	bootph-pre-ram;
+};
+
+&pmic_int_l {
+	bootph-pre-ram;
+};
+
+&rk808 {
+	bootph-pre-ram;
+
+	regulators {
+		bootph-pre-ram;
+	};
+};
+
+&vdd_cpu_l {
+	bootph-pre-ram;
 };

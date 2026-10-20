@@ -5,11 +5,46 @@
 
 #include "meson-g12-common-u-boot.dtsi"
 
+/ {
+	smbios {
+		compatible = "u-boot,sysinfo-smbios";
+
+		smbios {
+			system {
+				manufacturer = "libre-computer";
+				product = "aml-a311d-cc";
+			};
+
+			baseboard {
+				manufacturer = "libre-computer";
+				product = "aml-a311d-cc";
+			};
+
+			chassis {
+				manufacturer = "libre-computer";
+				product = "aml-a311d-cc";
+			};
+		};
+	};
+};
+
 &sd_emmc_c {
-	pinctrl-0 = <&emmc_ctrl_pins>, <&emmc_data_4b_pins>;
+	pinctrl-0 = <&emmc_ctrl_pins>, <&emmc_data_4b_pins>, <&emmc_ds_pins>;
 	bus-width = <4>;
 };
 
 &spifc {
 	status = "okay";
 };
+
+#if defined(CONFIG_BINMAN)
+/* Alta is G12B: amlimage VARIANT g12b @ 0xf000 (same size as g12a/sm1) */
+&binman {
+	u-boot-amlogic {
+		mkimage {
+			args = "-n", "g12b", "-T", "amlimage";
+		};
+	};
+};
+#endif
+

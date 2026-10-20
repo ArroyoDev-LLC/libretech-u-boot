@@ -13,9 +13,22 @@ obj-$(CONFIG_SUPPORT_EXTENSION_SCAN) += extension-uclass.o
 
 obj-$(CONFIG_PXE_UTILS) += pxe_utils.o
 
+obj-$(CONFIG_BOARD_CONFIG) += board-config.o
+obj-$(CONFIG_BOARD_CONFIG_NOR) += board-config-nor.o
+
+else
+
+# The SPL flash session's read-only NOR alternates need the config offset.
+obj-$(CONFIG_$(PHASE_)DFU_VIRT) += board-config-nor.o
+
 endif
 
 obj-y += image.o image-board.o
+
+obj-$(CONFIG_$(PHASE_)BOOTSOURCE) += bootsource.o
+ifndef CONFIG_XPL_BUILD
+obj-$(CONFIG_USB_OTG_ROLE) += usb_otg_role.o
+endif
 
 obj-$(CONFIG_ANDROID_AB) += android_ab.o
 obj-$(CONFIG_ANDROID_BOOT_IMAGE) += image-android.o image-android-dt.o

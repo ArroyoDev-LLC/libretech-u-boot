@@ -1,0 +1,119 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * HamGeek / RIGUKE XC7Z100 + ADRV9009 ("sdr-pro-alpha") — U-Boot-only DT
+ * additions. Nothing here may appear in the Linux tree; the DTS proper
+ * (zynq-adrv9009.dts) is kept in sync with
+ * linux-6.18.y-lc:arch/arm/boot/dts/xilinx/zynq-adrv9009.dts and enumerates its
+ * own U-Boot-only deltas.
+ *
+ * 1. SMBIOS identity (board-bootloader policy §1 / §6). Without a sysinfo
+ *    provider, lib/smbios.c falls back to the root `model`/`compatible` and to
+ *    CONFIG_SYS_VENDOR / CONFIG_SYS_BOARD, which on this board are the Kconfig
+ *    defaults "xilinx" / "zynq" — so the OS was told it was running on a
+ *    generic Xilinx Zynq reference board.
+ *
+ *    The strings are spelled out here rather than by changing SYS_VENDOR /
+ *    SYS_BOARD, because those two also select $(BOARDDIR): the board code lives
+ *    in board/xilinx/zynq/, so renaming them would break the build (and would
+ *    move the .env file this defconfig points at). A /smbios node is the
+ *    mechanism lib/smbios.c prefers anyway — it wins over both fallbacks.
+ *
+ *    Values: this is a third-party SDR carrier, not a Libre Computer board, so
+ *    the identity is the ACTUAL manufacturer. Policy §1's byte-identical
+ *    `libre-computer` slug chain is about our own boards; claiming it here would
+ *    be a false statement about who made the hardware. `manufacturer` matches
+ *    the DTS `model = "HamGeek XC7Z100 ADRV9009 (RIGUKE)"` and the
+ *    `hamgeek,xc7z100-adrv9009` compatible. The type-1 serial number is not set
+ *    here: lib/smbios.c prefers the env `serial#`, which
+ *    board/xilinx/zynq/zynq-adrv9009/board.c derives from the W25Q256 factory
+ *    UID.
+ *
+ * 2. binman description of the SPI NOR bootloader blob (/lbs §10 "single build
+ *    command … no manual assembly"). Before this, a full build emitted
+ *    spl/boot.bin and u-boot.img as two separate artifacts that had to be
+ *    flashed to two separate NOR offsets by hand — which can leave a valid SPL
+ *    paired with a stale or absent payload. Now one u-boot-zynq-nor.bin is
+ *    written at offset 0, exactly as the sibling zynq_e310 does.
+ *
+ *    The blob itself is described by the shared zynq-sdr-nor-u-boot.dtsi
+ *    include at the bottom of this file, which zynq_e310 also uses. The NOR MAP
+ *    for THIS board, which differs from the E310 only above the bootloader
+ *    region (this unit's flash carries a vendor PL bitstream), is:
+ *
+ *      0x0000000 + 256 KiB   SPL        spl/boot.bin -- Zynq boot header
+ *                                       (0xAA995566 / "XNLX") + SPL. Must be at
+ *                                       0: the BootROM's boot-header search
+ *                                       starts there.
+ *      0x0040000 +1728 KiB   FIT        LZ4-compressed BL33 + control FDT, read
+ *                                       by the SPL from
+ *                                       CONFIG_SYS_SPI_U_BOOT_OFFS.
+ *      0x01F0000 +  64 KiB   config     NOR config sector, the POLICY DEFAULT
+ *                                       (CONFIG_BOARD_CONFIG_NOR_OFFSET).
+ *      0x0200000 + 256 KiB   bootscript script_offset_f / script_size_f, see
+ *                                       board/xilinx/zynq/zynq-adrv9009.env.
+ *      0x0240000 + 768 KiB   spare      free, 3-byte-addressable.
+ *      0x0300000 +16.61 MiB  bitstream  the stock 17 416 352 B PL bitstream,
+ *                                       0x300000-0x139C0A0. Immovable data; not
+ *                                       written by anything in U-Boot.
+ *      0x13A0000 +12.38 MiB  spare      free, but NOT reachable from U-Boot
+ *                                       proper (3-byte addressing, see below).
+ *
+ *    WHAT CHANGED ON 2026-07-31, AND WHY THE OLD NUMBERS ARE GONE
+ *
+ *    The FIT used to sit at 0x120000 and the config sector at 0x2F0000. Both
+ *    were legacy: 0x120000 left 1 045 544 B of 0xff filler between the end of
+ *    the SPL and the payload -- 33.94% of the 0x2F0000 build budget spent on
+ *    nothing -- and 0x2F0000 existed only because a blob anchored at 0x120000
+ *    reached 0x1E7440 and could not clear the policy default 0x1F0000.
+ *
+ *    0x40000 is not a smaller round number; it is the derived floor. The Zynq
+ *    SPL executes in place from the 192 KiB low-OCM window at 0x0, which IS
+ *    CONFIG_SPL_MAX_SIZE (0x30000) -- silicon, not preference -- and 0x40000 is
+ *    the smallest 64 KiB-aligned offset above it, i.e. the SPL's hard ceiling
+ *    plus one erase block. With the payload there and BL33 LZ4-compressed the
+ *    blob clears 0x1F0000 with room to spare, so the config sector returns to
+ *    the policy default and this board stops carrying a bespoke one.
+ *
+ *    64 KiB is the alignment quantum because CONFIG_SPI_FLASH_USE_4K_SECTORS is
+ *    off: U-Boot's `sf erase` and the DFU raw alts work only in 64 KiB units.
+ *    Linux reports mtd erasesize 0x1000 on the same chip (its spi-nor core
+ *    enables the 4 KiB opcode), but a layout has to be safe for the coarser of
+ *    its two writers.
+ *
+ *    The ceiling is ENFORCED, not merely documented: configs/xil-z7100-sdr in
+ *    libretech-builder-simple inherits LBS_TARGET_MAX_SIZE=0x1F0000 from
+ *    configs/xilinx-zynq7, so a blob that grows into the config sector fails the
+ *    build rather than being discovered on silicon.
+ *
+ *    Nothing constrains the blob to any previously-flashed FIT span: the SPL
+ *    reads the FIT's own totalsize at runtime
+ *    (size = ALIGN(fdt_totalsize(fit_header), 4), common/spl/spl_fit.c) and
+ *    reads it with a plain spi_flash_read() at CONFIG_SYS_SPI_U_BOOT_OFFS
+ *    (common/spl/spl_spi.c), so there is no compile-time span anywhere in the
+ *    load path.
+ */
+
+#include <config.h>
+#include "zynq-sdr-nor-u-boot.dtsi"
+
+/ {
+	smbios {
+		compatible = "u-boot,sysinfo-smbios";
+
+		smbios {
+			system {
+				manufacturer = "HamGeek";
+				product = "XC7Z100-ADRV9009";
+			};
+
+			baseboard {
+				manufacturer = "HamGeek";
+				product = "XC7Z100-ADRV9009";
+			};
+
+			chassis {
+				manufacturer = "HamGeek";
+			};
+		};
+	};
+};

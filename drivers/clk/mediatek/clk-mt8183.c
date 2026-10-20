@@ -836,7 +836,16 @@ U_BOOT_DRIVER(mtk_clk_infracfg) = {
 	.id = UCLASS_CLK,
 	.of_match = mt8183_infracfg_compat,
 	.probe = mt8183_infracfg_probe,
-	.priv_auto = sizeof(struct mtk_clk_priv),
+	/*
+	 * infracfg probes via mtk_common_clk_gate_init(), which populates a
+	 * struct mtk_cg_priv (gates/num_gates/gates_offs in addition to the
+	 * mtk_clk_priv head). priv_auto MUST therefore size mtk_cg_priv -- using
+	 * the smaller mtk_clk_priv under-allocates by 16 bytes and the gate-init
+	 * writes overflow into the adjacent DM heap object (observed: num_gates
+	 * == 97 == 0x61 clobbering topckgen priv->parent, crashing the first
+	 * MSDC/eMMC source-clock rate walk with a data abort, far=0xf1).
+	 */
+	.priv_auto = sizeof(struct mtk_cg_priv),
 	.ops = &mtk_clk_gate_ops,
 	.flags = DM_FLAG_PRE_RELOC,
 };

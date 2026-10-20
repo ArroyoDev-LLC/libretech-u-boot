@@ -142,6 +142,7 @@ class Entry(object):
         self.image_pos = None
         self.extend_size = False
         self.compress = 'none'
+        self.decomp_in_place = False
         self.missing = False
         self.faked = False
         self.external = False
@@ -324,6 +325,7 @@ class Entry(object):
 
         # This is only supported by blobs and sections at present
         self.compress = fdt_util.GetString(self._node, 'compress', 'none')
+        self.decomp_in_place = fdt_util.GetBool(self._node, 'decomp-in-place')
         self.offset_from_elf = fdt_util.GetPhandleNameOffset(self._node,
                                                              'offset-from-elf')
 
@@ -1204,6 +1206,96 @@ features to produce new behaviours.
         """
         return list(filter(None, [self.missing_msg, self.name, self.etype]))
 
+    def CheckDecompInPlace(self, uncomp_size, comp_size):
+        """Check the overlap criterion for an image decompressed in place
+
+        Some loaders (u-boot SPL among them) decompress an image from a
+        source buffer that OVERLAPS the destination, and the correctness of
+        that is not a property of the loader -- it is a property of THIS
+        image's compression ratio, fixed here at pack time.
+
+        LZ4's in-place criterion is about the ENDS of the two extents, not
+        their starts: it needs
+
+            src_end - dst_end >= (comp_size >> 8) + 32
+
+        A loader that has to keep a compressed copy clear of a destination
+        it does not yet know the length of can only push the source up past
+        the *compressed* extent, i.e. src = dst + comp_size. Substituting
+        src_end = dst + 2 * comp_size and dst_end = dst + uncomp_size, the
+        whole guarantee collapses to
+
+            2 * comp_size - uncomp_size >= (comp_size >> 8) + 32
+
+        which is, to within a fraction of a percent, simply
+
+            2 * comp_size > uncomp_size
+
+        that is, the ratio must stay WORSE than 50%. Compress better than
+        50% and the writer overtakes the reader and the image decompresses
+        over its own still-unread tail.
+
+        Nothing downstream can catch this. A FIT hash is verified over the
+        COMPRESSED bytes, before decompression runs, and formats that do not
+        record their decompressed length (LZ4) deny the loader any way to
+        detect the overlap at runtime. The one place both numbers are known
+        and a build can still be stopped is here.
+
+        Args:
+            uncomp_size: Uncompressed size in bytes
+            comp_size: Compressed size in bytes
+
+        Raises:
+            ValueError: if the ratio is 50% or better
+        """
+        if not self.decomp_in_place:
+            return
+        if 2 * comp_size <= uncomp_size:
+            self.Raise(
+                "decomp-in-place: '%s' compresses to %d B from %d B (%.1f%% "
+                "-- must stay above 50.0%%); an in-place %s decompression of "
+                "this image would overwrite its own compressed tail. "
+                "2 * %d <= %d" %
+                (self.name, comp_size, uncomp_size,
+                 comp_size * 100.0 / uncomp_size, self.compress,
+                 comp_size, uncomp_size))
+
+    def CheckDecompInPlacePossible(self):
+        """Refuse a decomp-in-place entry whose compressor is unavailable
+
+        CheckDecompInPlace() can only run once the compressed size exists,
+        i.e. inside the branch where the compressor bintool is present. If
+        the bintool is absent that branch never runs, and binman's normal
+        response -- record a missing bintool and substitute a 1 KB zero stub
+        -- is downgraded to a warning by --ignore-missing, which the u-boot
+        Makefile passes whenever BINMAN_ALLOW_MISSING is set. The build then
+        succeeds, having written a FIT whose image claims compression =
+        "lz4", carries 1024 bytes of zeros, and has a perfectly valid hash
+        over those zeros. The check that exists precisely to stop a bad
+        image from shipping is the one thing that silently did not happen.
+
+        --allow-missing / --ignore-missing are about EXTERNAL BLOBS that the
+        build does not have -- signed vendor firmware and the like -- and
+        they buy a deliberately non-functional image for a CI or bisect run.
+        They are not a licence to skip a correctness assertion on data
+        binman is itself producing. So an entry that ASKED for the in-place
+        check and cannot get it fails, and says why.
+
+        Raises:
+            ValueError: if decomp-in-place is set on this entry
+        """
+        if not self.decomp_in_place:
+            return
+        self.Raise(
+            "decomp-in-place: cannot check '%s': the '%s' compressor is not "
+            "available, so binman would emit a 1024-byte stub in place of "
+            "the compressed image and this entry's in-place decompression "
+            "check could never run. This is a correctness check on data "
+            "binman produces itself, not a missing external blob, so "
+            "--allow-missing / --ignore-missing (BINMAN_ALLOW_MISSING) do "
+            "not waive it. Install the '%s' tool." %
+            (self.name, self.compress, self.compress))
+
     def CompressData(self, indata):
         """Compress data according to the entry's compression method
 
@@ -1218,10 +1310,12 @@ features to produce new behaviours.
             self.uncomp_size = len(indata)
             if self.comp_bintool.is_present():
                 data = self.comp_bintool.compress(indata)
+                self.CheckDecompInPlace(len(indata), len(data))
                 uniq = self.GetUniqueName()
                 fname = tools.get_output_filename(f'comp.{uniq}')
                 tools.write_file(fname, data)
             else:
+                self.CheckDecompInPlacePossible()
                 self.record_missing_bintool(self.comp_bintool)
                 data = tools.get_bytes(0, 1024)
         else:

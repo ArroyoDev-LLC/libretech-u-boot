@@ -7,18 +7,59 @@
 
 #include <bouncebuf.h>
 #include <cpu_func.h>
+#include <div64.h>
+#include <dm.h>
 #include <errno.h>
 #include <log.h>
 #include <malloc.h>
 #include <memalign.h>
 #include <mmc.h>
 #include <dwmmc.h>
+#include <time.h>
 #include <wait_bit.h>
 #include <asm/cache.h>
 #include <linux/delay.h>
+#include <linux/kernel.h>
 #include <power/regulator.h>
 
 #define PAGE_SIZE 4096
+
+/*
+ * Every wait in this driver is bounded by TIME, never by a poll count: a
+ * count is a function of how fast the CPU reads a register, which changes
+ * with the core clock, the cache state and whatever a cyclic tick does in
+ * between, so the same count meant 111 ms on one boot and 404 ms on the next
+ * (measured on RK3399, the CMD19 CDONE wait at 100,000 polls).
+ *
+ * The budgets come from the bus, not from taste:
+ *  - command phase: the CIU's own response timeout, TMOUT[7:0] = 255 card
+ *    clocks (SD Physical Layer NCR max 64, eMMC NCR max 64), plus the 10 ms
+ *    margin Linux's dw_mmc adds to its cto timer; while the card holds DAT0
+ *    low the CIU stalls a wait_prvdata_complete command, so that case gets
+ *    the busy budget instead;
+ *  - data phase, in the CIU's data timeout counter (TMOUT[31:8], card
+ *    clocks): a block read / write gets the SD spec's 100 ms read / 250 ms
+ *    write ceilings (Part 1 §4.6.2.1-2) with margin, the tuning block gets
+ *    the 150 ms / 40 executions the spec allows a whole tuning process
+ *    (Part 1 §4.2.4.5) -- a CMD19 whose data never comes then costs 4 ms,
+ *    not the 111 ms of the register's reset value (0xffffff clocks at 150
+ *    MHz), and never the 42 s it would be at 400 kHz;
+ *  - resets: the reset bits self-clear within a few clocks; 100 ms is the
+ *    bound that says "the block is dead" rather than "slow".
+ */
+#define DWMCI_CTO_CLKS		255
+#define DWMCI_CTO_MARGIN_MS	10
+#define DWMCI_BUSY_TIMEOUT_MS	500
+#define DWMCI_DATA_TIMEOUT_MS	500
+#define DWMCI_TUNING_TIMEOUT_MS	4
+#define DWMCI_RESET_TIMEOUT_MS	100
+#define DWMCI_UPD_CLK_TIMEOUT_MS 100
+
+/* IDMAC status bits that mean the HOST side failed, not the bus */
+#define DWMCI_IDSTS_FBE		BIT(2)	/* fatal bus error */
+#define DWMCI_IDSTS_DU		BIT(4)	/* descriptor unavailable */
+#define DWMCI_IDSTS_AIS		BIT(9)	/* abnormal interrupt summary */
+#define DWMCI_IDSTS_HOST_ERR	(DWMCI_IDSTS_FBE | DWMCI_IDSTS_DU)
 
 /* Internal DMA Controller (IDMAC) descriptor for 32-bit addressing mode */
 struct dwmci_idmac32 {
@@ -61,19 +102,56 @@ static const struct dwmci_idmac_regs dwmci_idmac_regs64 = {
 	.bufaddru	= DWMCI_BUFADDRU,
 };
 
+/* Set the reset bit(s) in @value and wait for them to self-clear; 1 = done */
 static int dwmci_wait_reset(struct dwmci_host *host, u32 value)
 {
-	unsigned long timeout = 1000;
+	ulong start = get_timer(0);
 	u32 ctrl;
 
 	dwmci_writel(host, DWMCI_CTRL, value);
 
-	while (timeout--) {
+	for (;;) {
 		ctrl = dwmci_readl(host, DWMCI_CTRL);
 		if (!(ctrl & DWMCI_RESET_ALL))
 			return 1;
+		if (get_timer(start) > DWMCI_RESET_TIMEOUT_MS) {
+			printf("%s: reset 0x%x did not clear (CTRL 0x%08x)\n",
+			       host->name, value, ctrl);
+			return 0;
+		}
 	}
-	return 0;
+}
+
+/*
+ * The command-phase budget for the card clock the host is running: the CIU
+ * raises RTO after DWMCI_CTO_CLKS card clocks without a response start bit,
+ * so CDONE (with or without an error) is due within that plus the margin.
+ */
+static ulong dwmci_cto_us(struct dwmci_host *host)
+{
+	uint clock = host->mmc && host->mmc->clock ? host->mmc->clock : 400000;
+
+	return DIV_ROUND_UP(DWMCI_CTO_CLKS * 1000000ULL, clock) +
+	       DWMCI_CTO_MARGIN_MS * 1000;
+}
+
+/*
+ * Program the CIU's data timeout for the transfer about to start: @ms of
+ * card clocks, capped at the counter's width (0xffffff) -- which at 150 MHz
+ * is 111 ms, so the cap only shortens a budget at the high rates -- and the
+ * response timeout at its maximum, which is what the command budget above
+ * assumes.
+ */
+static void dwmci_set_data_timeout(struct dwmci_host *host, uint ms)
+{
+	uint clock = host->mmc && host->mmc->clock ? host->mmc->clock : 400000;
+	u64 clks = (u64)ms * clock;
+
+	do_div(clks, 1000);
+	if (!clks || clks > 0xffffff)
+		clks = 0xffffff;
+
+	dwmci_writel(host, DWMCI_TMOUT, ((u32)clks << 8) | DWMCI_CTO_CLKS);
 }
 
 static void dwmci_set_idma_desc32(struct dwmci_idmac32 *desc, u32 control,
@@ -214,7 +292,127 @@ static unsigned int dwmci_get_timeout(struct mmc *mmc, const unsigned int size)
 	return timeout;
 }
 
-static int dwmci_data_transfer(struct dwmci_host *host, struct mmc_data *data)
+/*
+ * Put the CIU back into a known state after a transfer went wrong: a full
+ * controller/FIFO/DMA reset (which also clears a start_cmd the CIU never
+ * finished), a clock-update command to re-sync the CIU with the card clock,
+ * and an IDMAC reset. Without this, a data command that failed at the
+ * response stage -- or one whose completion the CIU never signalled --
+ * leaves the data state machine "busy", and every later command, issued
+ * with wait_prvdata_complete, sits in the CMD register with start_cmd set
+ * until a HLE refuses the next write. A tuning sweep hits exactly that at
+ * the edge of its passing window.
+ */
+static void dwmci_recover(struct dwmci_host *host)
+{
+	ulong start;
+	u32 ctrl;
+
+	/*
+	 * Take the IDMAC off the bus before the CIU is reset, as Linux's
+	 * dw_mci_idmac_stop_dma() does: an IDMAC still armed for the failed
+	 * transfer would otherwise start moving whatever the reset FIFO holds.
+	 */
+	if (!host->fifo_mode) {
+		ctrl = dwmci_readl(host, DWMCI_CTRL);
+		ctrl &= ~(DWMCI_IDMAC_EN | DWMCI_DMA_EN);
+		dwmci_writel(host, DWMCI_CTRL, ctrl);
+		ctrl = dwmci_readl(host, DWMCI_BMOD);
+		ctrl &= ~(DWMCI_BMOD_IDMAC_EN | DWMCI_BMOD_IDMAC_FB);
+		ctrl |= DWMCI_BMOD_IDMAC_RESET;
+		dwmci_writel(host, DWMCI_BMOD, ctrl);
+	}
+
+	dwmci_wait_reset(host, DWMCI_RESET_ALL);
+	dwmci_writel(host, DWMCI_RINTSTS, DWMCI_INTMSK_ALL);
+	dwmci_writel(host, DWMCI_CMD, DWMCI_CMD_PRV_DAT_WAIT |
+		     DWMCI_CMD_UPD_CLK | DWMCI_CMD_START);
+
+	start = get_timer(0);
+	while (dwmci_readl(host, DWMCI_CMD) & DWMCI_CMD_START) {
+		if (get_timer(start) > DWMCI_UPD_CLK_TIMEOUT_MS) {
+			/*
+			 * The CIU did not take a clock update after a full
+			 * reset: reset it once more without the data-busy
+			 * wait, which is the only thing that can stall it.
+			 */
+			printf("%s: clock update after reset did not complete\n",
+			       host->name);
+			dwmci_wait_reset(host, DWMCI_RESET_ALL);
+			dwmci_writel(host, DWMCI_CMD, DWMCI_CMD_UPD_CLK |
+				     DWMCI_CMD_START);
+			break;
+		}
+		udelay(10);
+	}
+	dwmci_writel(host, DWMCI_RINTSTS, DWMCI_INTMSK_ALL);
+}
+
+/*
+ * Tell the card and the CIU's data state machine that the data transfer
+ * they were in is over: a STOP_TRANSMISSION issued with stop_abort_cmd,
+ * which the Synopsys databook names as the way the command / data state
+ * machines "return correctly to idle" when a transfer in progress is
+ * stopped, and what Linux's dw_mmc sends (send_stop_abort()) before it
+ * resets on any failed data command -- the tuning block included. The card
+ * may already be back in tran (a 64-byte tuning block is long gone by the
+ * time software reacts), in which case the STOP is merely illegal there and
+ * costs nothing; a card still in data or rcv is put back where the next
+ * command expects it. No wait_prvdata_complete: a stuck data phase is
+ * exactly what this is for.
+ */
+static void dwmci_abort_data(struct dwmci_host *host)
+{
+	ulong start = timer_get_us(), cto = dwmci_cto_us(host);
+	u32 mask;
+
+	/*
+	 * The STOP's own response must be waited for in full: with a shorter
+	 * response timeout left over from the failed command the CIU gives up
+	 * on the R1b before it arrives, the reset that follows cuts the CIU
+	 * off from a card that is still streaming the aborted read, and every
+	 * later command is then answered with silence (measured, RK3399).
+	 */
+	dwmci_writel(host, DWMCI_TMOUT,
+		     (dwmci_readl(host, DWMCI_TMOUT) & ~0xff) | DWMCI_CTO_CLKS);
+	dwmci_writel(host, DWMCI_RINTSTS, DWMCI_INTMSK_ALL);
+	dwmci_writel(host, DWMCI_CMDARG, 0);
+	dwmci_writel(host, DWMCI_CMD, MMC_CMD_STOP_TRANSMISSION |
+		     DWMCI_CMD_ABORT_STOP | DWMCI_CMD_RESP_EXP |
+		     DWMCI_CMD_CHECK_CRC | DWMCI_CMD_USE_HOLD_REG |
+		     DWMCI_CMD_START);
+
+	for (;;) {
+		mask = dwmci_readl(host, DWMCI_RINTSTS);
+		if (mask & (DWMCI_INTMSK_CDONE | DWMCI_INTMSK_HLE))
+			break;
+		if (timer_get_us() - start > cto)
+			break;
+	}
+	host->abort_rintsts = mask;
+
+	/* R1b: the card holds DAT0 low until it has actually stopped */
+	start = get_timer(0);
+	while (dwmci_readl(host, DWMCI_STATUS) & DWMCI_BUSY) {
+		if (get_timer(start) > DWMCI_BUSY_TIMEOUT_MS) {
+			debug("%s: card still busy %u ms after the abort\n",
+			      host->name, DWMCI_BUSY_TIMEOUT_MS);
+			break;
+		}
+	}
+	debug("%s: abort: RINTSTS 0x%08x\n", host->name, mask);
+}
+
+/*
+ * The software backstop over the data phase: for a block transfer the
+ * size-derived figure as before (>= 1 s, always above the CIU's own timeout);
+ * for the tuning block the CIU's budget plus the command margin -- a CMD19
+ * the CIU stops signalling on (neither DTO nor DRTO, data state machine
+ * busy; measured on RK3399 at the edge of the eye) then costs 14 ms, not
+ * the 1 s the size formula floors at.
+ */
+static int dwmci_data_transfer(struct dwmci_host *host, struct mmc_data *data,
+			       bool tuning)
 {
 	struct mmc *mmc = host->mmc;
 	int ret = 0;
@@ -228,7 +426,10 @@ static int dwmci_data_transfer(struct dwmci_host *host, struct mmc_data *data)
 	else
 		buf = (unsigned int *)data->src;
 
-	timeout = dwmci_get_timeout(mmc, size);
+	if (tuning)
+		timeout = DWMCI_TUNING_TIMEOUT_MS + DWMCI_CTO_MARGIN_MS;
+	else
+		timeout = dwmci_get_timeout(mmc, size);
 
 	size /= 4;
 
@@ -236,9 +437,35 @@ static int dwmci_data_transfer(struct dwmci_host *host, struct mmc_data *data)
 		mask = dwmci_readl(host, DWMCI_RINTSTS);
 		/* Error during data transfer */
 		if (mask & (DWMCI_DATA_ERR | DWMCI_DATA_TOUT)) {
-			debug("%s: DATA ERROR!\n", __func__);
+			debug("%s: DATA ERROR! rintsts=0x%08x\n", __func__,
+			      mask);
+
+			host->err_rintsts = mask;
+			dwmci_abort_data(host);
+			dwmci_recover(host);
+
 			ret = -EINVAL;
 			break;
+		}
+
+		/*
+		 * The IDMAC's own faults -- a descriptor it could not take,
+		 * a fatal AXI/AHB error -- stop the transfer without the CIU
+		 * ever raising a data error; DTO would then never come and
+		 * this loop would run to its software timeout.
+		 */
+		if (!host->fifo_mode) {
+			u32 idsts = dwmci_readl(host, host->regs->idsts);
+
+			if (idsts & DWMCI_IDSTS_HOST_ERR) {
+				printf("%s: IDMAC fault (IDSTS 0x%08x, RINTSTS 0x%08x)\n",
+				       host->name, idsts, mask);
+				host->err_rintsts = mask;
+				dwmci_abort_data(host);
+				dwmci_recover(host);
+				ret = -EIO;
+				break;
+			}
 		}
 
 		if (host->fifo_mode && size) {
@@ -292,9 +519,19 @@ static int dwmci_data_transfer(struct dwmci_host *host, struct mmc_data *data)
 			break;
 		}
 
-		/* Check for timeout */
+		/*
+		 * The software backstop above the CIU's own data timeout:
+		 * with TMOUT programmed per transfer the CIU reports DRTO
+		 * first, so reaching this means the CIU itself stopped
+		 * signalling -- which is the one case that must not be left
+		 * as it is.
+		 */
 		if (get_timer(start) > timeout) {
-			debug("%s: Timeout waiting for data!\n", __func__);
+			printf("%s: no data completion in %u ms (RINTSTS 0x%08x)\n",
+			       host->name, timeout, mask);
+			host->err_rintsts = mask;
+			dwmci_abort_data(host);
+			dwmci_recover(host);
 			ret = -ETIMEDOUT;
 			break;
 		}
@@ -305,21 +542,35 @@ static int dwmci_data_transfer(struct dwmci_host *host, struct mmc_data *data)
 	return ret;
 }
 
+/*
+ * Finish the IDMAC side of a transfer. After a data phase that completed,
+ * wait (bounded) for the IDMAC's own completion so the last descriptor's
+ * bytes have landed before the bounce buffer is copied out; after one that
+ * FAILED the IDMAC has already been reset by the recovery, its completion
+ * can never come, and waiting for it would add a full second to every
+ * data error.
+ */
 static int dwmci_dma_transfer(struct dwmci_host *host, uint flags,
-			      struct bounce_buffer *bbstate)
+			      struct bounce_buffer *bbstate, bool failed)
 {
-	int ret;
+	int ret = 0;
 	u32 mask, ctrl;
 
-	if (flags == MMC_DATA_READ)
-		mask = DWMCI_IDINTEN_RI;
-	else
-		mask = DWMCI_IDINTEN_TI;
+	if (!failed) {
+		if (flags == MMC_DATA_READ)
+			mask = DWMCI_IDINTEN_RI;
+		else
+			mask = DWMCI_IDINTEN_TI;
 
-	ret = wait_for_bit_le32(host->ioaddr + host->regs->idsts, mask, true,
-				1000, false);
-	if (ret)
-		debug("%s: DWMCI_IDINTEN mask 0x%x timeout\n", __func__, mask);
+		ret = wait_for_bit_le32(host->ioaddr + host->regs->idsts, mask,
+					true, 1000, false);
+		if (ret) {
+			printf("%s: IDMAC did not complete a finished transfer (IDSTS 0x%08x)\n",
+			       host->name,
+			       dwmci_readl(host, host->regs->idsts));
+			dwmci_recover(host);
+		}
+	}
 
 	/* Clear interrupts */
 	dwmci_writel(host, host->regs->idsts, DWMCI_IDINTEN_MASK);
@@ -344,31 +595,81 @@ static int dwmci_set_transfer_mode(struct dwmci_host *host,
 	return mode;
 }
 
-static void dwmci_wait_while_busy(struct dwmci_host *host, struct mmc_cmd *cmd)
+/*
+ * Wait for the card to release DAT0 before a command is issued with
+ * wait_prvdata_complete. Returns the busy state at the end: a card still busy
+ * past the budget is reported by the caller's command timeout, not here --
+ * the CIU will hold the command until DAT0 rises, and the command-phase wait
+ * below is what bounds that.
+ */
+static bool dwmci_wait_while_busy(struct dwmci_host *host, struct mmc_cmd *cmd)
 {
-	unsigned int timeout = 500; /* msec */
-	ulong start;
+	ulong start = get_timer(0);
 
-	start = get_timer(0);
 	while (dwmci_readl(host, DWMCI_STATUS) & DWMCI_BUSY) {
-		if (get_timer(start) > timeout) {
-			debug("%s: Timeout on data busy, continue anyway\n",
-			      __func__);
-			break;
+		if (get_timer(start) > DWMCI_BUSY_TIMEOUT_MS) {
+			debug("%s: card busy for %u ms before CMD%d\n",
+			      host->name, DWMCI_BUSY_TIMEOUT_MS, cmd->cmdidx);
+			return true;
 		}
 	}
+	return false;
+}
+
+/* The tuning block is expected to fail at bad sample phases: report quietly */
+static bool dwmci_is_tuning_cmd(const struct mmc_cmd *cmd)
+{
+	return cmd->cmdidx == MMC_CMD_SEND_TUNING_BLOCK ||
+	       cmd->cmdidx == MMC_CMD_SEND_TUNING_BLOCK_HS200;
+}
+
+/*
+ * Wait for the CIU to finish the command phase: CDONE, or VOLTSW for the
+ * voltage-switch command. Bounded by the command budget; a card holding
+ * DAT0 low stalls a wait_prvdata_complete command in the CIU, and that case
+ * gets the busy budget instead. Returns the RINTSTS that ended the wait, or
+ * 0 when nothing did.
+ */
+static u32 dwmci_wait_cmd_done(struct dwmci_host *host, ulong *elapsed_us)
+{
+	ulong start = timer_get_us(), budget = dwmci_cto_us(host);
+	u32 mask;
+
+	for (;;) {
+		mask = dwmci_readl(host, DWMCI_RINTSTS);
+		if (host->volt_switching && (mask & DWMCI_INTMSK_VOLTSW))
+			break;
+		if (mask & (DWMCI_INTMSK_CDONE | DWMCI_INTMSK_HLE))
+			break;
+		*elapsed_us = timer_get_us() - start;
+		if (*elapsed_us > budget) {
+			if (budget < DWMCI_BUSY_TIMEOUT_MS * 1000UL &&
+			    (dwmci_readl(host, DWMCI_STATUS) & DWMCI_BUSY)) {
+				budget = DWMCI_BUSY_TIMEOUT_MS * 1000UL;
+				continue;
+			}
+			return 0;
+		}
+	}
+	*elapsed_us = timer_get_us() - start;
+	return mask;
 }
 
 static int dwmci_send_cmd_common(struct dwmci_host *host, struct mmc_cmd *cmd,
 				 struct mmc_data *data, void *cur_idmac)
 {
-	int ret, flags = 0, i;
-	u32 retry = 100000;
+	int ret, flags = 0;
+	ulong elapsed = 0;
 	u32 mask;
+	bool done, busy;
 	struct bounce_buffer bbstate;
 
-	dwmci_wait_while_busy(host, cmd);
+	busy = dwmci_wait_while_busy(host, cmd);
 	dwmci_writel(host, DWMCI_RINTSTS, DWMCI_INTMSK_ALL);
+	if (data)
+		dwmci_set_data_timeout(host, dwmci_is_tuning_cmd(cmd) ?
+				       DWMCI_TUNING_TIMEOUT_MS :
+				       DWMCI_DATA_TIMEOUT_MS);
 
 	if (data) {
 		if (host->fifo_mode) {
@@ -398,6 +699,7 @@ static int dwmci_send_cmd_common(struct dwmci_host *host, struct mmc_cmd *cmd,
 	}
 
 	dwmci_writel(host, DWMCI_CMDARG, cmd->cmdarg);
+	host->err_rintsts = 0;
 
 	if (data)
 		flags = dwmci_set_transfer_mode(host, data);
@@ -429,22 +731,43 @@ static int dwmci_send_cmd_common(struct dwmci_host *host, struct mmc_cmd *cmd,
 
 	dwmci_writel(host, DWMCI_CMD, flags);
 
-	for (i = 0; i < retry; i++) {
+	mask = dwmci_wait_cmd_done(host, &elapsed);
+	done = mask != 0;
+
+	if (done && host->volt_switching && (mask & DWMCI_INTMSK_VOLTSW))
+		dwmci_writel(host, DWMCI_RINTSTS, DWMCI_INTMSK_VOLTSW);
+	else if (done && !data && (mask & DWMCI_INTMSK_CDONE))
+		dwmci_writel(host, DWMCI_RINTSTS, mask);
+
+	if (!done) {
+		/*
+		 * The CIU never finished it: start_cmd is still set, no
+		 * response bit came. Not a bus event (those all end in CDONE)
+		 * but a host-side stall, so say so -- unless it is the
+		 * tuning block, where the sweep reports the outcome.
+		 */
+		if (dwmci_is_tuning_cmd(cmd))
+			debug("%s: CMD%d not completed by the CIU in %lu us%s\n",
+			      host->name, cmd->cmdidx, elapsed,
+			      busy ? " (card busy)" : "");
+		else
+			printf("%s: CMD%d not completed by the CIU in %lu us%s\n",
+			       host->name, cmd->cmdidx, elapsed,
+			       busy ? " (card busy)" : "");
 		mask = dwmci_readl(host, DWMCI_RINTSTS);
-		if (host->volt_switching && (mask & DWMCI_INTMSK_VOLTSW)) {
-			dwmci_writel(host, DWMCI_RINTSTS, DWMCI_INTMSK_VOLTSW);
-			break;
-		}
-		if (mask & DWMCI_INTMSK_CDONE) {
-			if (!data)
-				dwmci_writel(host, DWMCI_RINTSTS, mask);
-			break;
-		}
+		ret = -ETIMEDOUT;
+		goto cmd_failed;
 	}
 
-	if (i == retry) {
-		debug("%s: Timeout\n", __func__);
-		return -ETIMEDOUT;
+	if (mask & DWMCI_INTMSK_HLE) {
+		/*
+		 * The CIU refused the CMD write: it was still busy with the
+		 * previous command. A driver fault, never a card's.
+		 */
+		printf("%s: CMD%d refused (hardware locked, RINTSTS 0x%08x)\n",
+		       host->name, cmd->cmdidx, mask);
+		ret = -EIO;
+		goto cmd_failed;
 	}
 
 	if (mask & DWMCI_INTMSK_RTO) {
@@ -457,14 +780,17 @@ static int dwmci_send_cmd_common(struct dwmci_host *host, struct mmc_cmd *cmd,
 		 * CMD8, please keep that in mind.
 		 */
 		debug("%s: Response Timeout\n", __func__);
-		return -ETIMEDOUT;
+		ret = -ETIMEDOUT;
+		goto cmd_failed;
 	} else if (mask & DWMCI_INTMSK_RE) {
 		debug("%s: Response Error\n", __func__);
-		return -EIO;
+		ret = -EIO;
+		goto cmd_failed;
 	} else if ((cmd->resp_type & MMC_RSP_CRC) &&
 		   (mask & DWMCI_INTMSK_RCRC)) {
 		debug("%s: Response CRC Error\n", __func__);
-		return -EIO;
+		ret = -EIO;
+		goto cmd_failed;
 	}
 
 	if (cmd->resp_type & MMC_RSP_PRESENT) {
@@ -479,14 +805,103 @@ static int dwmci_send_cmd_common(struct dwmci_host *host, struct mmc_cmd *cmd,
 	}
 
 	if (data) {
-		ret = dwmci_data_transfer(host, data);
-		if (!host->fifo_mode)
-			ret = dwmci_dma_transfer(host, data->flags, &bbstate);
+		int dma_ret;
+
+		ret = dwmci_data_transfer(host, data, dwmci_is_tuning_cmd(cmd));
+		if (!host->fifo_mode) {
+			/*
+			 * The DMA completion must not overwrite a data
+			 * error: the IDMAC can finish its descriptor for a
+			 * block that failed CRC, and the caller would then
+			 * be handed corrupt data as a success.
+			 */
+			dma_ret = dwmci_dma_transfer(host, data->flags,
+						     &bbstate, ret != 0);
+			if (!ret)
+				ret = dma_ret;
+		}
 	}
 
 	udelay(100);
 
 	return ret;
+
+cmd_failed:
+	host->err_rintsts = mask;
+	/*
+	 * A command that had data armed and did not reach its data phase
+	 * (no response, a bad one, or no completion at all) leaves the CIU
+	 * -- and possibly the card -- with that transfer pending: abort it
+	 * and reset, so the next command can be issued, and release the
+	 * bounce buffer the data phase would have. A command with no data
+	 * that the CIU never completed (or refused) is reset the same way;
+	 * one that merely got no or a bad response is left alone, since the
+	 * CIU has already returned to idle and the core expects exactly
+	 * that (CMD55 on an eMMC, CMD8 on an old card).
+	 */
+	if (data || !done || (mask & DWMCI_INTMSK_HLE)) {
+		if (data)
+			dwmci_abort_data(host);
+		dwmci_recover(host);
+		if (data && !host->fifo_mode)
+			bounce_buffer_stop(&bbstate);
+	}
+
+	return ret;
+}
+
+/*
+ * The RINTSTS bits that mean the BUS failed, not the host's programming.
+ * RTO is one of them for a BLOCK command (the only kind this set is applied
+ * to): a card that answered CMD17/18/24/25 a moment ago and now does not is
+ * a bus event at a marginal phase, not the CMD55-on-eMMC probe the core
+ * expects to time out.
+ */
+#define DWMCI_BUS_ERR	(DWMCI_INTMSK_RTO | DWMCI_INTMSK_RE | DWMCI_INTMSK_RCRC | \
+			 DWMCI_INTMSK_DCRC | DWMCI_INTMSK_DRTO | \
+			 DWMCI_INTMSK_SBE | DWMCI_INTMSK_EBE)
+
+static bool dwmci_is_block_cmd(const struct mmc_cmd *cmd)
+{
+	switch (cmd->cmdidx) {
+	case MMC_CMD_READ_SINGLE_BLOCK:
+	case MMC_CMD_READ_MULTIPLE_BLOCK:
+	case MMC_CMD_WRITE_SINGLE_BLOCK:
+	case MMC_CMD_WRITE_MULTIPLE_BLOCK:
+		return true;
+	default:
+		return false;
+	}
+}
+
+/*
+ * Issue the command; if it is a block read / write that failed on the bus
+ * and the platform has a bus_error handler, let the handler recover (re-tune,
+ * lower the clock, ...) and re-issue the same command for as long as it says
+ * to. The mmc core has no retry of its own for a block transfer -- one bad
+ * CRC fails the whole `mmc read` -- and the handler is where a platform that
+ * can re-tune or step its card clock turns that into a retry that passes.
+ * The handler's own commands (a STOP, the tuning block) come back through
+ * here with @in_bus_error set and are never themselves retried.
+ */
+static int dwmci_send_cmd_retry(struct dwmci_host *host, struct mmc_cmd *cmd,
+				struct mmc_data *data, void *cur_idmac)
+{
+	int ret, recovered;
+
+	for (;;) {
+		ret = dwmci_send_cmd_common(host, cmd, data, cur_idmac);
+		if (!ret || !data || !host->bus_error || host->in_bus_error ||
+		    !dwmci_is_block_cmd(cmd) ||
+		    !(host->err_rintsts & DWMCI_BUS_ERR))
+			return ret;
+
+		host->in_bus_error = true;
+		recovered = host->bus_error(host, cmd, data, host->err_rintsts);
+		host->in_bus_error = false;
+		if (recovered)
+			return ret;
+	}
 }
 
 #ifdef CONFIG_DM_MMC
@@ -504,10 +919,10 @@ static int dwmci_send_cmd(struct mmc *mmc, struct mmc_cmd *cmd,
 
 	if (host->dma_64bit_address) {
 		ALLOC_CACHE_ALIGN_BUFFER(struct dwmci_idmac64, idmac, buf_size);
-		return dwmci_send_cmd_common(host, cmd, data, idmac);
+		return dwmci_send_cmd_retry(host, cmd, data, idmac);
 	} else {
 		ALLOC_CACHE_ALIGN_BUFFER(struct dwmci_idmac32, idmac, buf_size);
-		return dwmci_send_cmd_common(host, cmd, data, idmac);
+		return dwmci_send_cmd_retry(host, cmd, data, idmac);
 	}
 }
 
@@ -515,7 +930,7 @@ static int dwmci_control_clken(struct dwmci_host *host, bool on)
 {
 	const u32 val = on ? DWMCI_CLKEN_ENABLE | DWMCI_CLKEN_LOW_PWR : 0;
 	const u32 cmd_only_clk = DWMCI_CMD_PRV_DAT_WAIT | DWMCI_CMD_UPD_CLK;
-	int i, timeout = 10000;
+	ulong start = get_timer(0);
 	u32 flags, mask;
 
 	dwmci_writel(host, DWMCI_CLKENA, val);
@@ -526,13 +941,27 @@ static int dwmci_control_clken(struct dwmci_host *host, bool on)
 		flags |= DWMCI_CMD_VOLT_SWITCH;
 	dwmci_writel(host, DWMCI_CMD, flags);
 
-	for (i = 0; i < timeout; i++) {
-		mask = dwmci_readl(host, DWMCI_RINTSTS);
-		if (mask & DWMCI_INTMSK_CDONE) {
-			dwmci_writel(host, DWMCI_RINTSTS, DWMCI_INTMSK_CDONE);
+	/*
+	 * A clock-update command is done when the CIU clears start_cmd -- that
+	 * is what Linux's mci_send_cmd() waits for. It does NOT raise CDONE
+	 * (nothing was sent to the card), which is what this loop used to poll
+	 * for: it never saw one and simply fell out of its 10,000 iterations
+	 * every time. With the data-busy wait the update can also sit behind
+	 * a busy card, hence the busy budget. A CIU that has not taken it by
+	 * then is left as it is and reported: a reset here would drop a clock
+	 * the update was about to enable.
+	 */
+	for (;;) {
+		mask = dwmci_readl(host, DWMCI_CMD);
+		if (!(mask & DWMCI_CMD_START))
 			break;
+		if (get_timer(start) > DWMCI_BUSY_TIMEOUT_MS) {
+			printf("%s: clock update (CLKENA %s) did not complete\n",
+			       host->name, on ? "on" : "off");
+			return -ETIMEDOUT;
 		}
 	}
+	dwmci_writel(host, DWMCI_RINTSTS, DWMCI_INTMSK_CDONE);
 
 	return 0;
 }
@@ -596,7 +1025,135 @@ static int dwmci_setup_bus(struct dwmci_host *host, u32 freq)
 	return 0;
 }
 
+#if CONFIG_IS_ENABLED(DM_REGULATOR)
+/*
+ * Set @reg as close to @target as its constraints allow, refusing anything
+ * outside [@min_uV, @max_uV]. The SD signalling levels are ranges, not
+ * points (Linux: 2.7-3.6 V for "3.3 V", 1.7-1.95 V for "1.8 V"), and a
+ * board's vqmmc rail is often a 3.0 V LDO -- an exact 3300000 request is
+ * refused by the regulator core and would leave the card at 1.8 V.
+ */
+static int dwmci_regulator_set_range(struct udevice *reg, int target,
+				     int min_uV, int max_uV)
+{
+	struct dm_regulator_uclass_plat *uc_pdata = dev_get_uclass_plat(reg);
+	int uV = target;
+
+	if (uc_pdata->max_uV != -ENODATA && uV > uc_pdata->max_uV)
+		uV = uc_pdata->max_uV;
+	if (uc_pdata->min_uV != -ENODATA && uV < uc_pdata->min_uV)
+		uV = uc_pdata->min_uV;
+	if (uV < min_uV || uV > max_uV)
+		return -EINVAL;
+
+	return regulator_set_value(reg, uV);
+}
+
+static int dwmci_set_vqmmc(struct dwmci_host *host, struct mmc *mmc)
+{
+	int target, min_uV, max_uV, cur, ret;
+
+	if (!mmc->vqmmc_supply)
+		return 0;
+
+	if (mmc->signal_voltage == MMC_SIGNAL_VOLTAGE_180) {
+		target = 1800000;
+		min_uV = 1700000;
+		max_uV = 1950000;
+	} else {
+		target = 3300000;
+		min_uV = 2700000;
+		max_uV = 3600000;
+	}
+
+	cur = regulator_get_value(mmc->vqmmc_supply);
+	if (cur < 0)
+		cur = target;
+
+	/*
+	 * Let the platform re-program whatever follows this rail (an IO
+	 * domain) with the HIGHER of the two levels before the rail moves,
+	 * and the final level after -- so it is never set for 1.8 V while
+	 * the pads see more than that.
+	 */
+	if (host->io_voltage) {
+		ret = host->io_voltage(host, max(cur, target), true);
+		if (ret && ret != -ENOSYS && ret != -ENOENT)
+			return ret;
+	}
+
+	ret = dwmci_regulator_set_range(mmc->vqmmc_supply, target, min_uV,
+					max_uV);
+	debug("%s: vqmmc %d -> %d uV: %d\n", __func__, cur, target, ret);
+	if (ret && ret != -ENOSYS)
+		return ret;
+
+	if (host->io_voltage) {
+		ret = host->io_voltage(host, target, false);
+		if (ret && ret != -ENOSYS && ret != -ENOENT)
+			return ret;
+	}
+
+	return 0;
+}
+#else
+static inline int dwmci_set_vqmmc(struct dwmci_host *host, struct mmc *mmc)
+{
+	return 0;
+}
+#endif
+
 #ifdef CONFIG_DM_MMC
+/*
+ * The core cuts vmmc, calls this, then restores vmmc. A card that switched
+ * to 1.8 V only returns to 3.3 V signalling on a power cycle (SD spec), and
+ * on a re-init (`mmc dev`, `mmc rescan`) that is the ONLY way to recover it
+ * -- but the core's own off/on delay is 2 ms, too short for a board whose
+ * card-VDD rail has bulk capacitance to collapse below the reset threshold.
+ * Hold it off long enough here, and put vqmmc back to 3.3 V so the card
+ * powers up in the initial state.
+ */
+static int dwmci_host_power_cycle(struct udevice *dev)
+{
+	struct mmc *mmc = mmc_get_mmc_dev(dev);
+	struct dwmci_host *host = mmc->priv;
+
+	mdelay(host->power_off_ms ? host->power_off_ms : 20);
+
+#if CONFIG_IS_ENABLED(DM_REGULATOR)
+	if (mmc->vqmmc_supply)
+		dwmci_regulator_set_range(mmc->vqmmc_supply, 3300000,
+					  2700000, 3600000);
+	if (host->io_voltage)
+		host->io_voltage(host, 3300000, false);
+#endif
+	mmc->signal_voltage = MMC_SIGNAL_VOLTAGE_330;
+
+	return 0;
+}
+
+/*
+ * DAT0 as the controller sees it: STATUS.data_busy is 1 while the card holds
+ * DAT0 low. The core uses this around CMD11 to see the card take the bus
+ * low for the switch and release it afterwards.
+ */
+static int dwmci_wait_dat0(struct udevice *dev, int state, int timeout_us)
+{
+	struct mmc *mmc = mmc_get_mmc_dev(dev);
+	struct dwmci_host *host = mmc->priv;
+	ulong start = timer_get_us();
+	u32 status;
+
+	for (;;) {
+		status = dwmci_readl(host, DWMCI_STATUS);
+		if (!!(status & DWMCI_BUSY) == !state)
+			return 0;
+		if (timer_get_us() - start > timeout_us)
+			return -ETIMEDOUT;
+		udelay(10);
+	}
+}
+
 static int dwmci_set_ios(struct udevice *dev)
 {
 	struct mmc *mmc = mmc_get_mmc_dev(dev);
@@ -607,9 +1164,18 @@ static int dwmci_set_ios(struct mmc *mmc)
 	struct dwmci_host *host = (struct dwmci_host *)mmc->priv;
 	u32 ctype, regs;
 
-	debug("Bus width = %d, clock: %d\n", mmc->bus_width, mmc->clock);
+	debug("Bus width = %d, clock: %d%s\n", mmc->bus_width, mmc->clock,
+	      mmc->clk_disable ? " (gated)" : "");
 
-	dwmci_setup_bus(host, mmc->clock);
+	/*
+	 * The core gates the card clock around a signal-voltage switch (SD
+	 * spec: >= 5 ms with the clock stopped while VDDIO moves) and while
+	 * the card is powered off; honour that instead of re-enabling it.
+	 */
+	if (mmc->clk_disable)
+		dwmci_control_clken(host, false);
+	else
+		dwmci_setup_bus(host, mmc->clock);
 	switch (mmc->bus_width) {
 	case 8:
 		ctype = DWMCI_CTYPE_8BIT;
@@ -629,6 +1195,10 @@ static int dwmci_set_ios(struct mmc *mmc)
 		regs |= DWMCI_DDR_MODE;
 	else
 		regs &= ~DWMCI_DDR_MODE;
+	if (mmc->signal_voltage == MMC_SIGNAL_VOLTAGE_180)
+		regs |= DWMCI_UHS_VOLT_18V;
+	else
+		regs &= ~DWMCI_UHS_VOLT_18V;
 
 	dwmci_writel(host, DWMCI_UHS_REG, regs);
 
@@ -640,20 +1210,7 @@ static int dwmci_set_ios(struct mmc *mmc)
 			return ret;
 	}
 
-#if CONFIG_IS_ENABLED(DM_REGULATOR)
-	if (mmc->vqmmc_supply) {
-		int ret;
-
-		if (mmc->signal_voltage == MMC_SIGNAL_VOLTAGE_180)
-			ret = regulator_set_value(mmc->vqmmc_supply, 1800000);
-		else
-			ret = regulator_set_value(mmc->vqmmc_supply, 3300000);
-		if (ret && ret != -ENOSYS)
-			return ret;
-	}
-#endif
-
-	return 0;
+	return dwmci_set_vqmmc(host, mmc);
 }
 
 static void dwmci_init_fifo(struct dwmci_host *host)
@@ -738,9 +1295,29 @@ int dwmci_probe(struct udevice *dev)
 	return dwmci_init(mmc);
 }
 
+/*
+ * The core calls this at every (re-)initialisation, after the card power
+ * cycle and before the first command, "to clear old configuration for mmc
+ * rescan". Run the probe-time init again: a full controller reset, the
+ * 400 kHz enumeration clock, FIFO / DMA / timeout registers -- so nothing
+ * the previous session left in the CIU (a tuned mode's state, a transfer
+ * it never completed) carries into the new one. Measured on RK3399: a
+ * re-init that carried the state across wedged at the first command after
+ * the tuning sweep; one that reset here negotiated SDR104 every time.
+ */
+static int dwmci_reinit(struct udevice *dev)
+{
+	struct mmc *mmc = mmc_get_mmc_dev(dev);
+
+	return dwmci_init(mmc);
+}
+
 const struct dm_mmc_ops dm_dwmci_ops = {
 	.send_cmd	= dwmci_send_cmd,
 	.set_ios	= dwmci_set_ios,
+	.wait_dat0	= dwmci_wait_dat0,
+	.host_power_cycle = dwmci_host_power_cycle,
+	.reinit		= dwmci_reinit,
 };
 
 #else

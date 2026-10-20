@@ -2191,6 +2191,71 @@ class TestFunctional(unittest.TestCase):
             }
         self.assertEqual(expected, props)
 
+    @classmethod
+    def _IncompressibleData(cls, size):
+        """Produce deterministic, essentially incompressible test data
+
+        A chain of SHA-256 digests. Deterministic, so the test is
+        reproducible, but with no structure for LZ4 to find, so it
+        compresses to slightly MORE than its input -- the far side of the
+        50% line that decomp-in-place polices.
+
+        Args:
+            size: Number of bytes required
+
+        Returns:
+            bytes of the requested length
+        """
+        out = b''
+        seed = b'binman-decomp-in-place'
+        while len(out) < size:
+            seed = hashlib.sha256(seed).digest()
+            out += seed
+        return out[:size]
+
+    def testDecompInPlace(self):
+        """Test that a ratio worse than 50% passes the in-place check"""
+        self._CheckLz4()
+        data = self._IncompressibleData(4096)
+        self._MakeInputFile('decomp-in-place-ok', data)
+        out = self._DoReadFile('entry/decomp_in_place.dts')
+
+        # The whole point is that the compressed form is NOT smaller than
+        # half the original; check that, not just that binman succeeded
+        self.assertGreater(2 * len(out), len(data))
+
+    def testDecompInPlaceBad(self):
+        """Test that a ratio better than 50% is refused at pack time"""
+        self._CheckLz4()
+        data = b'\0' * 4096
+        self._MakeInputFile('decomp-in-place-bad', data)
+        with self.assertRaises(ValueError) as e:
+            self._DoReadFile('entry/decomp_in_place_bad.dts')
+        self.assertIn("decomp-in-place: 'blob' compresses to", str(e.exception))
+        self.assertIn('must stay above 50.0%', str(e.exception))
+        self.assertIn('from 4096 B', str(e.exception))
+
+    def testDecompInPlaceMissingBintool(self):
+        """Test that an uncheckable in-place entry is refused, not skipped
+
+        The check lives inside the branch taken when the compressor bintool
+        is present. With the bintool absent binman substitutes a 1 KB zero
+        stub, and --allow-missing --ignore-missing (what the u-boot Makefile
+        passes under BINMAN_ALLOW_MISSING) downgrades that to a warning, so
+        the build used to succeed with the check silently never run.
+        """
+        self._CheckLz4()
+        data = self._IncompressibleData(4096)
+        self._MakeInputFile('decomp-in-place-ok', data)
+        with self.assertRaises(ValueError) as e:
+            self._DoTestFile('entry/decomp_in_place.dts',
+                             force_missing_bintools='lz4',
+                             allow_missing=True, ignore_missing=True)
+        self.assertIn("decomp-in-place: cannot check 'blob'", str(e.exception))
+        self.assertIn("the 'lz4' compressor is not available",
+                      str(e.exception))
+        self.assertIn('do not waive it', str(e.exception))
+
     def testFiles(self):
         """Test bringing in multiple files"""
         data = self._DoReadFile('entry/files.dts')
@@ -3057,6 +3122,45 @@ class TestFunctional(unittest.TestCase):
         data = self._RunExtractCmd('section/cbfs/u-boot-dtb', decomp=False)
         dtb = bintool.decompress(data)
         self.assertEqual(EXTRACT_DTB_SIZE, len(dtb))
+
+    def testLzmaAlonePropsPinned(self):
+        """Test that lzma_alone still emits the low-lc stream xPL is sized for
+
+        An xPL that decompresses with SYS_MALLOC_SIMPLE takes the LZMA
+        decoder's probability table out of the fixed SYS_MALLOC_F_LEN arena,
+        and that table is
+
+            (1984 + (0x300 << (lc + lp))) * sizeof(CLzmaProb)
+
+        with CLzmaProb four bytes wide (lib/lzma/Makefile adds
+        -DZ7_LZMA_PROB32) and lc/lp read from the stream's own first byte.  So
+        the flags this bintool passes are not a compression-ratio preference:
+        they set a RUNTIME MEMORY REQUIREMENT on every board whose xPL
+        decompresses what binman packed.
+
+        -lc1 -lp0 needs 14080 bytes.  This tool's own default, -lc3, needs
+        32512 -- more than a 0x8000 arena has left once the phase's own
+        allocations are counted.  Nothing else in the tree pins that choice, so
+        pin it here, at the stream, where an upstream edit to the argument list
+        or a change of tool version both show up.
+
+        lib/lzma/LzmaTools.c carries the other two halves: a static_assert
+        floor, and a runtime check against the stream actually presented.
+        """
+        bintool = self.comp_bintools['lzma_alone']
+        self._CheckBintool(bintool)
+        data = bintool.compress(COMPRESS_DATA)
+
+        # LZMA_Alone header: props[0], then a 4-byte dicSize, then 8-byte size
+        props = data[0]
+        self.assertLess(props, 9 * 5 * 5, 'not a valid LZMA properties byte')
+        lc = props % 9
+        lp = (props // 9) % 5
+        pb = (props // 9) // 5
+        self.assertEqual((1, 0, 0), (lc, lp, pb),
+                         'lzma_alone flags drifted: an xPL sized for lc+lp=1 '
+                         'will refuse this stream at boot')
+        self.assertEqual(14080, (1984 + (0x300 << (lc + lp))) * 4)
 
     def testExtractBadEntry(self):
         """Test extracting a bad section path"""
@@ -5807,6 +5911,82 @@ fdt         fdtmap                Extract the devicetree blob from the fdtmap
         fname = tools.get_output_filename('binman-fake/missing.elf')
         self.assertTrue(os.path.exists(fname))
 
+    def testFitSplitElfCompress(self):
+        """Test fit,compress on a split-elf generator
+
+        The ATF template asks for lzma, the TEE template does not, so the
+        same build shows the compressed and the untouched shape side by side:
+        every atf-N node carries `compression = "lzma"` over data that
+        decompresses to exactly the ELF segment, while every tee-N node keeps
+        `compression = "none"` over the raw segment.
+        """
+        if not elf.ELF_TOOLS:
+            self.skipTest('Python elftools not available')
+        bintool = self.comp_bintools['lzma_alone']
+        self._CheckBintool(bintool)
+        entry_args = {
+            'of-list': 'test-fdt1 test-fdt2',
+            'default-dt': 'test-fdt2',
+            'atf-bl31-path': 'bl31.elf',
+            'tee-os-path': 'tee.elf',
+        }
+        test_subdir = os.path.join(self._indir, TEST_FDT_SUBDIR)
+        data = self._DoReadFileDtb(
+            'fit/split_elf_compress.dts',
+            entry_args=entry_args,
+            extra_indirs=[test_subdir])[0]
+        fit_data = data[len(U_BOOT_DATA):-len(U_BOOT_NODTB_DATA)]
+        dtb = fdt.Fdt.FromData(fit_data)
+        dtb.Scan()
+
+        base_keys = {'description', 'type', 'arch', 'os', 'compression',
+                     'data', 'load'}
+
+        elf_data = tools.read_file(os.path.join(self._indir, 'bl31.elf'))
+        segments, entry = elf.read_loadable_segments(elf_data)
+        self.assertEqual(2, len(segments))
+        for seq, (_, start, seg_data) in enumerate(segments):
+            node = dtb.GetNode(f'/images/atf-{seq + 1}')
+            self.assertEqual(base_keys | ({'entry'} if seq == 0 else set()),
+                             node.props.keys())
+            self.assertNotIn('fit,compress', node.props)
+            self.assertEqual('lzma', node.props['compression'].value)
+            self.assertEqual(start,
+                             fdt_util.fdt32_to_cpu(node.props['load'].value))
+            comp = node.props['data'].bytes
+            # Compressed, not merely relabelled: the bytes differ from the
+            # segment and decompress back to it
+            self.assertNotEqual(seg_data, comp)
+            self.assertEqual(seg_data, bintool.decompress(comp))
+            hash_node = node.FindNode('hash')
+            self.assertIsNotNone(hash_node)
+            self.assertEqual({'algo', 'value'}, hash_node.props.keys())
+            self.assertEqual(hashlib.sha256(comp).digest(),
+                             hash_node.props['value'].bytes)
+
+        # The control: a generator without fit,compress is untouched
+        elf_data = tools.read_file(os.path.join(self._indir, 'tee.elf'))
+        segments, entry = elf.read_loadable_segments(elf_data)
+        for seq, (_, start, seg_data) in enumerate(segments):
+            node = dtb.GetNode(f'/images/tee-{seq + 1}')
+            self.assertEqual('none', node.props['compression'].value)
+            self.assertEqual(seg_data, node.props['data'].bytes)
+
+    def testFitSplitElfCompressBadAlgo(self):
+        """Test fit,compress with an algorithm binman has no tool for"""
+        if not elf.ELF_TOOLS:
+            self.skipTest('Python elftools not available')
+        err = self._check_bad_fit('fit/split_elf_compress_bad_algo.dts')
+        self.assertIn("Node '/binman/fit': fit,compress: unknown algorithm "
+                      "'rot13'", err)
+
+    def testFitSplitElfCompressNotSplitElf(self):
+        """Test fit,compress on a generator that is not split-elf"""
+        err = self._check_bad_fit('fit/split_elf_compress_not_elf.dts')
+        self.assertIn("Node '/binman/fit': subnode 'images/@fdt-SEQ': "
+                      "fit,compress is only supported by the 'split-elf' "
+                      'operation', err)
+
     def testMkimageMissingBlob(self):
         """Test using mkimage to build an image"""
         with terminal.capture() as (stdout, stderr):
@@ -6781,6 +6961,60 @@ fdt         fdtmap                Extract the devicetree blob from the fdtmap
         self.assertEqual('atf-1', node.props['firmware'].value)
         self.assertEqual(['u-boot', 'tee', 'atf-2'],
                          fdt_util.GetStringList(node, 'loadables'))
+
+    def testFitFirmwareStrict(self):
+        """Test fit,firmware-strict with the first firmware entry present"""
+        if not elf.ELF_TOOLS:
+            self.skipTest('Python elftools not available')
+        entry_args = {
+            'of-list': 'test-fdt1',
+            'default-dt': 'test-fdt1',
+            'atf-bl31-path': 'bl31.elf',
+        }
+        test_subdir = os.path.join(self._indir, TEST_FDT_SUBDIR)
+        with terminal.capture() as (stdout, stderr):
+            data = self._DoReadFileDtb(
+                'fit/firmware_strict.dts',
+                entry_args=entry_args,
+                extra_indirs=[test_subdir])[0]
+
+        dtb = fdt.Fdt.FromData(data)
+        dtb.Scan()
+
+        # The directive changes nothing when the first entry is valid
+        node = dtb.GetNode('/configurations/conf-strict-1')
+        self.assertEqual('atf-1', node.props['firmware'].value)
+        self.assertEqual(['blob', 'u-boot', 'atf-2'],
+                         fdt_util.GetStringList(node, 'loadables'))
+        self.assertNotIn('fit,firmware-strict', node.props)
+
+    def testFitFirmwareStrictMissing(self):
+        """Test fit,firmware-strict refuses when the first entry is missing
+
+        Without the directive a missing atf-bl31 elects 'blob' as the
+        firmware. With it, binman raises even though missing blobs are
+        allowed and faked, because the image would be wrong rather than
+        merely incomplete.
+        """
+        if not elf.ELF_TOOLS:
+            self.skipTest('Python elftools not available')
+        entry_args = {
+            'of-list': 'test-fdt1',
+            'default-dt': 'test-fdt1',
+            'atf-bl31-path': 'missing.elf',
+        }
+        test_subdir = os.path.join(self._indir, TEST_FDT_SUBDIR)
+        with terminal.capture() as (stdout, stderr):
+            with self.assertRaises(ValueError) as exc:
+                self._DoTestFile('fit/firmware_strict.dts',
+                                 entry_args=entry_args,
+                                 extra_indirs=[test_subdir],
+                                 allow_missing=True, allow_fake_blobs=True)
+        self.assertIn(
+            "Node '/binman/fit': subnode 'configurations/@conf-strict-SEQ': "
+            "fit,firmware-strict: first entry 'atf-1' is not a valid entry, "
+            'refusing to elect a later one as firmware',
+            str(exc.exception))
 
     def testTooldir(self):
         """Test that we can specify the tooldir"""

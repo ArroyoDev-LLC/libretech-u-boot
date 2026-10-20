@@ -36,6 +36,7 @@ enum dfu_layout {
 	DFU_RAM_ADDR,
 	DFU_SKIP,
 	DFU_SCRIPT,
+	DFU_RAM_LZMA,
 };
 
 enum dfu_op {
@@ -84,6 +85,9 @@ struct nand_internal_data {
 struct ram_internal_data {
 	unsigned long	start;
 	unsigned int	size;
+	/* DFU_RAM_LZMA: where the compressed download lands, and how much did */
+	unsigned long	staging;
+	u64		staged;
 };
 
 struct sf_internal_data {
@@ -153,6 +157,13 @@ struct dfu_entity {
 
 	int (*flush_medium)(struct dfu_entity *dfu);
 	unsigned int (*poll_timeout)(struct dfu_entity *dfu);
+
+	/*
+	 * Optional: where @len bytes at medium @offset live in memory, when
+	 * the medium is memory a controller can DMA to and from directly
+	 * (dfu_ram's plain layout); NULL when it cannot take this span.
+	 */
+	void *(*direct_buf)(struct dfu_entity *dfu, u64 offset, long len);
 
 	void (*free_entity)(struct dfu_entity *dfu);
 
@@ -309,6 +320,25 @@ int dfu_get_alt(char *name);
  */
 int dfu_init_env_entities(char *interface, char *devstr);
 
+/**
+ * dfu_bare_phase() - DFU runs in a phase built without an environment
+ *
+ * True only in an xPL phase whose own ENV_SUPPORT symbol is off
+ * (CONFIG_IS_ENABLED() is phase-aware: SPL_ENV_SUPPORT in SPL, TPL_/VPL_ in
+ * TPL/VPL, and ENV_SUPPORT, which is always y, in U-Boot proper).  Such a
+ * phase has no environment, no shell and no filesystem layer for DFU, so the
+ * caller hands the alternate list to dfu_alt_init()/dfu_alt_add() in C, the
+ * DFU core reads no environment variable, and script and filesystem entities
+ * are refused.  Every other build -- U-Boot proper, and an xPL phase with an
+ * environment -- compiles the code these tests guard exactly as before.
+ *
+ * Return:	true in a bare xPL phase, false otherwise (a compile-time constant)
+ */
+static inline bool dfu_bare_phase(void)
+{
+	return !CONFIG_IS_ENABLED(ENV_SUPPORT);
+}
+
 unsigned char *dfu_get_buf(struct dfu_entity *dfu);
 unsigned char *dfu_free_buf(void);
 unsigned long dfu_get_buf_size(void);
@@ -317,7 +347,22 @@ bool dfu_usb_get_reset(void);
 #ifdef CONFIG_DFU_TIMEOUT
 unsigned long dfu_get_timeout(void);
 void dfu_set_timeout(unsigned long);
+/* ms since the timeout was last set */
+unsigned long dfu_timeout_elapsed(void);
+/* the timeout each host request restarts (0, the default: none once a host is seen) */
+void dfu_set_idle_timeout(unsigned long);
+/* a host request or bulk progress: restart the timeout as the idle timeout */
+void dfu_host_active(void);
 #endif
+
+/**
+ * dfu_background() - a DFU back end's idle work, from the gadget loop
+ *
+ * Called on every pass of run_usb_dnl_gadget()'s loop, between USB events,
+ * so a back end can process what has arrived while the controller receives
+ * the next block (dfu_ram's LZMA layout unpacks this way). Weak no-op.
+ */
+void dfu_background(void);
 
 /**
  * dfu_read() - read from dfu entity
@@ -354,6 +399,42 @@ int dfu_read(struct dfu_entity *de, void *buf, int size, int blk_seq_num);
  * Return:		0 for success, -1 for error
  */
 int dfu_write(struct dfu_entity *de, void *buf, int size, int blk_seq_num);
+
+/**
+ * dfu_direct_buf() - where the next transfer block can go without a copy
+ *
+ * For an entity with a direct_buf op and nothing buffered: the memory that
+ * the next @size bytes of a download (@read false) or an upload (@read true)
+ * occupy, so a USB controller can DMA the data stage straight to or from it.
+ * The caller then reports the block with dfu_write_direct() /
+ * dfu_read_direct() instead of dfu_write() / dfu_read().
+ *
+ * @de:		dfu entity
+ * @size:	block size
+ * @read:	true for an upload
+ * Return:	the memory, or NULL when the block must take the copying path
+ */
+void *dfu_direct_buf(struct dfu_entity *de, int size, bool read);
+
+/**
+ * dfu_write_direct() - account for a download block already in place
+ *
+ * @de:			dfu entity
+ * @size:		bytes the controller wrote at dfu_direct_buf()
+ * @blk_seq_num:	block sequence number
+ * Return:		0 for success, -1 for error
+ */
+int dfu_write_direct(struct dfu_entity *de, int size, int blk_seq_num);
+
+/**
+ * dfu_read_direct() - account for an upload block sent from its place
+ *
+ * @de:			dfu entity
+ * @size:		requested block size
+ * @blk_seq_num:	block sequence number
+ * Return:		bytes in this block (less than @size at the end), or -1
+ */
+int dfu_read_direct(struct dfu_entity *de, int size, int blk_seq_num);
 
 /**
  * dfu_flush() - flush to dfu entity
@@ -405,6 +486,33 @@ void dfu_flush_callback(struct dfu_entity *dfu);
  * @msg:	the message of the error
  */
 void dfu_error_callback(struct dfu_entity *dfu, const char *msg);
+
+/**
+ * dfu_board_manifest_check() - weak hook: may this download be manifested?
+ *
+ * Called at the end of a download (the zero-length DNLOAD that leads to the
+ * manifest step), before the buffered bytes are written to the medium (for
+ * a script entity, before they run).  A non-zero return refuses the
+ * download: the host's GETSTATUS reads bStatus errTARGET, bState dfuERROR,
+ * the buffered bytes are discarded, and the session stays in DFU (the host
+ * clears the error with CLRSTATUS).  The default accepts everything.
+ *
+ * @dfu:	the entity downloaded to
+ * @buf:	the bytes not yet written to the medium
+ * @len:	their count
+ * @written:	bytes of this download already written to the medium (0 when
+ *		the whole download is still in @buf)
+ */
+int dfu_board_manifest_check(struct dfu_entity *dfu, const void *buf,
+			     long len, u64 written);
+
+/**
+ * dfu_manifest_check() - run dfu_board_manifest_check() on @dfu's download
+ *
+ * Return: 0 to manifest; -EBADMSG when refused, in which case the
+ * transaction has been cleaned up and nothing will be written.
+ */
+int dfu_manifest_check(struct dfu_entity *dfu);
 
 int dfu_transaction_initiate(struct dfu_entity *dfu, bool read);
 void dfu_transaction_cleanup(struct dfu_entity *dfu);

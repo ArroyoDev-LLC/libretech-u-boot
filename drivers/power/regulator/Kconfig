@@ -542,7 +542,7 @@ config DM_REGULATOR_CPCAP
 
 config DM_REGULATOR_MT6357
 	bool "Enable driver for MediaTek MT6357 PMIC regulators"
-	depends on DM_REGULATOR && DM_PMIC_MTK_PWRAP
+	depends on DM_REGULATOR && (DM_PMIC_MTK_PWRAP || MTK_PMIC_WRAP)
 	help
 	  Say y here to select this option to enable the power regulator of
 	  MediaTek MT6357 PMIC.
@@ -551,7 +551,7 @@ config DM_REGULATOR_MT6357
 
 config DM_REGULATOR_MT6359
 	bool "Enable driver for MediaTek MT6359 PMIC regulators"
-	depends on DM_REGULATOR && DM_PMIC_MTK_PWRAP
+	depends on DM_REGULATOR && (DM_PMIC_MTK_PWRAP || MTK_PMIC_WRAP)
 	help
 	  Say y here to select this option to enable the power regulator of
 	  MediaTek MT6359 PMIC.

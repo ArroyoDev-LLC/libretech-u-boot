@@ -8,11 +8,13 @@
 #include <cyclic.h>
 #include <div64.h>
 #include <dm.h>
+#include <env.h>
 #include <errno.h>
 #include <hang.h>
 #include <log.h>
 #include <sysreset.h>
 #include <time.h>
+#include <vsprintf.h>
 #include <wdt.h>
 #include <dm/device-internal.h>
 #include <dm/lists.h>
@@ -196,6 +198,55 @@ int wdt_stop_all(void)
 
 	return ret;
 }
+
+#if !defined(CONFIG_XPL_BUILD)
+__weak bool board_wdt_handoff(bool run)
+{
+	return false;
+}
+
+/*
+ * Platform policy (design/rules/bootloader/policy.md "Watchdog hand-off"):
+ * enter the OS with every reachable watchdog stopped unless wdt_handoff=1.
+ * ONE decision, taken here; a board's non-DM watchdog follows it through
+ * board_wdt_handoff().  One line per boot, and only if a watchdog was handled:
+ * a build with no running DM watchdog and no board hook prints nothing.
+ */
+void wdt_handoff_to_os(void)
+{
+	bool run = env_get_yesno("wdt_handoff") == 1;
+	struct udevice *dev;
+	struct uclass *uc;
+	bool handled;
+
+	handled = board_wdt_handoff(run);
+
+	if (!uclass_get(UCLASS_WDT, &uc)) {
+		uclass_foreach_dev(dev, uc) {
+			struct wdt_priv *priv;
+
+			if (!device_active(dev))
+				continue;
+			priv = dev_get_uclass_priv(dev);
+			if (!priv->running)
+				continue;
+			handled = true;
+			if (run)
+				wdt_reset(dev);
+			else
+				wdt_stop(dev);
+		}
+	}
+
+	if (!handled)
+		return;
+
+	if (run)
+		printf("watchdog: handed to the OS running (wdt_handoff=1)\n");
+	else
+		printf("watchdog: stopped before the OS (set wdt_handoff=1 to hand it over running)\n");
+}
+#endif
 
 int wdt_reset(struct udevice *dev)
 {

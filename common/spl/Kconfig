@@ -1387,6 +1387,76 @@ config SPL_RAM_DEVICE
 	  be already in memory when SPL takes over, e.g. loaded by the boot
 	  ROM.
 
+config SPL_USBFLASH
+	bool "USB flash session (DFU, UMS, script alternate) on a USB boot"
+	depends on SPL_DFU && SPL_DFU_RAM && SPL_MMC && DFU_TIMEOUT
+	depends on !SPL_ENV_SUPPORT
+	default y if ARCH_MESON
+	help
+	  The SPL serves a USB flash session before it continues the boot:
+	  DFU with RAM alternates and the eMMC/SD alternates that answer, a
+	  `script` alternate taking one protocol line (<usbflash-proto.h>),
+	  and, with SPL_USB_FUNCTION_MASS_STORAGE, UMS of an MMC device.  The
+	  SoC family runs it from its SPL on a
+	  USB boot and supplies its alternate names, RAM layout, timeout and
+	  reset (<spl_usbflash.h>).  No environment: the alternate list is
+	  built in C.
+
+config TPL_XPL_BOOTLOG
+	bool "TPL: keep the UART output in the xPL boot log"
+	depends on TPL_SERIAL
+	help
+	  Every byte the TPL writes to its UART is kept (<xpl_bootlog.h>):
+	  in the TPL's .data until DRAM is up, then at XPL_BOOTLOG_ADDR, so
+	  the SPL can replay the boot from the TPL's first line on a console
+	  that starts later. The UART driver feeds it (ns16550 today), and the
+	  TPL calls xpl_bootlog_dram_ready() once DRAM init succeeded.
+
+config TPL_XPL_BOOTLOG_EARLY_SIZE
+	int "TPL: bytes kept before DRAM is up"
+	depends on TPL_XPL_BOOTLOG
+	default 256
+	help
+	  The TPL's .data holds these, and the TPL shares the idblock with
+	  the SPL. The RK3399 TPL prints 166 bytes in all.
+
+config SPL_XPL_BOOTLOG
+	bool "SPL: append to the xPL boot log and replay it in the flash session"
+	depends on SPL_SERIAL
+	help
+	  The SPL appends its own UART output to the boot log this boot's TPL
+	  started in DRAM, and the family's USB flash session can replay the
+	  whole log into the CDC ACM console when that console starts
+	  (SPL_USB_GADGET_DNL_ACM).
+
+config XPL_BOOTLOG_ADDR
+	hex "DRAM address of the xPL boot log"
+	depends on TPL_XPL_BOOTLOG || SPL_XPL_BOOTLOG
+
+config XPL_BOOTLOG_SIZE
+	hex "Size of the xPL boot log in DRAM, header included"
+	depends on TPL_XPL_BOOTLOG || SPL_XPL_BOOTLOG
+	default 0x10000
+
+config SPL_USBFLASH_IDLE_TIMEOUT_MS
+	int "USB flash session: ms of host silence that end it"
+	depends on SPL_USBFLASH
+	default 60000
+	help
+	  Once a host has sent its first request the session used to wait
+	  for it forever: a host that crashed or quit left the board in the
+	  SPL until it was power-cycled. With this, that many ms with no DFU
+	  request and no bulk progress end the session and the boot goes on,
+	  as when no host came. 0 waits forever, as before.
+
+config SPL_USBFLASH_WRITE
+	bool
+	depends on SPL_USBFLASH && SPL_MMC_WRITE
+	help
+	  The flash session's MMC alternates take DFU downloads and its UMS
+	  may be read-write.  Selected by a family's flashing targets (Meson:
+	  SPL_MESON_USBFLASH_WRITE).
+
 config SPL_PCI_DFU
 	bool "PCIe boot support"
 	depends on SPL_PCI_ENDPOINT
@@ -1569,6 +1639,17 @@ config SPL_SPI_FLASH_MTD
 	bool "Support for SPI flash MTD drivers in SPL"
 	help
 	  Enable support for SPI flash MTD drivers in SPL.
+
+config SPL_SPI_FLASH_BAR
+	bool "SPI flash Bank/Extended address register support in SPL"
+	depends on !SPL_SPI_FLASH_TINY
+	help
+	  Enable the SPI flash Bank/Extended address register support in SPL.
+	  Bank/Extended address registers access flash > 16MiB in 3-byte
+	  addressing. Mirrors SPI_FLASH_BAR for the SPL build so a >16MiB part
+	  uses 3-byte BAR addressing instead of switching to 4-byte (EN4B) —
+	  the latter makes the command phase 5 bytes (non-word-aligned) and the
+	  zynq QSPI word-granular RX drain shifts read data by 3 bytes.
 
 config SPL_SPI_LOAD
 	bool "Support loading from SPI flash"

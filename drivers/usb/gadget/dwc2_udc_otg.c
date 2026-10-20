@@ -23,6 +23,7 @@
 #include <log.h>
 #include <malloc.h>
 #include <reset.h>
+#include <wait_bit.h>
 #include <dm/device_compat.h>
 #include <dm/devres.h>
 #include <linux/bug.h>
@@ -209,6 +210,7 @@ static void udc_reinit(struct dwc2_udc *dev)
 
 		ep->desc = 0;
 		ep->stopped = 0;
+		ep->in_hw = false;
 		INIT_LIST_HEAD(&ep->queue);
 		ep->pio_irqs = 0;
 	}
@@ -426,6 +428,9 @@ static void nuke(struct dwc2_ep *ep, int status)
 
 	debug("%s: %s %p\n", __func__, ep->ep.name, ep);
 
+	/* Stop the head's transfer and count what of it was sent */
+	dwc2_ep_in_cancel_head(ep);
+
 	/* called with irqs blocked */
 	while (!list_empty(&ep->queue)) {
 		req = list_entry(ep->queue.next, struct dwc2_request, queue);
@@ -469,7 +474,13 @@ static void reconfig_usbd(struct dwc2_udc *dev)
 	u32 rx_fifo_sz, tx_fifo_sz, np_tx_fifo_sz;
 	u32 max_hw_ep;
 	int pdata_hw_ep;
+	u32 fifo_depth, fifo_end, start;
+	bool legacy_map;
+	/* reconfig_usbd() runs on every bus reset: report a misfit once */
+	static bool legacy_map_reported;
 
+	/* Count each programmed IN head before the core reset clears it */
+	dwc2_ep_in_count_before_reset(dev);
 	dwc2_core_reset(reg);
 
 	debug("Resetting OTG controller\n");
@@ -477,7 +488,11 @@ static void reconfig_usbd(struct dwc2_udc *dev)
 	dflt_gusbcfg =
 		0<<15		/* PHY Low Power Clock sel*/
 		|1<<14		/* Non-Periodic TxFIFO Rewind Enable*/
-		|0x5<<10	/* Turnaround time*/
+#ifdef CONFIG_USB_GADGET_DWC2_OTG_PHY_BUS_WIDTH_8
+		|0x9<<10	/* Turnaround time: 9 for an 8-bit UTMI+ PHY */
+#else
+		|0x5<<10	/* Turnaround time: 5 for a 16-bit UTMI+ PHY */
+#endif
 		|0<<9 | 0<<8	/* [0:HNP disable,1:HNP enable][ 0:SRP disable*/
 				/* 1:SRP enable] H1= 1,1*/
 		|0<<7		/* Ulpi DDR sel*/
@@ -560,14 +575,46 @@ static void reconfig_usbd(struct dwc2_udc *dev)
 		pr_warn("Got %d hw endpoint but %d tx-fifo-size in array !!\n",
 			max_hw_ep, pdata_hw_ep);
 
+	/*
+	 * Lay the IN endpoint TX FIFOs end to end after the RX and
+	 * non-periodic TX FIFOs, as Linux dwc2_hsotg_init_fifo()
+	 * (drivers/usb/dwc2/gadget.c) does. The start address used to be
+	 * rx + np_tx + depth(i) * i, which is right only when every entry
+	 * of g-tx-fifo-size is the same. With a non-uniform array the FIFOs
+	 * overlapped: on Meson (192 / 128 / 128 128 16 16 16) DIEPTXF3 began
+	 * at word 352, inside DIEPTXF1's 320..447.
+	 *
+	 * The whole map must fit the core's FIFO RAM (GHWCFG3.DfifoDepth,
+	 * which Linux uses as fifo_mem). If it does not, say so and keep the
+	 * old start addresses, so a board whose map never fitted keeps the
+	 * layout it has always had. For a uniform array the two layouts are
+	 * the same.
+	 */
+	fifo_depth = FIELD_GET(GHWCFG3_DFIFO_DEPTH_MASK,
+			       readl(&reg->global_regs.ghwcfg3));
+	fifo_end = rx_fifo_sz + np_tx_fifo_sz;
+	for (i = 0; i < max_hw_ep; i++)
+		fifo_end += pdata_hw_ep ? dev->pdata->tx_fifo_sz_array[i] : tx_fifo_sz;
+	legacy_map = fifo_depth && fifo_end > fifo_depth;
+	if (legacy_map && !legacy_map_reported) {
+		pr_err("dwc2: FIFO map needs %u words, GHWCFG3.DfifoDepth is %u: keeping the legacy TX FIFO start addresses\n",
+		       fifo_end, fifo_depth);
+		legacy_map_reported = true;
+	}
+
+	start = rx_fifo_sz + np_tx_fifo_sz;
 	for (i = 0; i < max_hw_ep; i++) {
 		if (pdata_hw_ep)
 			tx_fifo_sz = dev->pdata->tx_fifo_sz_array[i];
 
+		if (legacy_map)
+			start = rx_fifo_sz + np_tx_fifo_sz + tx_fifo_sz * i;
+
 		writel(FIELD_PREP(FIFOSIZE_DEPTH_MASK, tx_fifo_sz) |
-		       FIELD_PREP(FIFOSIZE_STARTADDR_MASK,
-				  rx_fifo_sz + np_tx_fifo_sz + tx_fifo_sz * i),
+		       FIELD_PREP(FIFOSIZE_STARTADDR_MASK, start),
 		       &reg->global_regs.dptxfsizn[i]);
+
+		start += tx_fifo_sz;
 	}
 	/* Flush the RX FIFO */
 	dwc2_flush_rx_fifo(reg);
@@ -659,6 +706,7 @@ static int dwc2_ep_enable(struct usb_ep *_ep,
 
 	_ep->desc = desc;
 	ep->stopped = 0;
+	ep->in_hw = false;
 	ep->desc = desc;
 	ep->pio_irqs = 0;
 	ep->ep.maxpacket = le16_to_cpu(get_unaligned(&desc->wMaxPacketSize));
@@ -761,7 +809,17 @@ static int dwc2_dequeue(struct usb_ep *_ep, struct usb_request *_req)
 		return -EINVAL;
 	}
 
-	done(ep, req, -ECONNRESET);
+	if (ep->queue.next == &req->queue && ep_is_in(ep)) {
+		/* The hardware holds this one: stop it, count what was sent */
+		dwc2_ep_in_cancel_head(ep);
+		done(ep, req, -ECONNRESET);
+		/* ... and start the next, which nothing else would */
+		if (!list_empty(&ep->queue) && !ep->stopped)
+			setdma_tx(ep, list_entry(ep->queue.next,
+						 struct dwc2_request, queue));
+	} else {
+		done(ep, req, -ECONNRESET);
+	}
 
 	spin_unlock_irqrestore(&ep->dev->lock, flags);
 	return 0;

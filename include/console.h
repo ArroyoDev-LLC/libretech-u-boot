@@ -26,6 +26,26 @@ int disable_ctrlc(int);	/* 1 to disable, 0 to enable Control-C detect */
 int confirm_yesno(void);        /*  1 if input is "y", "Y", "yes" or "YES" */
 
 /**
+ * console_silent_defeat() - un-silence the console because the boot failed
+ *
+ * Silence is a property of a SUCCESSFUL boot. Call this from a path that has
+ * established the board will not reach an OS, so that the failure text which
+ * follows is actually seen. It prints one line naming @why and clears
+ * GD_FLG_SILENT; it is a no-op when the console is not silent, and a compiled
+ * -out no-op when CONFIG_SILENT_CONSOLE is disabled.
+ *
+ * The 'silent' environment variable is NOT modified -- the next boot is quiet
+ * again.
+ *
+ * @why: short human-readable reason, e.g. "no bootable OS found"
+ */
+#ifdef CONFIG_SILENT_CONSOLE
+void console_silent_defeat(const char *why);
+#else
+static inline void console_silent_defeat(const char *why) { }
+#endif
+
+/**
  * console_search_dev() - search for stdio device with given flags and name
  * @flags: device flags as per input/output/system
  * @name: device name

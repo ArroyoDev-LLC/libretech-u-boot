@@ -3,4 +3,13 @@
  * Copyright (c) 2020 Amarula Solutions(India)
  */
 
+/*
+ * The shared file's FIT `fdt-1` node packs the board DTB by its of-list
+ * name; this build's CONFIG_OF_LIST is rk3399-roc-pc-mezzanine alone, so
+ * name that tree, not the bare board's (which binman would then fail to
+ * find). Both macros before the #include -- see their definition there.
+ */
+#define ROC_PC_FIT_FDT_FILE	"rockchip/rk3399-roc-pc-mezzanine.dtb"
+#define ROC_PC_FIT_FDT_DESC	"fdt-rockchip/rk3399-roc-pc-mezzanine"
+
 #include "rk3399-roc-pc-u-boot.dtsi"

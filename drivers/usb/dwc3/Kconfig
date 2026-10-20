@@ -14,6 +14,25 @@ config USB_DWC3_GADGET
 	depends on USB_GADGET
 	select USB_GADGET_DUALSPEED
 
+config USB_DWC3_SS_FALLBACK_MS
+	int "Fall back to high speed when SuperSpeed does not connect (ms)"
+	depends on USB_DWC3_GADGET
+	default 0
+	help
+	  A gadget started at SuperSpeed that the host has not sent a SETUP
+	  to after this many milliseconds is restarted at high speed, over the USB 2
+	  PHY. Covers a SuperSpeed link that fails to train (a reversed plug
+	  with no orientation, a link stuck in Compliance mode, a host port
+	  that never trains), where otherwise the host sees no device at all.
+	  0 keeps the gadget at SuperSpeed until it connects.
+
+config SPL_USB_DWC3_SS_FALLBACK_MS
+	int "Fall back to high speed when SuperSpeed does not connect, in SPL (ms)"
+	depends on USB_DWC3_GADGET && SPL
+	default 0
+	help
+	  USB_DWC3_SS_FALLBACK_MS for the SPL.
+
 comment "Platform Glue Driver Support"
 
 config USB_DWC3_OMAP

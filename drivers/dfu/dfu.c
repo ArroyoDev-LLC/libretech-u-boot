@@ -14,6 +14,8 @@
 #include <fat.h>
 #include <dfu.h>
 #include <hash.h>
+#include <asm/cache.h>
+#include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/compiler.h>
 #include <linux/printk.h>
@@ -42,6 +44,24 @@ static int on_dfu_alt_info(const char *name, const char *value, enum env_op op,
 	return 0;
 }
 U_BOOT_ENV_CALLBACK(dfu_alt_info, on_dfu_alt_info);
+
+/*
+ * Every environment read of the DFU core goes through here.  In a bare xPL
+ * phase (dfu_bare_phase(): xPL built without its own ENV_SUPPORT) there is no
+ * environment: the caller hands the alternate list to dfu_alt_init()/
+ * dfu_alt_add() in C, and the buffer size and the hash take their compiled-in
+ * defaults (CONFIG_SYS_DFU_DATA_BUF_SIZE, no hash), so nothing stored on the
+ * board can reach that session, and dfu_init_env_entities() has no list to
+ * read and refuses with -EINVAL.  With an environment (U-Boot proper, or an
+ * xPL phase that builds one) this is env_get() as before.
+ */
+static char *dfu_env_get(const char *name)
+{
+	if (dfu_bare_phase())
+		return NULL;
+
+	return env_get(name);
+}
 
 /*
  * The purpose of the dfu_flush_callback() function is to
@@ -88,14 +108,38 @@ __weak bool dfu_usb_get_reset(void)
 }
 
 #ifdef CONFIG_DFU_TIMEOUT
+/*
+ * The timeout counts from the moment it is set, so setting it again restarts
+ * it. f_dfu does that on every request (dfu_host_active()), with the idle
+ * timeout: 0 by default, which keeps a session that has a host for as long as
+ * it likes; a non-zero idle timeout ends a session whose host went quiet.
+ */
+static unsigned long dfu_timeout_start, dfu_idle_timeout;
+
 void dfu_set_timeout(unsigned long timeout)
 {
 	dfu_timeout = timeout;
+	dfu_timeout_start = get_timer(0);
 }
 
 unsigned long dfu_get_timeout(void)
 {
 	return dfu_timeout;
+}
+
+unsigned long dfu_timeout_elapsed(void)
+{
+	return get_timer(dfu_timeout_start);
+}
+
+void dfu_set_idle_timeout(unsigned long timeout)
+{
+	dfu_idle_timeout = timeout;
+}
+
+void dfu_host_active(void)
+{
+	dfu_set_timeout(dfu_idle_timeout);
 }
 #endif
 
@@ -170,9 +214,15 @@ int dfu_init_env_entities(char *interface, char *devstr)
 	dfu_alt_info_changed = false;
 
 #ifdef CONFIG_SET_DFU_ALT_INFO
-	set_dfu_alt_info(interface, devstr);
+	/*
+	 * The board hook writes the list into the environment.  A bare xPL
+	 * session has none and builds its list in C (see dfu_env_get()), so
+	 * the hook is not referenced there.
+	 */
+	if (!dfu_bare_phase())
+		set_dfu_alt_info(interface, devstr);
 #endif
-	str_env = env_get("dfu_alt_info");
+	str_env = dfu_env_get("dfu_alt_info");
 	if (!str_env) {
 		pr_err("\"dfu_alt_info\" env variable not defined!\n");
 		return -EINVAL;
@@ -197,7 +247,6 @@ done:
 
 static unsigned char *dfu_buf;
 static unsigned long dfu_buf_size;
-static enum dfu_device_type dfu_buf_device_type;
 
 unsigned char *dfu_free_buf(void)
 {
@@ -211,33 +260,49 @@ unsigned long dfu_get_buf_size(void)
 	return dfu_buf_size;
 }
 
+/* This entity's share of the shared buffer: all of it, or its max_buf_size */
+static unsigned long dfu_entity_buf_size(struct dfu_entity *dfu)
+{
+	if (dfu->max_buf_size && dfu_buf_size > dfu->max_buf_size)
+		return dfu->max_buf_size;
+
+	return dfu_buf_size;
+}
+
+/*
+ * One buffer for every entity, sized "dfu_bufsiz" (or
+ * CONFIG_SYS_DFU_DATA_BUF_SIZE) capped at the asking entity's max_buf_size.
+ * It only grows: an entity that takes less uses its share of a larger one
+ * (dfu_entity_buf_size()). Freeing and re-taking it whenever the device type
+ * changed -- every pass between a RAM and an MMC alternate, from
+ * dfu_fill_entity() on -- leaked a whole buffer each time under SPL
+ * malloc_simple, which never frees, and fragmented a full heap.
+ */
 unsigned char *dfu_get_buf(struct dfu_entity *dfu)
 {
+	unsigned long want = 0;
 	char *s;
 
-	/* manage several entity with several contraint */
-	if (dfu_buf && dfu->dev_type != dfu_buf_device_type)
-		dfu_free_buf();
+	s = dfu_env_get("dfu_bufsiz");
+	if (s)
+		want = (unsigned long)simple_strtol(s, NULL, 0);
 
-	if (dfu_buf != NULL)
+	if (!s || !want)
+		want = CONFIG_SYS_DFU_DATA_BUF_SIZE;
+
+	if (dfu->max_buf_size && want > dfu->max_buf_size)
+		want = dfu->max_buf_size;
+
+	if (dfu_buf && dfu_buf_size >= want)
 		return dfu_buf;
 
-	s = env_get("dfu_bufsiz");
-	if (s)
-		dfu_buf_size = (unsigned long)simple_strtol(s, NULL, 0);
-
-	if (!s || !dfu_buf_size)
-		dfu_buf_size = CONFIG_SYS_DFU_DATA_BUF_SIZE;
-
-	if (dfu->max_buf_size && dfu_buf_size > dfu->max_buf_size)
-		dfu_buf_size = dfu->max_buf_size;
-
+	dfu_free_buf();
+	dfu_buf_size = want;
 	dfu_buf = memalign(CONFIG_SYS_CACHELINE_SIZE, dfu_buf_size);
 	if (dfu_buf == NULL)
 		printf("%s: Could not memalign 0x%lx bytes\n",
 		       __func__, dfu_buf_size);
 
-	dfu_buf_device_type = dfu->dev_type;
 	return dfu_buf;
 }
 
@@ -245,7 +310,7 @@ static char *dfu_get_hash_algo(void)
 {
 	char *s;
 
-	s = env_get("dfu_hash_algo");
+	s = dfu_env_get("dfu_hash_algo");
 	if (!s)
 		return NULL;
 
@@ -303,6 +368,33 @@ void dfu_transaction_cleanup(struct dfu_entity *dfu)
 	dfu->inited = 0;
 }
 
+__weak int dfu_board_manifest_check(struct dfu_entity *dfu, const void *buf,
+				    long len, u64 written)
+{
+	return 0;
+}
+
+int dfu_manifest_check(struct dfu_entity *dfu)
+{
+	int ret;
+
+	/* No data stage reached this entity: nothing to manifest or refuse */
+	if (!dfu || !dfu->inited)
+		return 0;
+
+	ret = dfu_board_manifest_check(dfu, dfu->i_buf_start,
+				       dfu->i_buf - dfu->i_buf_start,
+				       dfu->offset);
+	if (ret) {
+		printf("DFU: %s download refused at manifest (%d)\n",
+		       dfu->name, ret);
+		dfu_transaction_cleanup(dfu);
+		return -EBADMSG;
+	}
+
+	return 0;
+}
+
 int dfu_transaction_initiate(struct dfu_entity *dfu, bool read)
 {
 	int ret = 0;
@@ -315,7 +407,12 @@ int dfu_transaction_initiate(struct dfu_entity *dfu, bool read)
 	if (dfu->i_buf_start == NULL)
 		return -ENOMEM;
 
-	dfu->i_buf_end = dfu->i_buf_start + dfu_get_buf_size();
+	/*
+	 * Only this entity's share: one that takes less (max_buf_size: an
+	 * erase block, or dfu_ram's LZMA layout, which must see each block as
+	 * it arrives) may find a larger shared buffer.
+	 */
+	dfu->i_buf_end = dfu->i_buf_start + dfu_entity_buf_size(dfu);
 
 	if (read) {
 		ret = dfu->get_medium_size(dfu, &dfu->r_left);
@@ -410,6 +507,17 @@ int dfu_write(struct dfu_entity *dfu, void *buf, int size, int blk_seq_num)
 	memcpy(dfu->i_buf, buf, size);
 	dfu->i_buf += size;
 
+	/*
+	 * The zero-length DNLOAD ends the download: the board may refuse it
+	 * here, before the drain below writes the buffered tail to the medium
+	 * (for a script entity, before it runs).
+	 */
+	if (size == 0) {
+		ret = dfu_manifest_check(dfu);
+		if (ret)
+			return ret;
+	}
+
 	/* if end or if buffer full flush */
 	if (size == 0 || (dfu->i_buf + size) > dfu->i_buf_end) {
 		ret = dfu_write_buffer_drain(dfu);
@@ -475,6 +583,88 @@ static int dfu_read_buffer_fill(struct dfu_entity *dfu, void *buf, int size)
 	}
 
 	return readn;
+}
+
+/*
+ * Zero-copy blocks. dfu_write() and dfu_read() move every block through the
+ * shared DFU buffer, and for a RAM medium again between that buffer and the
+ * RAM: two CPU copies per block, done between USB events while the bus
+ * waits. A medium that is plain memory (direct_buf) lets the controller DMA
+ * the data stage straight into or out of place instead. Only when nothing
+ * is buffered and no hash is being kept, so the two paths never interleave
+ * within one buffer's worth of data.
+ */
+void *dfu_direct_buf(struct dfu_entity *dfu, int size, bool read)
+{
+	long len = size;
+	void *p;
+
+	if (!dfu->direct_buf || dfu_hash_algo || size <= 0)
+		return NULL;
+	if (dfu_transaction_initiate(dfu, read) < 0)
+		return NULL;
+
+	if (read) {
+		if (dfu->b_left || !dfu->r_left)
+			return NULL;
+		len = min_t(u64, len, dfu->r_left);
+	} else if (dfu->i_buf != dfu->i_buf_start ||
+		   !IS_ALIGNED(len, ARCH_DMA_MINALIGN)) {
+		/*
+		 * A controller invalidates whole cache lines over an OUT
+		 * buffer: a block that ends mid-line would discard dirty
+		 * data past it. Such a block (a download's short tail)
+		 * takes the copying path.
+		 */
+		return NULL;
+	}
+
+	p = dfu->direct_buf(dfu, dfu->offset, len);
+	if (!p || !IS_ALIGNED((uintptr_t)p, ARCH_DMA_MINALIGN))
+		return NULL;
+
+	return p;
+}
+
+static int dfu_direct_seq(struct dfu_entity *dfu, int blk_seq_num)
+{
+	if (dfu->i_blk_seq_num != blk_seq_num) {
+		printf("%s: Wrong sequence number! [%d] [%d]\n",
+		       __func__, dfu->i_blk_seq_num, blk_seq_num);
+		dfu_transaction_cleanup(dfu);
+		dfu_error_callback(dfu, "Wrong sequence number");
+		return -1;
+	}
+	dfu->i_blk_seq_num = (dfu->i_blk_seq_num + 1) & 0xffff;
+
+	return 0;
+}
+
+int dfu_write_direct(struct dfu_entity *dfu, int size, int blk_seq_num)
+{
+	if (dfu_direct_seq(dfu, blk_seq_num))
+		return -1;
+
+	dfu->offset += size;
+
+	return 0;
+}
+
+int dfu_read_direct(struct dfu_entity *dfu, int size, int blk_seq_num)
+{
+	int n = min_t(u64, size, dfu->r_left);
+
+	if (dfu_direct_seq(dfu, blk_seq_num))
+		return -1;
+
+	dfu->offset += n;
+	dfu->r_left -= n;
+	if (n < size) {
+		puts("\nUPLOAD ... done\nCtrl+C to exit ...\n");
+		dfu_transaction_cleanup(dfu);
+	}
+
+	return n;
 }
 
 int dfu_read(struct dfu_entity *dfu, void *buf, int size, int blk_seq_num)
@@ -677,7 +867,7 @@ const char *dfu_get_layout(enum dfu_layout l)
 {
 	const char *const dfu_layout[] = {NULL, "RAW_ADDR", "FAT", "EXT2",
 					  "EXT3", "EXT4", "RAM_ADDR", "SKIP",
-					  "SCRIPT" };
+					  "SCRIPT", "RAM_LZMA" };
 	return dfu_layout[l];
 }
 
@@ -760,7 +950,7 @@ int dfu_write_from_mem_addr(struct dfu_entity *dfu, void *buf, int size)
 	 * into account.
 	 */
 	dfu_get_buf(dfu);
-	dfu_buf_size = dfu_get_buf_size();
+	dfu_buf_size = dfu_entity_buf_size(dfu);
 	debug("%s: dfu buf size: %lu\n", __func__, dfu_buf_size);
 
 	for (i = 0; left > 0; i++) {

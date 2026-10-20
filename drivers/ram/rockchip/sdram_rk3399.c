@@ -2512,6 +2512,27 @@ static int lpddr4_set_ctl(struct dram_info *dram,
 	ret_clk = clk_set_rate(&dram->ddr_clk, hz);
 	if (ret_clk < 0) {
 		printf("%s clk set failed %d\n", __func__, ret_clk);
+		/*
+		 * Unwind before returning. This path was unreachable until
+		 * rk3399_ddr_set_clk() grew real error returns (an
+		 * unsupported frequency, and a DPLL that does not lock), and
+		 * returning straight out of here leaves the DDR NoC
+		 * idle-requested with the CIC mid-handshake -- so the caller
+		 * hangs on its next access through the idled NoC instead of
+		 * getting the message above onto the console.
+		 *
+		 * Complete the CIC sequence and de-idle exactly as the
+		 * success path does. The frequency did not change, so the
+		 * controller is left where it already was; this is not a
+		 * recovery, only enough of one to fail visibly.
+		 */
+		writel(0x20002, &dram->cic->cic_ctrl0);
+		while (!(readl(&dram->cic->cic_status0) & (1 << 0)))
+			;
+		clrbits_le32(&dram->pmu->pmu_bus_idle_req, (0x3 << 18));
+		while (readl(&dram->pmu->pmu_bus_idle_st) & (0x3 << 18))
+			;
+		clrbits_le32(&dram->pmu->pmu_noc_auto_ena, (0x3 << 7));
 		return ret_clk;
 	}
 
@@ -2551,12 +2572,15 @@ static int lpddr4_set_rate(struct dram_info *dram,
 			    u32 ctl_fn)
 {
 	u32 phy_fn;
+	int ret;
 
 	phy_fn = lpddr4_get_phy_fn(params, ctl_fn);
 
 	lpddr4_set_phy(dram, params, phy_fn, &dfs_cfgs_lpddr4[ctl_fn]);
-	lpddr4_set_ctl(dram, params, ctl_fn,
-		       dfs_cfgs_lpddr4[ctl_fn].base.ddr_freq);
+	ret = lpddr4_set_ctl(dram, params, ctl_fn,
+			     dfs_cfgs_lpddr4[ctl_fn].base.ddr_freq);
+	if (ret)
+		return ret;
 
 	if (IS_ENABLED(CONFIG_RAM_ROCKCHIP_DEBUG))
 		printf("%s: change freq to %dMHz %d, %d\n", __func__,

@@ -62,6 +62,24 @@ int display_enable(struct udevice *dev, int panel_bpp,
  */
 bool display_in_use(struct udevice *dev);
 
+/**
+ * display_detect() - Is a sink physically attached to this output?
+ *
+ * This answers the question an EDID read CANNOT answer. A failed
+ * display_read_timing() has two completely different causes -- nothing is
+ * plugged in, or something is plugged in whose EDID we could not read (dead
+ * DDC, a NAKing EEPROM, a corrupt block) -- and only the second one justifies
+ * bringing the output up on a guessed mode. Hotplug detect is the signal that
+ * separates them, and it lives in the encoder, which is why this is an op and
+ * not something the VOP can work out for itself.
+ *
+ * @dev:	Display (encoder) device
+ * Return: 1 if a sink is present, 0 if not, -ve on error -- including
+ *	-ENOSYS when the driver has no way to tell, which callers must NOT
+ *	read as "no sink"
+ */
+int display_detect(struct udevice *dev);
+
 struct dm_display_ops {
 	/**
 	 * read_timing() - Read information directly
@@ -102,6 +120,18 @@ struct dm_display_ops {
 	 */
 	bool (*mode_valid)(struct udevice *dev,
 			   const struct display_timing *timing);
+
+	/**
+	 * detect() - Report whether a sink is physically attached
+	 *
+	 * Optional. Implement it wherever the encoder has a hotplug-detect
+	 * signal; leaving it NULL means "cannot tell", which is distinct from
+	 * "nothing attached" and is reported as -ENOSYS.
+	 *
+	 * @dev:	Device to query
+	 * @return 1 if a sink is present, 0 if not, -ve on error
+	 */
+	int (*detect)(struct udevice *dev);
 };
 
 #define display_get_ops(dev)	((struct dm_display_ops *)(dev)->driver->ops)

@@ -12,9 +12,18 @@
 #include <usb/tcpm.h>
 #include "tcpm-internal.h"
 
+/*
+ * Every getter settles the probe-time pump first (tcpm_settle()): the port
+ * negotiates in the background after its probe, and a consumer reading the
+ * result must get the settled one -- the same one it got when the probe
+ * blocked for it. The cost lands on the first consumer to ask, once.
+ */
+
 int tcpm_get_voltage(struct udevice *dev)
 {
 	struct tcpm_port *port = dev_get_uclass_plat(dev);
+
+	tcpm_settle(dev);
 
 	return port->supply_voltage;
 }
@@ -23,12 +32,16 @@ int tcpm_get_current(struct udevice *dev)
 {
 	struct tcpm_port *port = dev_get_uclass_plat(dev);
 
+	tcpm_settle(dev);
+
 	return port->current_limit;
 }
 
 enum typec_orientation tcpm_get_orientation(struct udevice *dev)
 {
 	struct tcpm_port *port = dev_get_uclass_plat(dev);
+
+	tcpm_settle(dev);
 
 	switch (port->polarity) {
 	case TYPEC_POLARITY_CC1:
@@ -44,12 +57,16 @@ const char *tcpm_get_state(struct udevice *dev)
 {
 	struct tcpm_port *port = dev_get_uclass_plat(dev);
 
+	tcpm_settle(dev);
+
 	return tcpm_states[port->state];
 }
 
 int tcpm_get_pd_rev(struct udevice *dev)
 {
 	struct tcpm_port *port = dev_get_uclass_plat(dev);
+
+	tcpm_settle(dev);
 
 	return port->negotiated_rev;
 }
@@ -58,6 +75,8 @@ enum typec_role tcpm_get_pwr_role(struct udevice *dev)
 {
 	struct tcpm_port *port = dev_get_uclass_plat(dev);
 
+	tcpm_settle(dev);
+
 	return port->pwr_role;
 }
 
@@ -65,12 +84,16 @@ enum typec_data_role tcpm_get_data_role(struct udevice *dev)
 {
 	struct tcpm_port *port = dev_get_uclass_plat(dev);
 
+	tcpm_settle(dev);
+
 	return port->data_role;
 }
 
 bool tcpm_is_connected(struct udevice *dev)
 {
 	struct tcpm_port *port = dev_get_uclass_plat(dev);
+
+	tcpm_settle(dev);
 
 	return port->connected;
 }
@@ -146,4 +169,5 @@ UCLASS_DRIVER(tcpm) = {
 	.per_device_plat_auto	= sizeof(struct tcpm_port),
 	.post_bind	= tcpm_post_bind,
 	.post_probe	= tcpm_post_probe,
+	.pre_remove	= tcpm_pre_remove,
 };

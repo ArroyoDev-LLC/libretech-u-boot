@@ -78,6 +78,7 @@ config TARGET_MT7988
 config TARGET_MT8183
 	bool "MediaTek MT8183 SoC"
 	select ARM64
+	select ARCH_MISC_INIT
 	help
 	  The MediaTek MT8183 is a ARM64-based SoC with a quad-core Cortex-A73 and
 	  a quad-core Cortex-A53. It is including UART, SPI, USB3.0 dual role,
@@ -87,6 +88,7 @@ config TARGET_MT8183
 config TARGET_MT8188
 	bool "MediaTek MT8188 SoC"
 	select ARM64
+	select ARCH_MISC_INIT
 	help
 	  The MediaTek MT8188 is a ARM64-based SoC with a dual-core Cortex-A78
           cluster and a six-core Cortex-A55 cluster. It includes UART, SPI,
@@ -96,6 +98,7 @@ config TARGET_MT8188
 config TARGET_MT8189
 	bool "MediaTek MT8189 SoC"
 	select ARM64
+	select ARCH_MISC_INIT
 	help
 	  The MediaTek MT8189 is a ARM64-based SoC with a dual-core Cortex-A78 and
 	  a six-core Cortex-A55. It is including UART, SPI, USB3.0 dual role,
@@ -105,6 +108,7 @@ config TARGET_MT8189
 config TARGET_MT8195
 	bool "MediaTek MT8195 SoC"
 	select ARM64
+	select ARCH_MISC_INIT
 	help
 	  The MediaTek MT8195 is a ARM64-based SoC with a quad-core Cortex-A73 and
 	  a quad-core Cortex-A53. It is including UART, SPI, USB3.0 dual role,
@@ -114,6 +118,7 @@ config TARGET_MT8195
 config TARGET_MT8365
 	bool "MediaTek MT8365 SoC"
 	select ARM64
+	select ARCH_MISC_INIT
 	help
 	  The MediaTek MT8365 is a ARM64-based SoC with a quad-core Cortex-A53.
 	  It is including UART, SPI, USB2.0 dual role, SD and MMC cards, NAND, PWM,
@@ -146,6 +151,17 @@ config TARGET_MT8518
 	  Ethernet, IR TX/RX, I2C, I2S, S/PDIF, and built-in Wi-Fi / Bluetooth combo
 	  chip and several DDR3 and DDR4 options.
 
+config TARGET_MT8188
+	bool "MediaTek MT8188 SoC (Genio 510)"
+	select ARM64
+	select ARCH_MISC_INIT
+	help
+	  The MediaTek MT8188 (Genio 510, die MT8370) is an ARM64 SoC. The
+	  Genio 510 EVK uses the lower-binned MT8370 die (dual Cortex-A78 +
+	  quad Cortex-A55), with UART, SPI, USB3.0, SD/MMC, I2C, I2S and
+	  several LPDDR4x/LPDDR5 options. Forward-ported from the 2022.10
+	  MediaTek BSP onto v2026.04/lc-master.
+
 endchoice
 
 if ARM64
@@ -175,6 +191,19 @@ config MTK_MEM_MAP_MMIO_SIZE
 
 endif
 
+config MT8365_PUMPKIN
+	bool "OLogic Pumpkin i350 board"
+	depends on TARGET_MT8365
+	help
+	  The OLogic Pumpkin i350 carrier board, as opposed to the MediaTek
+	  Genio 350 EVK (mt8365_evk_defconfig). Both use the MT8365 SoC and
+	  share include/configs/mt8365.h, but only the Pumpkin pulls in
+	  include/configs/mt8365_pumpkin.h, which defines fdtfile so the EFI
+	  bootmeth can load the deployed kernel's DTB from the ESP instead of
+	  handing Linux u-boot's control FDT.
+
+	  Say N unless you are building for the Pumpkin i350.
+
 config SYS_BOARD
 	string "Board name"
 	default "mt7622" if TARGET_MT7622
@@ -185,6 +214,8 @@ config SYS_BOARD
 	default "mt7987" if TARGET_MT7987
 	default "mt7988" if TARGET_MT7988
 	default "mt8183" if TARGET_MT8183
+	default "genio-510-evk" if TARGET_MT8188
+	default "mt8365" if TARGET_MT8365
 	default "mt8512" if TARGET_MT8512
 	default "mt8516" if TARGET_MT8516
 	default "mt8518" if TARGET_MT8518
@@ -200,6 +231,9 @@ config SYS_CONFIG_NAME
 	default "mt7981" if TARGET_MT7981
 	default "mt7986" if TARGET_MT7986
 	default "mt8183" if TARGET_MT8183
+	default "mt8188" if TARGET_MT8188
+	default "mt8365_pumpkin" if MT8365_PUMPKIN
+	default "mt8365" if TARGET_MT8365
 	default "mt8512" if TARGET_MT8512
 	default "mt8516" if TARGET_MT8516
 	default "mt8518" if TARGET_MT8518
@@ -214,5 +248,15 @@ config MTK_TZ_MOVABLE
 	select ARCH_MISC_INIT
 	select OF_SYSTEM_SETUP
 	bool
+
+config MTK_USB_BOOT_ACM_CONSOLE
+	bool "On a USB boot, also put the console on a USB ACM serial port"
+	depends on BOOTSOURCE && USB_FUNCTION_ACM && CONSOLE_MUX
+	select USB_BOOT_ACM_CONSOLE
+	help
+	  When the boot source is USB (BL2's 'LCUS' tag in BL33 x2), put the
+	  console on the usbacm port beside the UART: USB_BOOT_ACM_CONSOLE
+	  (common/usb_boot_acm_console.c), keyed on the boot source this SoC
+	  publishes.
 
 endif

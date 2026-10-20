@@ -28,6 +28,21 @@
 #define HHI_GP0_PLL_CNTL5		0x054
 #define HHI_GP0_PLL_CNTL6		0x058
 #define HHI_GP0_PLL_STS			0x05C
+/*
+ * GP1 PLL (SM1; feeds the DSU).  Vendor kernel
+ * common_drivers/drivers/clk/meson/g12a.h:27-34 (A311D-S905D3_linux5.15);
+ * vendor BL33 arch-g12a/secure_apb.h:2306-2313 (`define HHI_GP1_PLL_CNTL0
+ * 8'h18 .. HHI_GP1_PLL_STS 8'h1f, word index x4); mainline
+ * drivers/clk/meson/g12a.c:42-48.
+ */
+#define HHI_GP1_PLL_CNTL0		0x060
+#define HHI_GP1_PLL_CNTL1		0x064
+#define HHI_GP1_PLL_CNTL2		0x068
+#define HHI_GP1_PLL_CNTL3		0x06C
+#define HHI_GP1_PLL_CNTL4		0x070
+#define HHI_GP1_PLL_CNTL5		0x074
+#define HHI_GP1_PLL_CNTL6		0x078
+#define HHI_GP1_PLL_STS			0x07C
 #define HHI_PCIE_PLL_CNTL0		0x098
 #define HHI_PCIE_PLL_CNTL1		0x09C
 #define HHI_PCIE_PLL_CNTL2		0x0A0
@@ -68,6 +83,13 @@
 #define HHI_HDCP22_CLK_CNTL		0x1F0
 #define HHI_VAPBCLK_CNTL		0x1F4
 #define HHI_VPU_CLKB_CNTL		0x20C
+/*
+ * SM1 DSU clock tree.  Vendor kernel common_drivers/drivers/clk/meson/
+ * g12a.h:85-86 (A311D-S905D3_linux5.15); mainline drivers/clk/meson/
+ * g12a.c:100-101.
+ */
+#define HHI_SYS_CPU_CLK_CNTL5		0x21C
+#define HHI_SYS_CPU_CLK_CNTL6		0x220
 #define HHI_GEN_CLK_CNTL		0x228
 #define HHI_VDIN_MEAS_CLK_CNTL		0x250
 #define HHI_MIPIDSI_PHY_CLK_CNTL	0x254

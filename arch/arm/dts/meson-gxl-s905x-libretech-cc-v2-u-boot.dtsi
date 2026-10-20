@@ -5,3 +5,138 @@
  */
 
 #include "meson-gxl-u-boot.dtsi"
+
+#if defined(CONFIG_TPL_MESON_GX_NOR_PROBE)
+/*
+ * The TPL device tree is fdtgrep'd down to nodes carrying a bootph-* property,
+ * and `soc { bootph-all; }` in meson-gx-u-boot.dtsi marks the BUS, not its
+ * children -- measured: a chain TPL dtb built without these two hunks is 811 B
+ * and contains exactly /chosen, /soc and /soc/vpu@d0100000.
+ *
+ * So the SPI flash controller has to say so itself.  /aliases needs no mark --
+ * fdtgrep keeps it wholesale, spi0 = &spifc included, which is where the bus
+ * gets sequence number 0 (measured: the pruned TPL tree carries the mmc0-2,
+ * serial0, ethernet0 and spi0 aliases even when none of those nodes survive).
+ * Marking it too produced a DTB with two /aliases nodes, which dtc rejects.
+ *
+ * Guarded on the probe symbol rather than added unconditionally: every other
+ * phase's device tree, including the shipping single-stage SPL's, must not
+ * change size because a diagnostic exists.
+ */
+&cbus {
+	/*
+	 * The controller's PARENT needs the mark too, and this is not
+	 * bookkeeping: dm_scan_fdt_node() skips a node that fails
+	 * ofnode_pre_reloc() and does NOT recurse into it, so an unmarked
+	 * simple-bus hides everything under it.  fdtgrep keeps bus@c1100000 in
+	 * the pruned tree anyway (it is spifc's parent), which is exactly the
+	 * trap: the node is visible in the DTB and still never binds.
+	 *
+	 * Measured 2026-08-12: without this the TPL reached
+	 * "Invalid bus 0 (err=-19)" from uclass_get_device_by_seq() with
+	 * spi@8c80 plainly present in its own device tree.
+	 */
+	bootph-all;
+};
+
+&spifc {
+	bootph-all;
+};
+#endif
+
+#if defined(CONFIG_TPL_MESON_GX_LOAD_MMC)
+/*
+ * The MMC arm needs the same three marks the NOR arm needed, for the same
+ * reason, and it had none of them: measured 2026-08-30, the MMC arm's pruned
+ * TPL device tree is 811 B and contains exactly /chosen, /soc and
+ * /soc/vpu@d0100000 -- no apb@d0000000, no mmc node, and no /aliases.  A
+ * loader that is linked into the stage and has no controller to bind is the
+ * same silent nothing the misspelled Kconfig symbol was (N28).
+ *
+ * apb@d0000000 is the controllers' parent simple-bus and carries the mark for
+ * the reason the &cbus hunk above spells out: dm_scan_fdt_node() does not
+ * recurse into a node that fails ofnode_pre_reloc(), so an unmarked bus hides
+ * every child even when fdtgrep left the child in the DTB.
+ *
+ * /aliases is NOT marked, and does not need to be: fdtgrep is invoked with -T
+ * (scripts/Makefile.lib:697) and fdt_add_alias_regions() adds back exactly the
+ * alias properties whose TARGET node survived the grep.  That is what supplies
+ * mmc0 = &sd_emmc_c and mmc1 = &sd_emmc_b (meson-gx.dtsi:23-24), which is what
+ * mmc_init_device()'s uclass_get_device_by_seq() resolves.  Without the
+ * aliases the fallback is uclass_get_device() by bind ORDER, which would hand
+ * devnum 0 to whichever mmc node the grep happened to emit first -- a wrong
+ * card with no symptom.
+ *
+ * WHICH CONTROLLER IS WHICH, measured from the pruned tree this hunk produces,
+ * because meson-gx.dtsi's own alias comments are wrong for these boards:
+ *   mmc0 -> /soc/apb@d0000000/mmc@74000 = &sd_emmc_c = eMMC
+ *   mmc1 -> /soc/apb@d0000000/mmc@72000 = &sd_emmc_b = SD card
+ * Both AML-S905X-CC and CC-V2 put the SD card on sd_emmc_b and eMMC on
+ * sd_emmc_c (their .dts files label the nodes in so many words), while
+ * meson-gx.dtsi:23 annotates `mmc0 = &sd_emmc_c` as "SD card".  The DT is
+ * right and the comment is wrong; MESON_GX_MMC_SD_DEVNUM / _EMMC_DEVNUM in
+ * arch/arm/mach-meson/Kconfig carry the corrected mapping.
+ *
+ * mmc@70000 (sd_emmc_a) is deliberately NOT marked: it is SDIO on this board,
+ * it is not a boot medium, and each marked controller costs stage bytes under
+ * a 45056 B ceiling.
+ *
+ * bootph-pre-sram, not bootph-all: pre-sram is the TPL phase's own tag
+ * (scripts/Makefile.lib:680), so the DRAM SPL stage's device tree does not
+ * grow for a stage that is not the one doing the reading.  Measured: with
+ * bootph-all the chain SPL went 26027 -> 27262 B; with bootph-pre-sram it
+ * stays at 26027.
+ */
+&apb {
+	bootph-pre-sram;
+};
+
+/* SD card -- alias mmc1, BOOT_DEVICE_SD */
+&sd_emmc_b {
+	bootph-pre-sram;
+};
+
+/* eMMC -- alias mmc0, BOOT_DEVICE_EMMC */
+&sd_emmc_c {
+	bootph-pre-sram;
+};
+#endif
+
+#if defined(CONFIG_SPL_DFU)
+#include "meson-gxl-libretech-spl-usbflash-u-boot.dtsi"
+#endif
+
+/ {
+	smbios {
+		compatible = "u-boot,sysinfo-smbios";
+
+		smbios {
+			system {
+				manufacturer = "libre-computer";
+				product = "aml-s905x-cc-v2";
+			};
+
+			baseboard {
+				manufacturer = "libre-computer";
+				product = "aml-s905x-cc-v2";
+			};
+
+			chassis {
+				manufacturer = "libre-computer";
+				product = "aml-s905x-cc-v2";
+			};
+		};
+	};
+};
+
+/*
+ * Open-chain SCMI (aml-s905x-cc-v2 / libretech-cc_v2).
+ * Merged only when CONFIG_SCMI_FIRMWARE is enabled
+ * (amlogic/libretech-cc-v2-scmi.config, libretech-cc_v2_libre_defconfig).
+ * MHU + AHB shmem already exist in meson-gx.dtsi; this overlay adds
+ * firmware/scmi and disables vendor SCPI for the U-Boot DTB only.
+ * Do not treat the v1 libretech-cc include as V2 proof.
+ */
+#ifdef CONFIG_SCMI_FIRMWARE
+#include "meson-gxl-scmi-u-boot.dtsi"
+#endif

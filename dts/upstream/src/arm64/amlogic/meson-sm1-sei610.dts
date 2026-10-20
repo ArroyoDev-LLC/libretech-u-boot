@@ -10,6 +10,7 @@
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/gpio/meson-g12a-gpio.h>
 #include <dt-bindings/sound/meson-g12a-tohdmitx.h>
+#include "meson-g12-vendor-firmware.dtsi"
 
 / {
 	compatible = "seirobotics,sei610", "amlogic,sm1";
@@ -355,18 +356,26 @@
 };
 
 &cpu0 {
+	operating-points-v2 = <&cpu_opp_table>;
+	clocks = <&clkc CLKID_CPU_CLK>;
 	cpu-supply = <&vddcpu>;
 };
 
 &cpu1 {
+	operating-points-v2 = <&cpu_opp_table>;
+	clocks = <&clkc CLKID_CPU1_CLK>;
 	cpu-supply = <&vddcpu>;
 };
 
 &cpu2 {
+	operating-points-v2 = <&cpu_opp_table>;
+	clocks = <&clkc CLKID_CPU2_CLK>;
 	cpu-supply = <&vddcpu>;
 };
 
 &cpu3 {
+	operating-points-v2 = <&cpu_opp_table>;
+	clocks = <&clkc CLKID_CPU3_CLK>;
 	cpu-supply = <&vddcpu>;
 };
 

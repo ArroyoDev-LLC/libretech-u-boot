@@ -699,10 +699,10 @@ bool meson_venc_hdmi_supported_mode(const struct display_timing *mode)
 			    DISPLAY_FLAGS_VSYNC_LOW | DISPLAY_FLAGS_VSYNC_HIGH))
 		return false;
 
-	if (mode->hactive.typ < 640 || mode->hactive.typ > 1920)
+	if (mode->hactive.typ < 240 || mode->hactive.typ > 1920)
 		return false;
 
-	if (mode->vactive.typ < 480 || mode->vactive.typ > 1200)
+	if (mode->vactive.typ < 240 || mode->vactive.typ > 1080)
 		return false;
 
 	return true;
@@ -1281,16 +1281,18 @@ static void meson_venc_hdmi_mode_set(struct meson_vpu_priv *priv,
 		else
 			vs_bline_evn = (mode->vfront_porch.typ +
 					mode->vactive.typ +
-					mode->vsync_len.typ) +
-					+ de_v_begin_even
+					mode->vsync_len.typ +
+					mode->vback_porch.typ) +
+					de_v_begin_even
 					- sof_lines
 					- vsync_lines
 					- (1 - vs_adjust);
 
 		vs_eline_evn = modulo(vs_bline_evn + vsync_lines,
-				      mode->hfront_porch.typ +
-				      mode->hactive.typ +
-				      mode->hsync_len.typ);
+				      mode->vfront_porch.typ +
+				      mode->vactive.typ +
+				      mode->vsync_len.typ +
+				      mode->vback_porch.typ);
 
 		writel(vs_bline_evn,
 		       priv->io_base + _REG(ENCP_DVI_VSO_BLINE_EVN));

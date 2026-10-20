@@ -700,6 +700,25 @@ int bootflow_run_boot(struct bootflow_iter *iter, struct bootflow *bflow)
 	    (bflow->flags & BOOTFLOWF_USE_PRIOR_FDT))
 		printf("Using prior-stage device tree\n");
 	ret = bootflow_boot(bflow);
+
+	/*
+	 * Deliberately no console_silent_defeat() here.
+	 *
+	 * This function is called once per CANDIDATE, from a loop that keeps
+	 * scanning -- do_bootflow_scan() in cmd/bootflow.c and
+	 * bootstd_prog_boot() in boot/prog_boot.c both iterate
+	 * bootflow_scan_next() and call this for every bootflow that has no
+	 * error. So `ret != 0` here means "this candidate did not boot", not
+	 * "the boot failed": an earlier bootdev holding a stale or unbootable
+	 * image, followed by a later one that boots, is the ordinary case and
+	 * produces exactly this return.
+	 *
+	 * Un-silencing here therefore fires on a SUCCESSFUL boot, which is the
+	 * one thing a silent console exists to suppress. The boot as a whole is
+	 * only known to have failed after the scan gives up, and that is where
+	 * the call lives: common/main.c, immediately after autoboot_command()
+	 * returns.
+	 */
 	if (!IS_ENABLED(CONFIG_BOOTSTD_FULL)) {
 		printf("Boot failed (err=%d)\n", ret);
 		return ret;

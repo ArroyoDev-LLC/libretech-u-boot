@@ -36,6 +36,8 @@ struct clk_ops {
 	ulong (*get_rate)(struct clk *clk);
 	ulong (*set_rate)(struct clk *clk, ulong rate);
 	int (*set_parent)(struct clk *clk, struct clk *parent);
+	int (*get_phase)(struct clk *clk);
+	int (*set_phase)(struct clk *clk, int degrees);
 	int (*enable)(struct clk *clk);
 	int (*disable)(struct clk *clk);
 #if IS_ENABLED(CONFIG_CMD_CLK)
@@ -189,6 +191,30 @@ ulong set_rate(struct clk *clk, ulong rate);
  *   not be set due to a bus error.
  */
 int set_parent(struct clk *clk, struct clk *parent);
+
+/**
+ * get_phase() - Get the phase shift of a clock.
+ * @clk:	The clock to query.
+ *
+ * Return: the phase shift in degrees (0..359) relative to the clock's
+ * parent, or -ve error code (-%ENOSYS if not implemented for @clk).
+ */
+int get_phase(struct clk *clk);
+
+/**
+ * set_phase() - Set the phase shift of a clock.
+ * @clk:	The clock to manipulate.
+ * @degrees:	Phase shift in degrees (0..359) relative to the parent.
+ *
+ * Only delay-line style clocks (an MMC sample or drive clock) implement
+ * this. The rate of the clock is unchanged by this call.
+ *
+ * Return:
+ * * 0 on success
+ * * -%ENOSYS if this function is not implemented for @clk
+ * * -%EINVAL if @degrees cannot be produced for @clk
+ */
+int set_phase(struct clk *clk, int degrees);
 
 /**
  * enable() - Enable a clock.

@@ -8,9 +8,9 @@
 
 / {
 	aliases {
-		mmc0 = &mmc0;
+		mmc0 = &mmc2;
 #if CONFIG_MMC_SUNXI_SLOT_EXTRA == 2
-		mmc1 = &mmc2;
+		mmc1 = &mmc0;
 #endif
 	};
 
@@ -52,13 +52,34 @@
 					type = "standalone";
 					os = "u-boot";
 					arch = ARCH;
-					compression = "none";
 					load = <CONFIG_TEXT_BASE>;
 #if CONFIG_SUNXI_BL31_BASE == 0
 					entry = <CONFIG_TEXT_BASE>;
 #endif
-
+/*
+ * BL33 compression ladder: LZ4 first, LZMA only where LZ4's ratio does not
+ * fit the size requirement, then none. GZIP is not offered: it is strictly
+ * dominated -- a worse ratio than LZMA and slower to decompress than LZ4.
+ *
+ * LZ4 was previously ranked LAST here, behind GZIP and LZMA. Every sunxi
+ * board that compresses at all enables exclusively CONFIG_SPL_LZ4, so the
+ * earlier branches were dead and the emitted value happened to be right --
+ * but the ranking was not, and a board adding a second decompressor would
+ * have silently picked the wrong one.
+ */
+#if defined(CONFIG_SPL_LZ4)
+					compression = "lz4";
+#elif defined(CONFIG_SPL_LZMA)
+					compression = "lzma";
+#else
+					compression = "none";
+#endif
 					u-boot-nodtb {
+#if defined(CONFIG_SPL_LZ4)
+						compress = "lz4";
+#elif defined(CONFIG_SPL_LZMA)
+						compress = "lzma";
+#endif
 					};
 				};
 

@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * HamGeek / ANTSDR E310 (Zynq-7020) — U-Boot-only DT additions.
+ *
+ * The SPI NOR bootloader blob is described by the shared Zynq SDR binman
+ * include below: one artifact (SPL + a compressed FIT) written at NOR offset
+ * 0, so a bootloader update is a single erase+write of a single region and can
+ * never leave a valid SPL paired with a stale (or absent) U-Boot payload.
+ *
+ * NOR MAP (Winbond W25Q256, 32 MiB). Every boundary is 64 KiB-aligned because
+ * that is U-Boot's erase granularity on this board -- CONFIG_SPI_FLASH_USE_4K_SECTORS
+ * is off, so `sf erase` and the DFU raw alts can only work in 64 KiB units,
+ * and a boundary finer than that would mean erasing one region destroys its
+ * neighbour. (Linux reports mtd erasesize 0x1000 for the same chip because the
+ * Linux spi-nor core enables the 4 KiB sector opcode; the binding number for
+ * the LAYOUT is the coarser of the two writers, i.e. 64 KiB.)
+ *
+ *   0x000000 + 256 KiB  SPL     spl/boot.bin -- Zynq boot header
+ *                               (0xAA995566 / "XNLX") + SPL.
+ *   0x040000 +1728 KiB  FIT     the U-Boot payload: LZ4-compressed BL33 +
+ *                               control FDT, read by the SPL from
+ *                               CONFIG_SYS_SPI_U_BOOT_OFFS.
+ *   0x1F0000 +  64 KiB  config  NOR config sector
+ *                               (CONFIG_BOARD_CONFIG_NOR_OFFSET).
+ *   0x200000 +  30 MiB  spare
+ *
+ * WHY 0x40000 FOR THE PAYLOAD, AND WHY THAT GAP IS A FLOOR AND NOT PADDING
+ * -----------------------------------------------------------------------
+ * The Zynq-7000 SPL executes in place out of the 192 KiB low OCM window mapped
+ * at 0x0 (CONFIG_SPL_TEXT_BASE = 0x0; the remaining 64 KiB of OCM sits high at
+ * 0xFFFF0000 and holds the SPL stack, CONFIG_SPL_STACK = 0xfffffe00). That
+ * window IS CONFIG_SPL_MAX_SIZE = 0x30000 -- a silicon bound, not a chosen
+ * number -- and the build fails if the SPL exceeds it. 0x40000 is the smallest
+ * 64 KiB-aligned offset above it: the SPL's hard ceiling plus exactly one
+ * erase block.
+ *
+ * So the gap between the end of the SPL image and 0x40000 is not fixed-offset
+ * filler in the sense the padding policy bans. It is the SPL's own growth
+ * reserve, capped by silicon, and it cannot be reclaimed without lowering
+ * SPL_MAX_SIZE below what the OCM actually offers. Same value as the in-tree
+ * Zynq binman precedent (brcp150, zynq-binman-brcp1.dtsi) -- and since
+ * 2026-07-31 the sibling zynq_adrv9009 uses it too, having sat at a legacy
+ * 0x120000 with 1 045 544 B of real filler underneath the FIT.
+ */
+
+#include "zynq-sdr-nor-u-boot.dtsi"

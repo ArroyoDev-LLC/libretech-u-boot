@@ -11,12 +11,14 @@
 #include <dm/device_compat.h>
 #include <dm/device-internal.h>
 #include <dm/devres.h>
+#include <i2c.h>
 #include <linux/compat.h>
 #include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/iopoll.h>
 #include <time.h>
 #include <usb/tcpm.h>
+#include <usb/typec_dp.h>
 #include "tcpm-internal.h"
 
 const char * const tcpm_states[] = {
@@ -90,11 +92,21 @@ static inline bool tcpm_try_src(struct tcpm_port *port)
 	       port->port_type == TYPEC_PORT_DRP;
 }
 
+/*
+ * Re-arm the probe-time pump's quiet-time budget. Every event the port sees
+ * (a CC or VBUS change, a message in or out, a detach) calls this, so the
+ * pump gives up TCPM_POLL_EVENT_TIME_OUT ms after the LAST event, not after
+ * a fixed count of polls: it used to count 2000 polls, which at one ~0.5 ms
+ * poll plus a 500 us sleep each was the same 2 s of silence -- but a count
+ * only measures time while something polls continuously, and the pump no
+ * longer does (see tcpm_post_probe()).
+ */
 static inline void tcpm_reset_event_cnt(struct udevice *dev)
 {
 	struct tcpm_port *port = dev_get_uclass_plat(dev);
 
-	port->poll_event_cnt = 0;
+	port->poll_event_deadline = timer_get_us() +
+				    TCPM_POLL_EVENT_TIME_OUT * 1000ULL;
 }
 
 static enum tcpm_state tcpm_default_state(struct tcpm_port *port)
@@ -164,6 +176,8 @@ static enum typec_cc_status tcpm_rp_cc(struct tcpm_port *port)
 }
 
 static void tcpm_check_and_run_delayed_work(struct udevice *dev);
+static void tcpm_ams_start(struct udevice *dev);
+static void tcpm_ams_finish(struct udevice *dev);
 
 static bool tcpm_transmit_helper(struct udevice *dev)
 {
@@ -174,6 +188,58 @@ static bool tcpm_transmit_helper(struct udevice *dev)
 	udelay(500);
 	tcpm_check_and_run_delayed_work(dev);
 	return port->tx_complete;
+}
+
+/**
+ * tcpm_wake() - undo the low-power mode the port manager asked for
+ *
+ * tcpm_poll_event() ends by calling enter_low_power_mode(), which on the
+ * FUSB302 drops the internal oscillator and masks every interrupt. That is
+ * correct for the lifecycle it was written for -- run the state machine at
+ * probe, then idle -- but this stack now exposes the port to consumers, and
+ * anything done after the port went idle reached a chip that could not
+ * respond. The symptom was not an error: transmits timed out with NO status
+ * at all, since an unclocked transmitter reports neither success nor
+ * retry-fail nor collision.
+ *
+ * The port manager decided to sleep it, so the port manager owes the wake.
+ * Here rather than in the driver's transmit, because "the chip must be awake"
+ * is a fact about the port, and a TCPC with no low-power mode should not have
+ * to know about it.
+ *
+ * Idempotent, and needed by anything that touches the wire OR waits on the
+ * chip to observe something -- polling a sleeping TCPC observes nothing, for
+ * as long as you care to poll.
+ */
+static int tcpm_wake(struct udevice *dev)
+{
+	const struct dm_tcpm_ops *drvops = dev_get_driver_ops(dev);
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+	int ret;
+
+	if (!port->low_power)
+		return 0;
+
+	if (!drvops->exit_low_power_mode) {
+		/*
+		 * Clear it anyway. There is nothing to call and nothing will
+		 * ever change that, so leaving the flag set only re-prints
+		 * this on every transmit for the life of the port.
+		 */
+		port->low_power = false;
+		dev_warn(dev, "TCPM: TCPC sleeps but cannot be woken\n");
+		return 0;
+	}
+
+	ret = drvops->exit_low_power_mode(dev);
+	if (ret < 0) {
+		dev_err(dev, "TCPM: failed to leave low power: %d\n", ret);
+		return ret;
+	}
+
+	port->low_power = false;
+
+	return 0;
 }
 
 static int tcpm_pd_transmit(struct udevice *dev,
@@ -191,6 +257,10 @@ static int tcpm_pd_transmit(struct udevice *dev,
 			le16_to_cpu(msg->header));
 	else
 		dev_dbg(dev, "TCPM: PD TX, type: %#x\n", type);
+
+	ret = tcpm_wake(dev);
+	if (ret < 0)
+		return ret;
 
 	port->tx_complete = false;
 	ret = drvops->pd_transmit(dev, type, msg, port->negotiated_rev);
@@ -695,6 +765,42 @@ static void tcpm_pd_data_request(struct udevice *dev,
 
 		port->nr_sink_caps = cnt;
 		break;
+	case PD_DATA_VENDOR_DEF:
+		/*
+		 * Park the VDM where the initiator's wait loop can see it.
+		 * Nothing is interpreted here: this runs inside the receive
+		 * path that tcpm_pd_transmit() and tcpm_vdm_wait() are both
+		 * pumping, and deciding what a VDM means is the caller's job.
+		 *
+		 * An unsolicited VDM -- an Attention from the partner, most
+		 * often a DisplayPort HPD change -- lands here too. When an
+		 * exchange is in flight it is DROPPED HERE rather than parked,
+		 * because the slot is one deep and the receive path can now
+		 * deliver several messages between two looks at it: park the
+		 * Attention and it overwrites the ACK that arrived just before
+		 * it, and no amount of filtering in the wait loop can recover
+		 * a message that is already gone. Attention takes no response,
+		 * so dropping it costs nothing but a hotplug we were not
+		 * watching for.
+		 */
+		if (cnt > VDO_MAX_SIZE)
+			cnt = VDO_MAX_SIZE;
+
+		if (port->vdm_waiting && cnt) {
+			u32 hdr = le32_to_cpu(msg->payload[0]);
+
+			if (!PD_VDO_SVDM(hdr) ||
+			    PD_VDO_VID(hdr) != port->vdm_wait_svid ||
+			    PD_VDO_CMD(hdr) != port->vdm_wait_cmd ||
+			    PD_VDO_CMDT(hdr) == CMDT_INIT)
+				break;
+		}
+
+		for (i = 0; i < cnt; i++)
+			port->vdm_rx[i] = le32_to_cpu(msg->payload[i]);
+
+		port->vdm_rx_cnt = cnt;
+		break;
 	default:
 		break;
 	}
@@ -865,7 +971,11 @@ static void tcpm_pd_rx_handler(struct udevice *dev,
 		remote_is_host = !!(le16_to_cpu(msg->header) & PD_HEADER_DATA_ROLE);
 		local_is_host = port->data_role == TYPEC_HOST;
 		if (remote_is_host == local_is_host) {
-			dev_err(dev, "TCPM: data role mismatch, initiating error recovery\n");
+			dev_err(dev, "TCPM: data role mismatch, initiating error recovery (hdr=%04x type=%u cnt=%u msgid=%u remote=%s local=%s state=%s)\n",
+				le16_to_cpu(msg->header), type, cnt, msgid,
+				remote_is_host ? "host" : "device",
+				local_is_host ? "host" : "device",
+				tcpm_states[port->state]);
 			tcpm_set_state(dev, ERROR_RECOVERY, 0);
 		} else {
 			if (cnt)
@@ -1286,7 +1396,9 @@ static int tcpm_src_attach(struct udevice *dev)
 	if (ret < 0)
 		return ret;
 
-	ret = tcpm_set_roles(dev, true, TYPEC_SOURCE, TYPEC_HOST);
+	ret = tcpm_set_roles(dev, true, TYPEC_SOURCE,
+			     port->typec_data == TYPEC_PORT_DATA_UFP ?
+			     TYPEC_DEVICE : TYPEC_HOST);
 	if (ret < 0)
 		return ret;
 
@@ -1347,6 +1459,7 @@ static void tcpm_reset_port(struct udevice *dev)
 	port->wait_dr_swap_message = false;
 	port->attached = false;
 	port->pd_capable = false;
+	memset(&port->dp, 0, sizeof(port->dp));
 
 	/*
 	 * First Rx ID should be 0; set this to a sentinel of -1 so that
@@ -1394,6 +1507,35 @@ static int tcpm_snk_attach(struct udevice *dev)
 	if (ret < 0)
 		return ret;
 
+	/*
+	 * The INITIAL data role is fixed by CC, not by the device tree. The Rd
+	 * side of a Type-C connection is the UFP; the Rp side is the DFP. A
+	 * sink that asserts DFP at attach is asserting a role the partner
+	 * already holds, and the partner is right to refuse it.
+	 *
+	 * data-role = "host" says what this port may BECOME, not what it may
+	 * claim before anyone has agreed. The way a power sink legitimately
+	 * becomes the data host is the DR_Swap the partner offers -- which this
+	 * stack already implements end to end (the Source_Capabilities
+	 * DUAL_ROLE|DATA_SWAP probe that arms ->wait_dr_swap_message, the
+	 * SNK_READY hold that waits for it, DR_SWAP_ACCEPT and
+	 * DR_SWAP_CHANGE_DR) and which the monitor on this board actively
+	 * sends.
+	 *
+	 * Measured on ROC-RK3399-PC Type-C1 against a 4K Samsung: attaching as
+	 * TYPEC_HOST here collides with the partner's own DFP and the first
+	 * Source_Capabilities is destroyed by tcpm_pd_rx_handler()'s data-role
+	 * check, before any contract exists -- so the DR_Swap that would have
+	 * granted the role never gets dispatched either:
+	 *
+	 *   hdr=1161 type=1 cnt=1 msgid=0 remote=host local=host
+	 *                                       state=SNK_WAIT_CAPABILITIES
+	 *   hdr=0769 type=9 cnt=0 msgid=3 remote=host local=host   (DR_Swap)
+	 *
+	 * tcpm_src_attach() is the other half and stays as it is: there the
+	 * port presents Rp, so it genuinely IS the DFP and data-role = "host"
+	 * is describing the attach, not overriding it.
+	 */
 	ret = tcpm_set_roles(dev, true, TYPEC_SINK, TYPEC_DEVICE);
 	if (ret < 0)
 		return ret;
@@ -1416,6 +1558,18 @@ static void tcpm_snk_detach(struct udevice *dev)
 
 static inline enum tcpm_state hard_reset_state(struct tcpm_port *port)
 {
+	/*
+	 * A sink-only port that is not self-powered draws its own supply
+	 * through this VBUS, and a Hard Reset makes the source cycle VBUS
+	 * through vSafe0V -- i.e. it powers the board off. Before any PD
+	 * contract exists on this attach there is nothing a Hard Reset could
+	 * restore that Type-C current does not already give, so settle there.
+	 * Same rule as the kernel's tcpm.c (linux-6.18.y-lc), so neither side
+	 * of the boot hand-off resets a source the other one left running.
+	 */
+	if (port->port_type == TYPEC_PORT_SNK && !port->self_powered &&
+	    !port->pd_capable && port->vbus_present)
+		return SNK_READY;
 	if (port->hard_reset_count < PD_N_HARD_RESET_COUNT)
 		return HARD_RESET_SEND;
 	if (port->pd_capable)
@@ -1469,18 +1623,106 @@ static void run_state_machine(struct udevice *dev)
 
 	case SRC_ATTACHED:
 		ret = tcpm_src_attach(dev);
+		if (ret < 0) {
+			tcpm_set_state(dev, SRC_UNATTACHED, 0);
+			break;
+		}
+
 		/*
-		 * Currently, vbus control is not implemented,
-		 * and the SRC detection process cannot be fully implemented.
+		 * This used to jump straight to SRC_READY, with the comment
+		 * "vbus control is not implemented, and the SRC detection
+		 * process cannot be fully implemented". The shortcut skips
+		 * SRC_STARTUP -- which is where negotiated_rev, message_id and
+		 * rx_msgid are initialised -- and SRC_SEND_CAPABILITIES, so a
+		 * source-role port arrived in SRC_READY having sent nothing,
+		 * with negotiated_rev still 0. Every subsequent transmission
+		 * then went out as a PD 1.0 message that no modern partner
+		 * answers, and the visible symptom was every PD transmit
+		 * timing out against a device that was plainly attached.
+		 *
+		 * VBUS control is implemented now (the TCPC driver's
+		 * set_vbus op drives the port's vbus-supply), so the normal
+		 * path works: _tcpm_pd_vbus_on() advances SRC_ATTACHED to
+		 * SRC_STARTUP when the TCPC reports the rail up, and this
+		 * arms the specified give-up timeout in case it never does.
+		 *
+		 * A board whose TCPC has no VBUS control still cannot be a
+		 * source, and now says so by falling back to SRC_UNATTACHED
+		 * instead of sitting in a SRC_READY it cannot transmit from.
+		 *
+		 * The already-on case is handled explicitly: if VBUS is up
+		 * before the attach -- an always-on rail, or a port that was
+		 * already sourcing -- there is no edge coming and waiting for
+		 * one would time out for no reason.
 		 */
-		tcpm_set_state(dev, SRC_READY, 0);
+		if (port->vbus_present)
+			tcpm_set_state(dev, SRC_STARTUP, 0);
+		else if (port->port_type == TYPEC_PORT_DRP)
+			tcpm_set_state(dev, SRC_UNATTACHED, PD_T_PS_SOURCE_ON);
+		else
+			/*
+			 * A source-ONLY port has no sink role to fall back on,
+			 * so SRC_UNATTACHED would put it in a loop rather than
+			 * a resting state. Keep the old destination for it --
+			 * the VBUS-on event still overrides this delayed state
+			 * if the rail does come up, so a port with working
+			 * VBUS control is unaffected, and one without lands
+			 * exactly where it used to.
+			 */
+			tcpm_set_state(dev, SRC_READY, PD_T_PS_SOURCE_ON);
 		break;
 	case SRC_STARTUP:
 		port->caps_count = 0;
+		/*
+		 * Advertise PD 2.0, not PD_MAX_REV, when WE are the source.
+		 *
+		 * PD 3.0 puts obligations on a source that this stack does
+		 * not meet: collision avoidance -- the Rp level signalling
+		 * SinkTxOk/SinkTxNG that tells the sink when it may start an
+		 * AMS -- and extended-message chunking. There is no
+		 * tcpm_ams_finish() here and no SINK_TX handling anywhere, so
+		 * a rev-3 header is a claim about behaviour that does not
+		 * exist.
+		 *
+		 * Measured against a DisplayPort monitor: source caps went
+		 * out with a rev-3 header and were GoodCRC'd, no Request ever
+		 * came back, and the sink issued a Hard Reset ~150 ms later.
+		 * That reset returns the port through ERROR_RECOVERY and
+		 * PORT_RESET to a fresh attach, where SRC_STARTUP set
+		 * PD_MAX_REV again -- so the existing fallback in
+		 * SRC_SEND_CAPABILITIES_TIMEOUT, which steps the revision
+		 * down after PD_N_HARD_RESET_COUNT attempts, was never
+		 * reached and the port looped indefinitely.
+		 *
+		 * The sink path is untouched: as a sink we only have to
+		 * understand rev 3, which this stack does.
+		 *
+		 * RETRACTED, and left here because the retraction is the
+		 * useful part. Capping the source to PD 2.0 made things
+		 * WORSE against the same monitor, measured: at rev 3 the
+		 * Source_Capabilities were GoodCRC'd and the partner merely
+		 * declined to Request; at rev 2 they were not acknowledged at
+		 * all -- "IRQ: PD retry failed", TCPC_TX_FAILED -- so the
+		 * message reached the wire and the partner's protocol layer
+		 * refused it after three auto-retries.
+		 *
+		 * The real defect was never the revision. It was that this
+		 * stack claimed PD 3.0 while presenting an Rp that expresses
+		 * neither SinkTxOk nor SinkTxNG; that is now fixed in
+		 * SRC_SEND_CAPABILITIES and SRC_READY, so advertise the
+		 * revision we actually implement again.
+		 */
 		port->negotiated_rev = PD_MAX_REV;
 		port->message_id = 0;
 		port->rx_msgid = -1;
 		port->explicit_contract = false;
+
+		/*
+		 * Power negotiation is a source-initiated AMS and runs until
+		 * SRC_READY, so claim the channel for it the same way every
+		 * other source-initiated sequence does.
+		 */
+		tcpm_ams_start(dev);
 		tcpm_set_state(dev, SRC_SEND_CAPABILITIES, 0);
 		break;
 	case SRC_SEND_CAPABILITIES:
@@ -1555,6 +1797,13 @@ static void run_state_machine(struct udevice *dev)
 	case SRC_READY:
 		port->hard_reset_count = 0;
 
+		/*
+		 * The power-negotiation AMS ends here, whether it produced a
+		 * contract or timed out into this state. Releasing the channel
+		 * is what raises the Rp to SinkTxOk and tells the sink it may
+		 * speak.
+		 */
+		tcpm_ams_finish(dev);
 		tcpm_typec_connect(port);
 		break;
 	case SRC_WAIT_NEW_CAPABILITIES:
@@ -1673,8 +1922,9 @@ static void run_state_machine(struct udevice *dev)
 		port->update_sink_caps = false;
 		tcpm_typec_connect(port);
 		/*
-		 * Here poll_event_cnt is cleared, waiting for self-powered Type-C devices
-		 * to send DR_swap Messge until 1s (TCPM_POLL_EVENT_TIME_OUT * 500us)timeout
+		 * Re-arm the pump's quiet-time budget: a self-powered Type-C
+		 * device gets TCPM_POLL_EVENT_TIME_OUT ms from here to send its
+		 * DR_Swap before the probe-time pump stops waiting for it.
 		 */
 		if (port->wait_dr_swap_message)
 			tcpm_reset_event_cnt(dev);
@@ -1691,6 +1941,13 @@ static void run_state_machine(struct udevice *dev)
 		port->hard_reset_count++;
 		drvops->set_pd_rx(dev, false);
 		port->nr_sink_caps = 0;
+		/*
+		 * A hard reset takes the partner out of every alt mode, and
+		 * this state leaves ->attached true and never reaches
+		 * tcpm_reset_port(), so it is its own invalidation site. This
+		 * monitor exercises it ~150 ms after Source_Capabilities.
+		 */
+		memset(&port->dp, 0, sizeof(port->dp));
 		if (port->pwr_role == TYPEC_SOURCE)
 			tcpm_set_state(dev, SRC_HARD_RESET_VBUS_OFF,
 				       PD_T_PS_HARD_RESET);
@@ -1789,6 +2046,12 @@ static void run_state_machine(struct udevice *dev)
 			tcpm_set_roles(dev, true, port->pwr_role,
 				       TYPEC_HOST);
 		}
+		/*
+		 * The DFP is who a DisplayPort alt mode was entered as, so a
+		 * data-role swap invalidates it even though the connection
+		 * survives.
+		 */
+		memset(&port->dp, 0, sizeof(port->dp));
 		/* DR_swap process complete, wait_dr_swap_message is cleared */
 		port->wait_dr_swap_message = false;
 		tcpm_set_state(dev, ready_state(port), 0);
@@ -1913,7 +2176,16 @@ static void _tcpm_cc_change(struct udevice *dev, enum typec_cc_status cc1,
 		if (tcpm_port_is_disconnected(port))
 			new_state = SNK_UNATTACHED;
 		else if (port->vbus_present)
-			new_state = tcpm_try_src(port) ? INVALID_STATE : SNK_ATTACHED;
+			/*
+			 * Linux branches to SRC_TRY here when the port prefers
+			 * the source role. This stack has no Try.SRC cluster,
+			 * and the placeholder was INVALID_STATE -- so a port
+			 * declaring try-power-role = "source" was driven into
+			 * a state with no handler rather than simply attaching
+			 * as a sink. Attach; a preference we cannot act on is
+			 * not a reason to wedge.
+			 */
+			new_state = SNK_ATTACHED;
 		else
 			new_state = SNK_UNATTACHED;
 		if (new_state != port->delayed_state)
@@ -2126,6 +2398,632 @@ static void tcpm_init(struct udevice *dev)
 		_tcpm_cc_change(dev, cc1, cc2);
 }
 
+/*
+ * Structured Vendor Defined Messages.
+ *
+ * Linux runs VDMs through an asynchronous state machine because its port
+ * manager is interrupt-driven and a VDM exchange must not block the thread
+ * that services everything else. U-Boot has the opposite problem: there is
+ * no other thread, and tcpm_pd_transmit() already blocks -- it polls the
+ * TCPC for tx-complete while running the receive path inline. So a VDM
+ * exchange here is "send, then keep pumping that same loop until the reply
+ * lands", which is a few dozen lines instead of a few hundred, and has
+ * exactly one transaction in flight by construction.
+ *
+ * What is deliberately NOT implemented: we never respond to a VDM. A partner
+ * may send Attention (a DisplayPort HPD change, most often) and it is
+ * accepted and dropped, which is legal -- Attention takes no response. A
+ * partner that initiates Discover Identity against us gets silence rather
+ * than a NAK. That is a real gap, and it is the right one to have first:
+ * everything below is about being a DisplayPort SOURCE, which is entirely
+ * an initiator role.
+ */
+
+/**
+ * tcpm_ams_start() - claim the channel for a source-initiated message sequence
+ * tcpm_ams_finish() - release it
+ *
+ * In PD 3.0 the Rp level a source presents IS the collision-avoidance flag:
+ * Rp-3.0A means SinkTxOk, the sink may start its own AMS; Rp-1.5A means
+ * SinkTxNG, it may not. A source that is about to own the channel lowers the
+ * level first and waits tSinkTx for the sink to see it.
+ *
+ * This is a property of "a source is starting an atomic message sequence",
+ * not of any particular message, which is why it lives here rather than at
+ * the call sites. It was previously open-coded in SRC_STARTUP and SRC_READY,
+ * which covered Source_Capabilities and nothing else -- so every VDM this
+ * stack sends went out of SRC_READY with the Rp still saying SinkTxOk while
+ * the source was in fact talking. That is exactly the case collision
+ * avoidance exists to prevent.
+ *
+ * Both are no-ops below PD 3.0, and for a sink, which has no Rp to speak
+ * with.
+ */
+static bool tcpm_ams_applies(struct tcpm_port *port)
+{
+	/*
+	 * One predicate for both halves. Below PD 3.0 neither touches the CC
+	 * at all: there is no collision avoidance to signal, and the Rp is
+	 * tcpm_rp_cc()'s to own as the current advertisement a legacy sink
+	 * reads.
+	 *
+	 * It is evaluated at two different times over mutable state, so a
+	 * hard reset or role change between them can still leave the level
+	 * where the other half would not have put it. That is why both halves
+	 * ASSIGN an absolute level rather than push and pop one.
+	 *
+	 * @attached is part of the predicate because tcpm_vdm_wait() runs the
+	 * state machine for the whole timeout, and the partner can leave
+	 * during it. SRC_UNATTACHED and SNK_UNATTACHED set the CC themselves
+	 * -- to Rp-default and to Rd respectively -- and neither touches
+	 * pwr_role or negotiated_rev, so without this test a VDM retry would
+	 * install an Rp on a detached port that the state machine believes is
+	 * presenting Rd and looking for a source, and re-attaching as a sink
+	 * would stay broken until something drove SNK_UNATTACHED again. When
+	 * the partner is gone there is no channel to arbitrate for, and the
+	 * unattached states already own the level.
+	 */
+	return port->attached &&
+	       port->pwr_role == TYPEC_SOURCE &&
+	       port->negotiated_rev >= PD_REV30;
+}
+
+/**
+ * tcpm_ams_start() - claim the channel for a source-initiated sequence
+ * tcpm_ams_finish() - release it
+ *
+ * Both are IDEMPOTENT ABSOLUTE ASSIGNMENTS, not a matched push/pop pair, and
+ * that is load bearing. A nesting counter was tried and was worse than what
+ * it replaced: SRC_STARTUP starts a sequence that only SRC_READY finishes,
+ * but the hard-reset loop re-enters SRC_STARTUP without ever passing through
+ * SRC_READY -- so the count only ever grew, the Rp latched at SinkTxNG
+ * permanently over a 1.4 A rail, and every later VDM no-oped because the
+ * count never returned to zero. That is the bug this code exists to prevent,
+ * made permanent instead of transient.
+ *
+ * Assigning instead means an unbalanced call is self-correcting: whichever
+ * runs last states the level the port should be presenting right now.
+ */
+static void tcpm_ams_start(struct udevice *dev)
+{
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+
+	if (!tcpm_ams_applies(port))
+		return;
+
+	/* Already claimed -- do not pay tSinkTx again. */
+	if (port->cc_req == TYPEC_CC_RP_1_5)
+		return;
+
+	tcpm_set_cc(dev, TYPEC_CC_RP_1_5);
+	mdelay(PD_T_SINK_TX);
+}
+
+static void tcpm_ams_finish(struct udevice *dev)
+{
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+
+	if (!tcpm_ams_applies(port))
+		return;
+
+	/*
+	 * SinkTxOk only once a contract exists. Before that the Rp is still
+	 * the advertisement a legacy sink reads for its current limit, and
+	 * claiming 3.0 A to a device that will believe it is not ours to do.
+	 *
+	 * Without a contract the level to return to is tcpm_rp_cc() -- what
+	 * this port advertises for its own rail -- and NOT SinkTxNG. Those
+	 * are the same thing only on a 1.5 A source. This board declares
+	 * PDO_FIXED(5000, 1400), so tcpm_rp_cc() is Rp-default, and releasing
+	 * to Rp-1.5A would latch an over-advertisement permanently: a non-PD
+	 * device attaches, SRC_STARTUP claims the channel for the power
+	 * negotiation that the device never answers, SRC_READY releases it,
+	 * and nothing between here and the next detach lowers it again.
+	 */
+	tcpm_set_cc(dev, port->explicit_contract ? TYPEC_CC_RP_3_0
+						 : tcpm_rp_cc(port));
+}
+
+static u32 tcpm_svdm_header(u16 svid, u8 opos, u8 cmd)
+{
+	/*
+	 * SVDM version 1.0 rather than the negotiated version: DPAM 1.0b is
+	 * what this SoC's DP path implements, every sink accepts 1.0, and
+	 * advertising 2.0 would oblige us to handle the 2.0 response shapes.
+	 */
+	return VDO(svid, 1, SVDM_VER_1_0, VDO_OPOS(opos) | (cmd));
+}
+
+static int tcpm_pd_send_vdm(struct udevice *dev, const u32 *vdo,
+			    unsigned int cnt)
+{
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+	struct pd_message msg;
+	unsigned int i;
+
+	if (!cnt || cnt > VDO_MAX_SIZE)
+		return -EINVAL;
+
+	memset(&msg, 0, sizeof(msg));
+	msg.header = PD_HEADER_LE(PD_DATA_VENDOR_DEF, port->pwr_role,
+				  port->data_role, port->negotiated_rev,
+				  port->message_id, cnt);
+
+	for (i = 0; i < cnt; i++)
+		msg.payload[i] = cpu_to_le32(vdo[i]);
+
+	/*
+	 * Discard any parked VDM before the request goes out, so the wait
+	 * below cannot match a response to the PREVIOUS command. Doing it
+	 * here rather than in the wait is what makes that guarantee hold
+	 * even though tcpm_pd_transmit() itself pumps the receive path.
+	 *
+	 * Arm the receive filter in the same breath, and for the same reason:
+	 * tcpm_pd_transmit() pumps the receive path, so the response can be
+	 * delivered before this function has even returned.
+	 */
+	port->vdm_rx_cnt = 0;
+	port->vdm_wait_svid = PD_VDO_VID(vdo[0]);
+	port->vdm_wait_cmd = PD_VDO_CMD(vdo[0]);
+	port->vdm_waiting = true;
+
+	return tcpm_pd_transmit(dev, TCPC_TX_SOP, &msg);
+}
+
+static int tcpm_vdm_wait(struct udevice *dev, u16 svid, u8 cmd,
+			 unsigned int timeout_ms)
+{
+	const struct dm_tcpm_ops *drvops = dev_get_driver_ops(dev);
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+	ulong start = get_timer(0);
+
+	do {
+		if (port->vdm_rx_cnt) {
+			u32 hdr = port->vdm_rx[0];
+
+			if (PD_VDO_SVDM(hdr) && PD_VDO_VID(hdr) == svid &&
+			    PD_VDO_CMD(hdr) == cmd &&
+			    PD_VDO_CMDT(hdr) != CMDT_INIT)
+				return PD_VDO_CMDT(hdr);
+
+			/*
+			 * Somebody else's message -- an Attention, or a
+			 * command aimed at us. Drop it and keep waiting; a
+			 * VDM that is not the response we asked for must not
+			 * end the wait, or a monitor that sends HPD mid-
+			 * discovery would abort the discovery.
+			 */
+			port->vdm_rx_cnt = 0;
+		}
+
+		drvops->poll_event(dev);
+		udelay(500);
+		tcpm_check_and_run_delayed_work(dev);
+	} while (get_timer(start) < timeout_ms);
+
+	return -ETIMEDOUT;
+}
+
+/**
+ * tcpm_vdm_xfer() - send one structured VDM and wait for its response
+ *
+ * Returns the response's command type (CMDT_RSP_ACK / CMDT_RSP_NAK) on
+ * success, or a negative errno. BUSY is retried rather than returned: it
+ * means "ask again later", and PD_T_VDM_BUSY is how much later.
+ */
+static int tcpm_vdm_xfer(struct udevice *dev, const u32 *vdo, unsigned int cnt,
+			 unsigned int timeout_ms)
+{
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+	u16 svid = PD_VDO_VID(vdo[0]);
+	u8 cmd = PD_VDO_CMD(vdo[0]);
+	int tries, ret;
+
+	for (tries = 0; tries < 3; tries++) {
+		/*
+		 * Per attempt, not once around the loop: tcpm_vdm_wait() runs
+		 * the state machine, which can reach SRC_READY and release the
+		 * channel underneath us. Re-asserting is a no-op when the level
+		 * is already SinkTxNG, so this costs nothing in the common case
+		 * and repairs the one where it matters.
+		 */
+		tcpm_ams_start(dev);
+
+		ret = tcpm_pd_send_vdm(dev, vdo, cnt);
+		if (ret < 0)
+			goto out;
+
+		ret = tcpm_vdm_wait(dev, svid, cmd, timeout_ms);
+		if (ret != CMDT_RSP_BUSY)
+			goto out;
+
+		mdelay(PD_T_VDM_BUSY);
+	}
+
+	ret = -EBUSY;
+out:
+	/*
+	 * Disarm, so an Attention arriving outside an exchange is parked as
+	 * before rather than silently discarded. Nothing reads it today, but
+	 * a hotplug consumer would, and a filter left armed would be a trap
+	 * for whoever writes one.
+	 */
+	port->vdm_waiting = false;
+	tcpm_ams_finish(dev);
+
+	return ret;
+}
+
+static int tcpm_vdm_ack(struct udevice *dev, const u32 *vdo, unsigned int cnt,
+			unsigned int timeout_ms)
+{
+	int ret = tcpm_vdm_xfer(dev, vdo, cnt, timeout_ms);
+
+	if (ret < 0)
+		return ret;
+	if (ret != CMDT_RSP_ACK)
+		return -EPROTO;
+
+	return 0;
+}
+
+/**
+ * tcpm_wait_ready() - run the port until it can carry a message
+ *
+ * The state machine is pumped once, at probe, and then the port idles. That
+ * is fine when the partner is already up -- but a display powered BY this
+ * board comes up after it, so at probe time there is nothing to attach to,
+ * and the port is left in SNK_WAIT_CAPABILITIES with no one to advance it.
+ * A consumer then found a port that was permanently not-ready and had no way
+ * to ask it to try.
+ *
+ * So a consumer says what it needs -- a port that can carry a message -- and
+ * this runs the machine until that is true or the time is up, rather than
+ * reporting the state and giving up.
+ */
+int tcpm_wait_ready(struct udevice *dev, unsigned int timeout_ms)
+{
+	const struct dm_tcpm_ops *drvops = dev_get_driver_ops(dev);
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+	ulong start;
+	int ret;
+
+	/*
+	 * A consumer's wait starts where the probe-time pump ended, and the
+	 * pump may still be running from its tick: finish it first, and
+	 * outside this call's budget, since it was never charged to one.
+	 */
+	tcpm_settle(dev);
+	start = get_timer(0);
+
+	/*
+	 * Wake FIRST. Polling a sleeping TCPC observes nothing -- its CC
+	 * measurement block is off and every interrupt is masked -- so
+	 * without this the loop below can only ever advance a state change
+	 * that was already armed when the port idled. That happens to cover
+	 * the port-stuck-in-SNK_WAIT_CAPABILITIES case, which is why this
+	 * appeared to work, but the case the function was written for -- a
+	 * display that powers up after the board, leaving nothing attached at
+	 * probe -- is exactly the one where the chip is powered down hardest
+	 * and no amount of polling can see the attach.
+	 */
+	ret = tcpm_wake(dev);
+	if (ret < 0)
+		return ret;
+
+	do {
+		if (port->attached &&
+		    (port->state == SRC_READY || port->state == SNK_READY))
+			goto ready;
+
+		drvops->poll_event(dev);
+		udelay(500);
+		tcpm_check_and_run_delayed_work(dev);
+	} while (get_timer(start) < timeout_ms);
+
+	dev_dbg(dev, "TCPM: not ready after %u ms, state %s\n", timeout_ms,
+		tcpm_states[port->state]);
+
+	return -EAGAIN;
+
+ready:
+	/*
+	 * Reaching SNK_READY is not the same as being able to INITIATE. Under
+	 * PD 2.0 -- which is what this monitor negotiates -- structured VDMs
+	 * are the DFP's to start, and a port that declared data-role = "host"
+	 * attaches as the UFP and acquires the host role from the partner's
+	 * DR_Swap. That swap arrives a few messages after the contract, so a
+	 * consumer that started discovery the instant SNK_READY appeared would
+	 * send Discover Identity as a UFP and be ignored.
+	 *
+	 * So spend what is left of the caller's own budget waiting for the role
+	 * we were told this port can hold -- and then proceed regardless, since
+	 * a partner that offers the swap late but does offer it is still worth
+	 * talking to, and refusing here would trade a working link for a tidier
+	 * state machine.
+	 *
+	 * ->wait_dr_swap_message is the gate that keeps this from costing time
+	 * it cannot buy anything with. It is set from the partner's first
+	 * Source_Capabilities -- true only for a DUAL_ROLE|DATA_SWAP source,
+	 * i.e. one that can hand the data role over at all -- and cleared again
+	 * once the swap completes, on hard reset, and on detach. A plain
+	 * charger, or a port that reached SNK_READY without PD at all (the
+	 * set_pd_rx failure arm of SNK_WAIT_CAPABILITIES), therefore leaves it
+	 * false and skips the wait entirely rather than burning the caller's
+	 * whole timeout on a swap that is not coming. tcpm_poll_event() already
+	 * uses this exact flag for the same "is a swap still owed to us?"
+	 * question, so the two pumps agree on when the port has settled.
+	 *
+	 * Honesty about the cost that remains: a partner that ADVERTISES
+	 * dual-role data and then never sends DR_Swap still burns the full
+	 * timeout_ms here -- 960 ms at every call site (PD_T_SINK_WAIT_CAP * 4)
+	 * -- where before this wait existed the function returned the instant
+	 * SNK_READY appeared, and it compounds across the two or three calls an
+	 * alt-mode entry makes. The outcome is unchanged, only the latency. No
+	 * cheaper positive signal for "this partner will never swap" exists in
+	 * the protocol: an advertised capability the partner declines to
+	 * exercise is indistinguishable from one it has not exercised YET, so
+	 * anything shorter would be a guess at the partner's timing, and this
+	 * comment is not going to pretend otherwise.
+	 *
+	 * The test is "not UFP-only", NOT "is DFP". A connector declaring
+	 * data-role = "dual" can hold the host role every bit as much as one
+	 * declaring "host" -- DRD is the SUPERSET -- so an == DFP test drops
+	 * this wait for exactly the ports that also need it, and does so
+	 * silently: alt-mode entry then starts as a UFP and the partner
+	 * ignores the VDMs. Only TYPEC_PORT_DATA_UFP is a real "this port can
+	 * never be the host". Nothing is spent on a port that will not swap:
+	 * ->wait_dr_swap_message is false unless the partner's own
+	 * Source_Capabilities advertised DUAL_ROLE|DATA_SWAP, so widening this
+	 * condition costs a DRD port with a plain charger nothing at all.
+	 */
+	while (port->typec_data != TYPEC_PORT_DATA_UFP &&
+	       port->data_role != TYPEC_HOST &&
+	       port->wait_dr_swap_message &&
+	       get_timer(start) < timeout_ms) {
+		drvops->poll_event(dev);
+		udelay(500);
+		tcpm_check_and_run_delayed_work(dev);
+
+		/*
+		 * The loop above is pumping a live state machine, so the port
+		 * can go away underneath it: a disconnect, a hard reset, or the
+		 * ERROR_RECOVERY -> PORT_RESET path all run from these very
+		 * calls, and PORT_RESET clears ->attached while a sink hard
+		 * reset puts ->data_role back to TYPEC_DEVICE. Neither of those
+		 * ends the loop on its own -- the exit condition only watches
+		 * for the role we WANT -- so without this check the wait would
+		 * spin out the remaining budget on a dead port and then fall
+		 * through to `return 0`, telling the caller it may send
+		 * Discover Identity to a partner that is no longer there.
+		 *
+		 * -EAGAIN is what the timeout arm above already returns for
+		 * "not usable, ask again later", and every caller treats any
+		 * non-zero as fatal to this attempt, which is correct: the
+		 * contract this function promises is a port that can carry a
+		 * message right now.
+		 */
+		if (!port->attached ||
+		    (port->state != SRC_READY && port->state != SNK_READY)) {
+			dev_dbg(dev, "TCPM: left ready while awaiting DR_Swap, state %s attached %d\n",
+				tcpm_states[port->state], port->attached);
+			return -EAGAIN;
+		}
+	}
+
+	/*
+	 * Say WHICH of the two no-swap cases this was: one of them cost the
+	 * caller its whole timeout and the other cost nothing, and a log line
+	 * that cannot tell them apart is the one you want when alt-mode entry
+	 * is slow rather than broken.
+	 *
+	 * Same "not UFP-only" test as the wait above, and for the same reason:
+	 * a diagnostic that goes quiet for exactly the port shape the wait was
+	 * just widened to cover would report a link as fine while it came up
+	 * as a UFP.
+	 */
+	if (port->typec_data != TYPEC_PORT_DATA_UFP &&
+	    port->data_role != TYPEC_HOST)
+		dev_dbg(dev, "TCPM: proceeding as UFP -- partner %s\n",
+			port->wait_dr_swap_message ?
+			"advertised a data swap but did not send one" :
+			"cannot swap the data role");
+
+	return 0;
+}
+
+/**
+ * tcpm_discover_svids() - run generic alt-mode discovery on the partner
+ *
+ * Discover Identity for the Modal Operation bit, then Discover SVIDs. Leaves
+ * the partner's SVID list in the port, where tcpm_get_partner_svids() and
+ * tcpm_discover_modes() can reach it.
+ *
+ * Nothing here knows what any SVID means. That is the point: alt modes are
+ * consumers of this, not part of it.
+ */
+int tcpm_discover_svids(struct udevice *dev)
+{
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+	u32 vdo[VDO_MAX_SIZE];
+	unsigned int i, half;
+	bool done = false;
+	int ret, round;
+
+	port->nr_partner_svids = 0;
+
+	ret = tcpm_wait_ready(dev, PD_T_SINK_WAIT_CAP * 4);
+	if (ret)
+		return ret;
+
+	/*
+	 * Discover Identity is not asked for its identity. It is asked for
+	 * one bit: Modal Operation Supported in the ID header. A partner
+	 * without it has no alt modes to discover and asking further is a
+	 * protocol error, not merely futile.
+	 */
+	vdo[0] = tcpm_svdm_header(USB_SID_PD, 0, CMD_DISCOVER_IDENT);
+	ret = tcpm_vdm_ack(dev, vdo, 1, PD_T_VDM_SNDR_RSP * 10);
+	if (ret)
+		return ret;
+
+	if (port->vdm_rx_cnt < 2 || !PD_IDH_MODAL_SUPP(port->vdm_rx[1])) {
+		dev_dbg(dev, "TCPM: partner does not support modal operation\n");
+		return -EOPNOTSUPP;
+	}
+
+	/*
+	 * Discover SVIDs, repeated while the response could have more behind
+	 * it. Two SVIDs per VDO, terminated by a zero -- but a response that
+	 * is not completely full also ends the list, because partners exist
+	 * that stop short of 12 SVIDs without writing the terminator, and
+	 * looping purely on "no zero seen" hangs against them.
+	 */
+	for (round = 0; round < 4 && !done; round++) {
+		vdo[0] = tcpm_svdm_header(USB_SID_PD, 0, CMD_DISCOVER_SVID);
+		ret = tcpm_vdm_ack(dev, vdo, 1, PD_T_VDM_SNDR_RSP * 10);
+		if (ret)
+			return ret;
+
+		for (i = 1; i < port->vdm_rx_cnt && !done; i++) {
+			u16 svid[2];
+
+			svid[0] = PD_VDO_SVID_SVID0(port->vdm_rx[i]);
+			svid[1] = PD_VDO_SVID_SVID1(port->vdm_rx[i]);
+
+			for (half = 0; half < 2; half++) {
+				if (!svid[half] ||
+				    port->nr_partner_svids >= SVID_DISCOVERY_MAX) {
+					done = true;
+					break;
+				}
+
+				port->partner_svids[port->nr_partner_svids++] =
+					svid[half];
+			}
+		}
+
+		if (port->vdm_rx_cnt != VDO_MAX_SIZE)
+			break;
+	}
+
+	return 0;
+}
+
+/**
+ * tcpm_discover_modes() - Discover Modes for one SVID
+ * @modes: filled with the mode VDOs, in response order
+ * @max: capacity of @modes
+ *
+ * Returns the number of modes discovered, or a negative errno.
+ *
+ * The INDEX of a mode in @modes, one-based, is its object position -- that is
+ * what Enter Mode has to carry, and it is not a constant. A partner is free to
+ * return the mode a caller wants second.
+ */
+int tcpm_discover_modes(struct udevice *dev, u16 svid, u32 *modes,
+			unsigned int max)
+{
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+	u32 vdo[VDO_MAX_SIZE];
+	unsigned int i, n;
+	int ret;
+
+	ret = tcpm_wait_ready(dev, PD_T_SINK_WAIT_CAP * 4);
+	if (ret)
+		return ret;
+
+	vdo[0] = tcpm_svdm_header(svid, 0, CMD_DISCOVER_MODES);
+	ret = tcpm_vdm_ack(dev, vdo, 1, PD_T_VDM_SNDR_RSP * 10);
+	if (ret)
+		return ret;
+
+	if (port->vdm_rx_cnt < 2)
+		return -ENODEV;
+
+	n = min(max, port->vdm_rx_cnt - 1);
+	for (i = 0; i < n; i++)
+		modes[i] = port->vdm_rx[i + 1];
+
+	return n;
+}
+
+int tcpm_vdm_exchange(struct udevice *dev, const u32 *vdo, unsigned int cnt,
+		      u32 *rx, unsigned int max, unsigned int *rx_cnt,
+		      unsigned int timeout_ms)
+{
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+	unsigned int i, n;
+	int ret;
+
+	if (rx_cnt)
+		*rx_cnt = 0;
+
+	ret = tcpm_vdm_xfer(dev, vdo, cnt, timeout_ms);
+	if (ret < 0)
+		return ret;
+
+	/*
+	 * Report how many objects the caller may READ, which is how many were
+	 * copied -- not how many arrived on the wire. A caller reading rx[1]
+	 * has to know it exists: a partner may ACK with a header and no data
+	 * object, and without a count the caller reads whatever was on its
+	 * stack and feeds it into the next message it sends. Reporting the
+	 * wire count when the buffer was smaller would recreate that same
+	 * defect one step further along.
+	 */
+	if (rx && max) {
+		n = min(max, port->vdm_rx_cnt);
+		for (i = 0; i < n; i++)
+			rx[i] = port->vdm_rx[i];
+
+		if (rx_cnt)
+			*rx_cnt = n;
+	}
+
+	return ret;
+}
+
+u32 tcpm_svdm_build_header(u16 svid, u8 opos, u8 cmd)
+{
+	return tcpm_svdm_header(svid, opos, cmd);
+}
+
+struct typec_dp_state *tcpm_dp_state(struct udevice *dev)
+{
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+
+	tcpm_settle(dev);
+
+	return &port->dp;
+}
+
+int tcpm_get_connector(struct udevice *dev, ofnode *node)
+{
+	const struct dm_tcpm_ops *drvops = dev_get_driver_ops(dev);
+
+	if (!drvops || !drvops->get_connector_node)
+		return -ENOSYS;
+
+	return drvops->get_connector_node(dev, node);
+}
+
+
+unsigned int tcpm_get_partner_svids(struct udevice *dev, u16 *svids,
+				    unsigned int max)
+{
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+	unsigned int i, n;
+
+	tcpm_settle(dev);
+	n = min(max, port->nr_partner_svids);
+
+	for (i = 0; i < n; i++)
+		svids[i] = port->partner_svids[i];
+
+	return n;
+}
+
 static int tcpm_fw_get_caps(struct udevice *dev)
 {
 	const struct dm_tcpm_ops *drvops = dev_get_driver_ops(dev);
@@ -2138,6 +3036,29 @@ static int tcpm_fw_get_caps(struct udevice *dev)
 	ret = drvops->get_connector_node(dev, &node);
 	if (ret)
 		return ret;
+
+	/*
+	 * The DATA role capability, which is not the power role. A port can be
+	 * a power sink and a data host at once -- that is what a laptop
+	 * driving a self-powered monitor is, and what DisplayPort alt mode
+	 * needs from us. Without this the sink attach below hardcoded UFP, so
+	 * a connector declaring data-role = "host" still came up as a device
+	 * and could never be the DisplayPort source.
+	 *
+	 * Absent property keeps the old assumption rather than failing: a
+	 * board that never declared one was getting DFP-when-source and
+	 * UFP-when-sink, which is what "dual" means.
+	 */
+	port->typec_data = TYPEC_PORT_DATA_DRD;
+	cap_str = ofnode_read_string(node, "data-role");
+	if (cap_str) {
+		if (!strcmp("host", cap_str))
+			port->typec_data = TYPEC_PORT_DATA_DFP;
+		else if (!strcmp("device", cap_str))
+			port->typec_data = TYPEC_PORT_DATA_UFP;
+		else if (strcmp("dual", cap_str))
+			return -EINVAL;
+	}
 
 	cap_str = ofnode_read_string(node, "power-role");
 	if (!cap_str)
@@ -2227,28 +3148,182 @@ static int tcpm_port_init(struct udevice *dev)
 	return 0;
 }
 
-static void tcpm_poll_event(struct udevice *dev)
+/**
+ * tcpm_enter_dp_altmode() - enter DisplayPort alt mode, on request
+ *
+ * A port whose connector node carries altmodes/displayport is a DisplayPort
+ * source receptacle; the board said so, and there is nowhere else for it to say
+ * so. For a long time the only thing that acted on that declaration was the
+ * `tcpm dp enter` command, which means a board could describe a DisplayPort port
+ * completely and correctly and still come up with a blank monitor unless a
+ * human typed a command -- so the display worked on the bench and never at
+ * boot, which is the one place it has to work.
+ *
+ * Entering is the port manager's business for the same reason the power
+ * contract is: it is negotiated over the connector, it must happen while the
+ * transceiver is awake, and every consumer downstream (the Type-C PHY's lane
+ * mux, then cdn-dp) can only READ the result. A consumer that sent Enter Mode
+ * on its own behalf would be a second entity driving the partner's mode state
+ * with no way to agree with this one about who is in it.
+ *
+ * 🔴 But it must follow INTENT, and the first version of this did not: it ran
+ * unconditionally from tcpm_poll_event(), i.e. on EVERY probe of the port. The
+ * USB3 PHY reaches a probe -- rockchip_usb3_phy_power_on() ->
+ * rockchip_tcphy_set_mode() -> rockchip_tcphy_get_orientation(), which has
+ * always probed -- so `usb start` alone would send Enter Mode to a USB-C dock
+ * and configure pin assignment C, four DisplayPort lanes with no SuperSpeed,
+ * while that same call finished configuring the PHY for USB3. Nothing exits the
+ * mode afterwards; on this hardware only a physical unplug recovers it. So the
+ * declaration says the port CAN do DisplayPort, and a caller asking says it
+ * SHOULD -- the two are not the same and only the second belongs here.
+ *
+ * Failure is a warning to the caller, not a probe failure. A partner that
+ * refuses DisplayPort, or a cable carrying only USB, is an ordinary thing to
+ * find on a Type-C port; it must not take the port manager -- and with it the
+ * power contract -- down with it.
+ *
+ * Return: as documented in include/usb/tcpm.h.
+ */
+int tcpm_enter_dp_altmode(struct udevice *dev)
+{
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+	int ret;
+
+	/*
+	 * Enter Mode is the DFP's to send, so a port that can never hold the host
+	 * data role can never carry DisplayPort, whatever its connector declares.
+	 * A sink-only port is one: it attaches as the device, and this stack
+	 * rejects a DR_Swap on any port that is not dual-power-role (the
+	 * PD_CTRL_DR_SWAP case above). Asking anyway is not harmless: it starts
+	 * PD traffic and alt-mode discovery on the link, and on ROC-RK3399-PC
+	 * that link is the board's power inlet -- Type-C0, the same port its
+	 * USB gadget talks to the host on.
+	 */
+	if (port->port_type == TYPEC_PORT_SNK && port->data_role != TYPEC_HOST) {
+		dev_dbg(dev, "TCPM: sink-only port, never the host: no DisplayPort\n");
+		return -ENOENT;
+	}
+
+	/*
+	 * There is deliberately NO "is anything attached?" gate here, and the
+	 * first version of this function had one -- `if (!drvops->get_vbus(dev))
+	 * return -ENODEV;` -- which was wrong twice over.
+	 *
+	 * It read a STALE value. fusb302_get_vbus() returns chip->vbus_present,
+	 * a shadow written only in the chip's init and in its poll_event/IRQ
+	 * handler. Nothing refreshes it between the port's probe and a request
+	 * arriving here, and by then enter_low_power_mode() has masked every
+	 * interrupt and dropped power mode -- so the shadow is stale AND the
+	 * chip is asleep, which is the state in which it observes nothing.
+	 *
+	 * And it short-circuited ahead of the machinery written for exactly
+	 * this case. Returning here skips typec_dp_autoenter() entirely, so
+	 * tcpm_wait_ready() -- and the tcpm_wake() inside it -- never run, even
+	 * though tcpm_wake()'s own contract says it is needed by anything that
+	 * touches the wire OR waits on the chip to observe something. On a
+	 * board whose display is powered BY the board, the panel attaches after
+	 * U-Boot does, and this gate turned that into a hard -ENODEV.
+	 *
+	 * That gate was, precisely, a second worse answer to a question
+	 * tcpm_wait_ready() owns -- the same mistake the readiness pre-check
+	 * described below was removed for. Leaving the question to that
+	 * function costs a wait when nothing is attached and is correct when
+	 * something attaches late; the reverse trade is not worth making on a
+	 * board that always attaches late.
+	 */
+
+	/*
+	 * No "is the port ready?" test here, deliberately, and the first
+	 * version of this function had one -- it returned unless the port was
+	 * attached and in SNK_READY/SRC_READY, and that made boot-time entry
+	 * fail on this board every time. Measured: the port is still cycling
+	 * through ERROR_RECOVERY with the monitor when the poll loop above
+	 * gives up its 1 s budget, so the guard read "not ready" and gave up on
+	 * a port that settles about a second later.
+	 *
+	 * tcpm_wait_ready() -- which every VDM exchange underneath
+	 * typec_dp_enter() already calls -- exists precisely for this, and its
+	 * own comment names this board's case: "a display powered BY this board
+	 * comes up after it, so at probe time there is nothing to attach to".
+	 * It wakes the transceiver and pumps the machine until the port can
+	 * carry a message. A pre-check here is a second, worse answer to a
+	 * question that function owns.
+	 *
+	 * There is no surviving gate to point at: the sentence that used to sit
+	 * here named "the get_vbus() check above", which the comment twenty
+	 * lines up explains was deleted for the same reason this one was never
+	 * added. Two comments in one function disagreeing about whether a gate
+	 * exists is worse than either answer.
+	 */
+	ret = typec_dp_autoenter(dev);
+
+	/* The board declared no DisplayPort here. Not a failure, not news. */
+	if (ret == -ENOENT)
+		return ret;
+
+	/* Already in the mode before we asked. Success, but nothing happened. */
+	if (ret == -EALREADY)
+		return 0;
+
+	if (ret)
+		dev_warn(dev, "TCPM: DisplayPort alt mode not entered: %d\n",
+			 ret);
+	else
+		dev_info(dev, "TCPM: entered DisplayPort alt mode\n");
+
+	return ret;
+}
+
+/*
+ * The probe-time pump, in three pieces so that it can run either inline
+ * (the loop every consumer used to pay for at probe) or one step at a time
+ * from a cyclic tick while the rest of the boot goes on.
+ */
+
+/* Has the pump reached the state the synchronous loop stopped at? */
+static bool tcpm_poll_event_settled(struct tcpm_port *port)
+{
+	if (!port->wait_dr_swap_message &&
+	    (port->state == SNK_READY || port->state == SRC_READY))
+		return true;
+
+	return time_after_eq64((u64)timer_get_us(), port->poll_event_deadline);
+}
+
+/* One turn of the pump: read the chip's events, run any timer that expired */
+static void tcpm_poll_event_step(struct udevice *dev)
+{
+	const struct dm_tcpm_ops *drvops = dev_get_driver_ops(dev);
+
+	drvops->poll_event(dev);
+	tcpm_check_and_run_delayed_work(dev);
+}
+
+/* What the pump does once it has settled: report, then let the chip sleep */
+static void tcpm_poll_event_finish(struct udevice *dev)
 {
 	const struct dm_tcpm_ops *drvops = dev_get_driver_ops(dev);
 	struct tcpm_port *port = dev_get_uclass_plat(dev);
 
-	if (!drvops->get_vbus(dev))
-		return;
-
-	while (port->poll_event_cnt < TCPM_POLL_EVENT_TIME_OUT) {
-		if (!port->wait_dr_swap_message &&
-		    (port->state == SNK_READY || port->state == SRC_READY))
-			break;
-
-		drvops->poll_event(dev);
-		port->poll_event_cnt++;
-		udelay(500);
-		tcpm_check_and_run_delayed_work(dev);
-	}
-
 	if (port->state != SNK_READY && port->state != SRC_READY)
 		dev_warn(dev, "TCPM: exit in state %s\n",
 			 tcpm_states[port->state]);
+
+	/*
+	 * Alt-mode entry deliberately does NOT happen here.
+	 *
+	 * It did, and it made `usb start` drive USB-C partners into
+	 * DisplayPort -- see tcpm_enter_dp_altmode(). A probe is not a request:
+	 * this function runs for whoever probed the port, and most of them want
+	 * USB. The DisplayPort consumer asks for the mode itself, which is also
+	 * the only point at which "somebody wants a display" is actually known.
+	 *
+	 * The cost of moving it is that a later request arrives after the
+	 * low-power block below has masked the transceiver's interrupts and
+	 * stopped its oscillator. That is survivable and already handled:
+	 * every VDM exchange underneath typec_dp_enter() calls
+	 * tcpm_wait_ready(), which calls tcpm_wake() first.
+	 */
 
 	/*
 	 * At this time, call the callback function of the respective pd chip
@@ -2265,14 +3340,102 @@ static void tcpm_poll_event(struct udevice *dev)
 	if (!drvops->enter_low_power_mode)
 		return;
 
+	/*
+	 * Set BEFORE the call, and leave it set on failure. The FUSB302 masks
+	 * every interrupt first and only then changes power mode, so a
+	 * half-completed sleep leaves a chip that reports nothing while the
+	 * port believes it is awake -- which reproduces the very symptom the
+	 * wake exists to cure, with no path back. "May be asleep" is the
+	 * honest state after an attempt, whatever the attempt returned.
+	 */
+	port->low_power = true;
+
 	if (drvops->enter_low_power_mode(dev, port->attached, port->pd_capable))
 		dev_err(dev, "TCPM: failed to enter low power\n");
 	else
 		dev_info(dev, "TCPM: PD chip enter low power mode\n");
 }
 
+/* The pump run inline, to its end: the loop the probe used to block on */
+static void tcpm_poll_event(struct udevice *dev)
+{
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+
+	while (!tcpm_poll_event_settled(port)) {
+		tcpm_poll_event_step(dev);
+		udelay(500);
+	}
+
+	tcpm_poll_event_finish(dev);
+}
+
+/*
+ * How often the cyclic tick steps the pump. The inline loop polled every
+ * ~1 ms (a 500 us sleep plus the poll itself); a tick every 4 ms keeps the
+ * port's own reaction time well inside the PD protocol's tightest budget
+ * for a sink (tSenderResponse, 24-30 ms: the Request that must answer a
+ * Source_Capabilities) while costing the boot a few percent of one core
+ * instead of all of it, since one poll is a few I2C register reads.
+ */
+#define TCPM_PROBE_PUMP_PERIOD_US	4000
+
+static void tcpm_probe_pump_tick(struct cyclic_info *c)
+{
+	struct tcpm_port *port = container_of(c, struct tcpm_port, cyclic);
+	struct udevice *dev = port->dev;
+
+	if (!tcpm_poll_event_settled(port)) {
+		/*
+		 * A tick lands wherever the boot last called udelay(), and
+		 * that includes the inside of another device's transfer on
+		 * this port's I2C bus (the bus driver polls its controller
+		 * with udelay()). Stepping the pump there would put a second
+		 * transaction into the middle of the first. Step aside; the
+		 * next tick is 4 ms away and the state machine keeps wall
+		 * time, so nothing is lost but the one poll.
+		 */
+		if (device_get_uclass_id(dev->parent) == UCLASS_I2C &&
+		    dm_i2c_xfer_in_progress(dev->parent))
+			return;
+
+		tcpm_poll_event_step(dev);
+		if (!tcpm_poll_event_settled(port))
+			return;
+	}
+
+	cyclic_unregister(c);
+	port->probe_pump_pending = false;
+	tcpm_poll_event_finish(dev);
+}
+
+void tcpm_settle(struct udevice *dev)
+{
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+
+	if (!port->probe_pump_pending)
+		return;
+
+	cyclic_unregister(&port->cyclic);
+	port->probe_pump_pending = false;
+	tcpm_poll_event(dev);
+}
+
+int tcpm_pre_remove(struct udevice *dev)
+{
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+
+	if (port->probe_pump_pending) {
+		cyclic_unregister(&port->cyclic);
+		port->probe_pump_pending = false;
+	}
+
+	return 0;
+}
+
 int tcpm_post_probe(struct udevice *dev)
 {
+	const struct dm_tcpm_ops *drvops = dev_get_driver_ops(dev);
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
 	int ret = tcpm_port_init(dev);
 
 	if (ret < 0) {
@@ -2280,7 +3443,45 @@ int tcpm_post_probe(struct udevice *dev)
 		return ret;
 	}
 
-	tcpm_poll_event(dev);
+	port->dev = dev;
+
+	/*
+	 * Nothing to pump on a port with no VBUS: a source-capable port
+	 * whose partner has not powered anything yet waits for a consumer
+	 * to ask (tcpm_wait_ready()), and a sink port with no supply has no
+	 * partner at all. Exactly the early return the inline pump had.
+	 */
+	if (!drvops->get_vbus(dev))
+		return 0;
+
+	tcpm_reset_event_cnt(dev);
+
+	/*
+	 * The pump runs at probe for a reason tcpm_post_bind() spells out: a
+	 * board powered through this port must talk PD inside the source's
+	 * window or lose its supply to a hard reset later. But the state
+	 * machine is a series of wall-clock waits -- tCCDebounce, then
+	 * tSinkWaitCap, and on a supply that speaks no PD at all the whole
+	 * soft-reset / hard-reset walk to SNK_READY-without-a-contract, two
+	 * seconds of it -- and the inline loop made the entire boot stand
+	 * still for them. So the negotiation starts here and now, as before,
+	 * but it is stepped from a cyclic tick while initr_env, the video
+	 * walk and everything after them run. Whoever needs the port's
+	 * settled state (the Type-C PHY for its orientation, cdn-dp for alt
+	 * mode, `tcpm info`) settles it first, inline, and sees what it
+	 * always saw; a boot that never asks pays nothing.
+	 *
+	 * Without CYCLIC there is no tick to step from, so the loop runs
+	 * inline as it always did.
+	 */
+	if (!CONFIG_IS_ENABLED(CYCLIC)) {
+		tcpm_poll_event(dev);
+		return 0;
+	}
+
+	port->probe_pump_pending = true;
+	cyclic_register(&port->cyclic, tcpm_probe_pump_tick,
+			TCPM_PROBE_PUMP_PERIOD_US, dev->name);
 
 	return 0;
 }

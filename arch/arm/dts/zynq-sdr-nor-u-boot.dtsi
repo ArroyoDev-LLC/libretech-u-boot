@@ -1,0 +1,146 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * Shared SPI-NOR bootloader-blob binman description for the Zynq-7000 SDR
+ * carriers (zynq_adrv9009 / zynq_e310). Both boards boot the same way -- the
+ * BootROM reads a boot header at QSPI NOR offset 0, the SPL then reads a FIT
+ * from CONFIG_SYS_SPI_U_BOOT_OFFS -- so they get one description, not two
+ * copies that can drift.
+ *
+ * WHY AN EXPLICIT `fit` NODE RATHER THAN `u-boot-img`
+ * ---------------------------------------------------
+ * `u-boot-img` packs whatever the top-level Makefile produced under the name
+ * u-boot.img, and that file comes from mkimage's `-f auto` path. That path
+ * LABELS but does not COMPRESS: it writes the payload raw and only stamps the
+ * FIT `compression` property from -C. Measured earlier in this tree: `-C lz4`
+ * produced a FIT reporting "Compression: lz4 compressed" whose data section
+ * was byte-identical to its uncompressed input -- an SPL would call ulz4fn()
+ * on raw ARM code and fail. So a compressed BL33 is unreachable through
+ * u-boot-img; it needs a binman `fit` entry, where the `compress` property on
+ * the u-boot-nodtb subentry is what actually runs the compressor and the FIT
+ * `compression` property is the metadata the SPL reads. Both come from the one
+ * FIT_UBOOT_COMP macro below, so the two can never disagree.
+ *
+ * The in-tree Zynq precedent for a binman `fit` in this position is
+ * zynq-binman-brcp1.dtsi (B&R brcp150/brcp170); the compression ladder and the
+ * paired compression=/compress= idiom come from rockchip-u-boot.dtsi and
+ * sunxi-u-boot.dtsi.
+ *
+ * THE FIT IS EMBEDDED-DATA, DELIBERATELY -- DO NOT ADD fit,external-offset
+ * --------------------------------------------------------------------------
+ * common/spl/spl_fit.c only stages compressed data through a separate buffer
+ * on the EXTERNAL-data path, and that buffer is CONFIG_SYS_LOAD_ADDR:
+ *
+ *     ulong staging = CONFIG_SYS_LOAD_ADDR;
+ *     if (staging < load_addr + len && load_addr < staging + len)
+ *             staging = ALIGN(load_addr + len, ARCH_DMA_MINALIGN);
+ *
+ * On both these boards CONFIG_SYS_LOAD_ADDR = 0x0 and CONFIG_SPL_TEXT_BASE =
+ * 0x0 -- the SPL is EXECUTING at 0 out of low OCM. The overlap test compares
+ * the staging buffer against the DECOMPRESSION DESTINATION (CONFIG_TEXT_BASE =
+ * 0x4000000), not against the SPL, so it would not fire, and the SPL would
+ * read the compressed payload straight over itself. With embedded data the
+ * staging branch is never taken: `src` points inside the FIT already resident
+ * at CONFIG_SPL_LOAD_FIT_ADDRESS (0x10000000) and ulz4fn() decompresses from
+ * there to 0x4000000, both clear of the SPL. Adding fit,external-offset here
+ * would be a silent self-overwrite.
+ */
+
+#include <config.h>
+
+/*
+ * BL33 compression ladder, per the BL33 compression policy: LZ4 first, LZMA
+ * only where LZ4's ratio does not fit the size requirement, then none. GZIP is
+ * not offered -- strictly dominated (worse ratio than LZMA, slower than LZ4).
+ */
+#if defined(CONFIG_SPL_LZ4)
+#define FIT_UBOOT_COMP		"lz4"
+#elif defined(CONFIG_SPL_LZMA)
+#define FIT_UBOOT_COMP		"lzma"
+#else
+#define FIT_UBOOT_COMP		"none"
+#endif
+
+/*
+ * SHA256 where the SPL verifies (CONFIG_SPL_FIT_SIGNATURE), CRC32 as the
+ * basic-integrity fallback. Same selection rockchip-u-boot.dtsi makes.
+ */
+#if defined(CONFIG_SPL_FIT_SIGNATURE)
+#if defined(CONFIG_SPL_SHA256)
+#define FIT_HASH_ALGO		"sha256"
+#elif defined(CONFIG_SPL_CRC32)
+#define FIT_HASH_ALGO		"crc32"
+#endif
+#endif
+
+/ {
+	binman: binman {
+		filename = "u-boot-zynq-nor.bin";
+		pad-byte = <0xff>;
+
+		/*
+		 * BootROM-loaded boot image. Must be at 0: the Zynq-7000
+		 * BootROM starts its boot-header search there. This is the one
+		 * offset in the whole map that is not ours to choose.
+		 */
+		blob {
+			filename = "spl/boot.bin";
+			offset = <0x0>;
+		};
+
+		fit {
+			description = "U-Boot payload for Zynq QSPI NOR boot";
+			offset = <CONFIG_SYS_SPI_U_BOOT_OFFS>;
+
+			images {
+				uboot {
+					description = "U-Boot";
+					type = "firmware";
+					os = "u-boot";
+					arch = "arm";
+					compression = FIT_UBOOT_COMP;
+					load = <CONFIG_TEXT_BASE>;
+					entry = <CONFIG_TEXT_BASE>;
+					u-boot-nodtb {
+						compress = FIT_UBOOT_COMP;
+					};
+#ifdef FIT_HASH_ALGO
+					hash {
+						algo = FIT_HASH_ALGO;
+					};
+#endif
+				};
+
+				/*
+				 * The control FDT stays uncompressed: it is
+				 * ~16 KiB, the SPL hands the pointer straight
+				 * to U-Boot proper, and spl_fit.c's decompress
+				 * branch runs per image -- compressing it would
+				 * buy a few KiB for an extra failure mode.
+				 */
+				fdt-0 {
+					description = CONFIG_DEFAULT_DEVICE_TREE;
+					type = "flat_dt";
+					arch = "arm";
+					compression = "none";
+					u-boot-dtb {
+					};
+#ifdef FIT_HASH_ALGO
+					hash {
+						algo = FIT_HASH_ALGO;
+					};
+#endif
+				};
+			};
+
+			configurations {
+				default = "conf-0";
+
+				conf-0 {
+					description = CONFIG_DEFAULT_DEVICE_TREE;
+					firmware = "uboot";
+					fdt = "fdt-0";
+				};
+			};
+		};
+	};
+};

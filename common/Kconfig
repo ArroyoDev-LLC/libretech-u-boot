@@ -268,6 +268,18 @@ config CONSOLE_MUX
 	  adds a small amount of size to U-Boot.  Changes to the environment
 	  variables stdout, stdin and stderr will take effect immediately.
 
+config USB_BOOT_ACM_CONSOLE
+	bool "On a USB boot, also put the console on a USB ACM serial port"
+	depends on BOOTSOURCE && USB_FUNCTION_ACM && CONSOLE_MUX
+	help
+	  When the published boot source is USB, start the usbacm stdio
+	  device at the end of init and add it to stdin, stdout and stderr
+	  beside the UART, so the host that booted the board over USB reads
+	  and drives the console with no serial cable. With CONSOLE_RECORD the
+	  recorded output so far is sent first. Set
+	  USB_FUNCTION_ACM_CONNECT_TIMEOUT_MS: if no host configures the
+	  gadget in time, the boot goes on on the UART alone.
+
 config SYS_CONSOLE_IS_IN_ENV
 	bool "Select console devices from the environment"
 	default y if CONSOLE_MUX

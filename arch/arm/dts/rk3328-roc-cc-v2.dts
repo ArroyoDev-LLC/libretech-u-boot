@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Libre Computer ROC-RK3328-CC V2 (Renegade V2)
+ *
+ * V2 is electrically the V1 board plus two deltas, both of which are
+ * expressible in DT (there is no V2-specific board C code):
+ *
+ *   1. VCCIO6 moves from VCC_IO (3.3 V) to VCC_18 (1.8 V).  The RK3328
+ *      requires VCCIO4 and VCCIO6 to be at the same level and upstream's
+ *      V1 DTS already declares VCCIO4 as vcc_18, so only VCCIO6 changes
+ *      here.
+ *   2. SPI0 (mux variant m2, already the pinctrl default in rk3328.dtsi)
+ *      is populated with a 128 Mbit NOR flash.  A DIP switch gates the
+ *      chip select between the eMMC and the NOR; the switch has no GPIO
+ *      readback, so the node is unconditionally enabled and probe
+ *      failure is the only indication that the switch is in eMMC mode.
+ *
+ * Everything else is inherited verbatim from the upstream V1 board DTS.
+ */
+
+/dts-v1/;
+
+#include "rk3328-roc-cc.dts"
+
+/ {
+	model = "Libre Computer ROC-RK3328-CC V2";
+	compatible = "libre-computer,roc-rk3328-cc-v2",
+		     "libre-computer,roc-rk3328-cc",
+		     "firefly,roc-rk3328-cc", "rockchip,rk3328";
+};
+
+&io_domains {
+	vccio6-supply = <&vcc_18>;
+};
+
+&spi0 {
+	status = "okay";
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <50000000>;
+	};
+};

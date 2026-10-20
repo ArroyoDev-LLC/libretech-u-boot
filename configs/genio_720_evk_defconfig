@@ -1,0 +1,34 @@
+#include <configs/mt8189.config>
+
+# Libre Computer Genio 720 EVK (MT8391 / MT8189 die).
+#
+# Ours, not upstream's. Upstream ships mt8391_genio_720_evk_defconfig (and the
+# mt8371 Genio 520 twin) as minimal SoC bring-ups, and both pull in the shared
+# configs/mt8189.config fragment. We build THIS defconfig; upstream's stay
+# pristine so an LC feature never lands on a board we do not own -- the mistake
+# that put Pumpkin i350 hardware into mt8365_evk_defconfig (u-boot e463a93c342).
+# Same shape as configs/genio_510_evk_defconfig.
+#
+# We include upstream's mt8189.config unmodified and layer on top.
+
+CONFIG_DEFAULT_DEVICE_TREE="mt8391-genio-720-evk"
+CONFIG_DEFAULT_FDT_FILE="mt8391-genio-720-evk"
+
+# Network boot over a USB ethernet adapter. mt8371-genio-common.dtsi already
+# enables xhci0-4, so a dongle needs drivers only. The MT8189 SoC GbE
+# (ethernet@1101a000) is NOT usable yet: u-boot has no dwc_eth_qos MediaTek glue
+# driver, and upstream's DT carries no ethernet node.
+CONFIG_USB_STORAGE=y
+CONFIG_USB_HOST_ETHER=y
+CONFIG_USB_ETHER_ASIX=y
+CONFIG_USB_ETHER_ASIX88179=y
+CONFIG_USB_ETHER_MCS7830=y
+CONFIG_USB_ETHER_RTL8152=y
+CONFIG_USB_ETHER_SMSC95XX=y
+CONFIG_CMD_DHCP=y
+CONFIG_CMD_PXE=y
+CONFIG_NET_RANDOM_ETHADDR=y
+
+CONFIG_ARMV8_CRYPTO=y
+CONFIG_CMD_DM=y
+CONFIG_CMD_MBR=y

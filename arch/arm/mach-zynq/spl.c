@@ -2,6 +2,7 @@
 /*
  * (C) Copyright 2014 - 2017 Xilinx, Inc. Michal Simek
  */
+#include <bootsource.h>
 #include <debug_uart.h>
 #include <hang.h>
 #include <image.h>
@@ -35,6 +36,9 @@ void board_init_f(ulong dummy)
 void spl_soc_init(void)
 {
 	preloader_console_init();
+	/* Where the BootROM found us, before the "Trying to boot from" lines. */
+	if (CONFIG_IS_ENABLED(BOOTSOURCE))
+		bootsource_announce(zynq_bootsource());
 #if defined(CONFIG_ARCH_EARLY_INIT_R) && defined(CONFIG_SPL_FPGA)
 	arch_early_init_r();
 #endif

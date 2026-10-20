@@ -10,6 +10,8 @@ obj-$(CONFIG_$(PHASE_)USB_ETH_RNDIS) += rndis.o
 ifdef CONFIG_XPL_BUILD
 obj-$(CONFIG_SPL_USB_GADGET) += g_dnl.o
 obj-$(CONFIG_SPL_DFU) += f_dfu.o
+obj-$(CONFIG_SPL_USB_FUNCTION_MASS_STORAGE) += f_mass_storage.o
+obj-$(CONFIG_SPL_USB_GADGET_DNL_ACM) += f_acm.o
 obj-$(CONFIG_SPL_USB_SDP_SUPPORT) += f_sdp.o
 endif
 

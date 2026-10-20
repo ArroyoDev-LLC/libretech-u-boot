@@ -53,8 +53,7 @@ U-Boot compilation
 U-Boot SPL is not enabled by default, instead there are config fragments that
 can be used to enable it, with per-board configuration:
 
-- ``spl-libretech-cc-1gb.config``: 1 GB LePotato board
-- ``spl-libretech-cc-2gb.config``: 2 GB LePotato board
+- ``spl-libretech-cc.config``: LePotato board, both the 1 GB and 2 GB variants
 - ``spl-odroid-c2.config``: ODROID-C2
 - ``spl-videostrong-kii-pro.config``: Videostrong KII Pro
 

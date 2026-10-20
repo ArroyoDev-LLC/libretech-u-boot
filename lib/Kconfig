@@ -465,6 +465,10 @@ config TRACE_EARLY_ADDR
 config CIRCBUF
 	bool "Enable circular buffer support"
 
+config SPL_CIRCBUF
+	bool "Enable circular buffer support in SPL"
+	depends on SPL
+
 source "lib/dhry/Kconfig"
 
 menu "Alternative crypto libraries"

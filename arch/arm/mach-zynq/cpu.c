@@ -82,12 +82,22 @@ unsigned int zynq_get_silicon_version(void)
 						>> ZYNQ_SILICON_VER_SHIFT;
 }
 
+#if !CONFIG_IS_ENABLED(SYSRESET)
+/*
+ * Board-bootloader policy §2 forbids an arch/board-specific reset_cpu(): reset
+ * must go through the SYSRESET uclass. With CONFIG_SYSRESET enabled,
+ * drivers/sysreset/sysreset_zynq.c provides the same SLCR sequence and
+ * sysreset-uclass.c supplies reset_cpu(), so this definition would be a
+ * duplicate symbol. It is kept for phases/configs without SYSRESET -- notably
+ * the SPL, which does not enable it.
+ */
 void reset_cpu(void)
 {
 	zynq_slcr_cpu_reset();
 	while (1)
 		;
 }
+#endif
 
 #if !CONFIG_IS_ENABLED(SYS_DCACHE_OFF)
 void enable_caches(void)

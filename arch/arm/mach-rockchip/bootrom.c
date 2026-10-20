@@ -3,6 +3,7 @@
  * Copyright (c) 2017 Google, Inc
  */
 
+#include <config.h>
 #include <hang.h>
 #include <setjmp.h>
 #include <asm/arch-rockchip/bootrom.h>
@@ -50,7 +51,30 @@ static bool check_back_to_brom_dnl_flag(void)
 	if (CONFIG_ROCKCHIP_BOOT_MODE_REG) {
 		boot_mode = readl(CONFIG_ROCKCHIP_BOOT_MODE_REG);
 		if (boot_mode == BOOT_BROM_DOWNLOAD) {
+			u32 src;
+
 			writel(0, CONFIG_ROCKCHIP_BOOT_MODE_REG);
+			/*
+			 * The flag asked for the BootROM's download mode, and
+			 * a stage the BootROM loaded OVER USB is already in
+			 * it: the flag is satisfied, not pending. Returning
+			 * BROM_BOOT_ENTER_DNL here would be a bounce, and the
+			 * BootROM does not survive one from a USB-loaded stage
+			 * -- measured on RK3399: the device stays enumerated
+			 * and answers no transfer until a power cycle. This
+			 * happens whenever the flag was set (an SPL that
+			 * failed every boot device, a `reboot loader`) and the
+			 * BootROM then found no bootable medium and fell into
+			 * download mode by itself, leaving the flag armed for
+			 * the first TPL sent over the cable.
+			 */
+#ifdef CFG_IRAM_BASE
+			src = readl(BROM_BOOTSOURCE_ID_ADDR);
+#else
+			src = BROM_BOOTSOURCE_UNKNOWN;
+#endif
+			if (src == BROM_BOOTSOURCE_USB || src == 0x81)
+				return false;
 			return true;
 		}
 	}

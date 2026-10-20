@@ -259,6 +259,21 @@ static int do_bootflow_scan(struct cmd_tbl *cmdtp, int flag, int argc,
 		}
 	}
 
+	/*
+	 * A `bootflow scan -b` that returns booted nothing: a successful boot
+	 * does not come back.  This is where the scan has given up, which is
+	 * the point boot/bootflow.c's note names for the un-silence -- not per
+	 * candidate.  The default bootcmd goes on to `pause "No bootable device
+	 * found..."`, which blocks for a key, so the hook after
+	 * autoboot_command() in common/main.c never runs unattended and the
+	 * message was printed under GD_FLG_SILENT: a board with no bootable OS
+	 * looked dead (bootloader policy, "Silent console must be defeated by
+	 * failure").  Limit: a custom bootcmd that boots something else after
+	 * a failed scan is no longer silent for that boot.
+	 */
+	if (boot)
+		console_silent_defeat("no bootable OS found");
+
 	return 0;
 }
 

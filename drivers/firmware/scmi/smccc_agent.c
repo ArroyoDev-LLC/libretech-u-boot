@@ -49,7 +49,10 @@ static int scmi_smccc_process_msg(struct udevice *dev,
 	if (ret)
 		return ret;
 
+	/* EL3 reads the page uncached; push the SMT header out of D-cache. */
+	scmi_smt_flush(&chan->smt);
 	arm_smccc_smc(chan->func_id, 0, 0, 0, 0, 0, 0, 0, &res);
+	scmi_smt_inval(&chan->smt);
 	if (res.a0 == SMCCC_RET_NOT_SUPPORTED)
 		ret = -ENXIO;
 	else

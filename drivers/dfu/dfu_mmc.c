@@ -102,6 +102,10 @@ static int mmc_file_op(enum dfu_op op, struct dfu_entity *dfu,
 	int fstype;
 	loff_t size = 0;
 
+	/* a bare xPL phase has no filesystem layer; fill refuses these */
+	if (dfu_bare_phase())
+		return -EOPNOTSUPP;
+
 	switch (dfu->layout) {
 	case DFU_FS_FAT:
 		fstype = FS_TYPE_FAT;
@@ -208,7 +212,9 @@ int dfu_write_medium_mmc(struct dfu_entity *dfu,
 		ret = mmc_file_buf_write(dfu, offset, buf, len);
 		break;
 	case DFU_SCRIPT:
-		ret = run_command_list(buf, *len, 0);
+		/* a bare xPL phase has no shell; fill refuses the layout */
+		ret = dfu_bare_phase() ? -EOPNOTSUPP :
+		      run_command_list(buf, *len, 0);
 		break;
 	case DFU_SKIP:
 		ret = 0;
@@ -324,6 +330,24 @@ void dfu_free_entity_mmc(struct dfu_entity *dfu)
 	}
 }
 
+/* Capacity in bytes of eMMC hardware partition @hwpart (mmc_set_capacity()'s table). */
+static u64 dfu_mmc_hwpart_capacity(struct mmc *mmc, int hwpart)
+{
+	switch (hwpart) {
+	case 0:
+		return mmc->capacity_user;
+	case 1:
+	case 2:
+		return mmc->capacity_boot;
+	case 3:
+		return mmc->capacity_rpmb;
+	case 4 ... 7:
+		return mmc->capacity_gp[hwpart - 4];
+	default:
+		return 0;
+	}
+}
+
 /*
  * @param s Parameter string containing space-separated arguments:
  *	1st:
@@ -408,6 +432,20 @@ int dfu_fill_entity_mmc(struct dfu_entity *dfu, char *devstr, char **argv, int a
 				simple_strtoul(argv[4], NULL, 0);
 		}
 
+		/*
+		 * Size zero with an mmcpart is the whole of THAT hardware
+		 * partition. The block descriptor above describes whichever
+		 * partition is selected now (normally the user area), so a
+		 * boot partition alt would otherwise get the user area's size
+		 * and its reads would run past the partition's end.
+		 */
+		if (third_arg == 0 && dfu->data.mmc.hw_partition >= 0) {
+			u64 cap = dfu_mmc_hwpart_capacity(mmc,
+							  dfu->data.mmc.hw_partition);
+
+			dfu->data.mmc.lba_size = lldiv(cap, mmc->read_bl_len);
+		}
+
 	} else if (!strcmp(entity_type, "part")) {
 		struct disk_partition partinfo;
 		struct blk_desc *blk_dev = mmc_get_blk_desc(mmc);
@@ -449,6 +487,16 @@ int dfu_fill_entity_mmc(struct dfu_entity *dfu, char *devstr, char **argv, int a
 	} else {
 		pr_err("Memory layout (%s) not supported!\n", entity_type);
 		return -ENODEV;
+	}
+
+	/*
+	 * Bare xPL phase (dfu_bare_phase()): raw (and the raw-backed "part")
+	 * only.  There is no filesystem writer and no shell to run a script.
+	 */
+	if (dfu_bare_phase() && dfu->layout != DFU_RAW_ADDR) {
+		pr_err("Memory layout (%s) not available in this phase\n",
+		       entity_type);
+		return -EOPNOTSUPP;
 	}
 
 	/* if it's NOT a raw write */

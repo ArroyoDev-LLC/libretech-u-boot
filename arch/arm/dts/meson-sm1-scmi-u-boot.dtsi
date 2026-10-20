@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Open-chain SCMI for Amlogic SM1 / Solitude: U-Boot's OWN agent.
+ *
+ * Included from meson-sm1-s905d3-libretech-cc-common-u-boot.dtsi under
+ * #ifdef CONFIG_SCMI_FIRMWARE.  The shipping aml-s905d3-cc_libre and
+ * aml-s905d3-cc_libre_emmc defconfigs set it (with the
+ * SCMI_BASE_PROBE_OPTIONAL soft-fail, no SCMI_RESIDUAL_DIAG banner), as do
+ * the residual / open-SC bring-up defconfigs; every one boots the -libre leaf.
+ *
+ * The package itself -- /firmware/scmi with protocol@11 @14 @13 @15, the
+ * NS HP shmem at 0xFFFE7600 and the MHU at 0xFF63C404 -- is described once,
+ * DISABLED, in dts/upstream/src/arm64/amlogic/meson-sm1-libre-scmi.dtsi,
+ * which the -libre leaves include (sm1-linux-scmi-design sections 2.1, 2.2).
+ * This fragment only switches it on for U-Boot's own SCMI agent, so DM binds
+ * it at initr_dm.  With MESON_G12A_LIBRE_SCMI_FIXUP the board_fix_fdt()
+ * self-guard deletes /firmware/scmi again before DM scans it when the SC
+ * does not answer.
+ *
+ * Docs: amlogic/software/boot/g12/sm1-linux-scmi-design.md
+ */
+
+&scmi {
+	status = "okay";
+};
+
+&mailbox {
+	status = "okay";
+};

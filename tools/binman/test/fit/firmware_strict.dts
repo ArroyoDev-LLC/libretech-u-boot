@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: GPL-2.0+
+
+/dts-v1/;
+
+/ {
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	binman {
+		fit {
+			description = "test desc";
+			#address-cells = <1>;
+			fit,fdt-list = "of-list";
+
+			images {
+				u-boot {
+					description = "test u-boot";
+					type = "standalone";
+					arch = "arm64";
+					os = "u-boot";
+					compression = "none";
+					load = <0x00000000>;
+					entry = <0x00000000>;
+
+					u-boot-nodtb {
+					};
+				};
+				blob {
+					description = "a loadable that must never be firmware";
+					type = "firmware";
+					arch = "arm64";
+					compression = "none";
+					load = <0x00400000>;
+
+					blob-ext {
+						filename = "refcode.bin";
+					};
+				};
+				@atf-SEQ {
+					fit,operation = "split-elf";
+					description = "test tf-a";
+					type = "firmware";
+					arch = "arm64";
+					os = "arm-trusted-firmware";
+					compression = "none";
+					fit,load;
+					fit,entry;
+					fit,data;
+
+					atf-bl31 {
+					};
+				};
+				@fdt-SEQ {
+					description = "test fdt";
+					type = "flat_dt";
+					compression = "none";
+				};
+			};
+
+			configurations {
+				default = "@conf-strict-DEFAULT-SEQ";
+				@conf-strict-SEQ {
+					description = "strict: atf-1 first, then the blob, then u-boot";
+					fdt = "fdt-SEQ";
+					fit,firmware = "atf-1", "blob", "u-boot";
+					fit,firmware-strict;
+					fit,loadables;
+				};
+			};
+		};
+	};
+};

@@ -19,6 +19,39 @@ config SCMI_FIRMWARE
 	  channels as a mailbox device or an Arm SMCCC service with some
 	  piece of identified shared memory.
 
+
+config SCMI_BASE_PROBE_OPTIONAL
+	bool "Soft-fail SCMI Base protocol probe"
+	depends on SCMI_FIRMWARE
+	help
+	  If Base protocol version discover fails (e.g. mute SC / mailbox
+	  timeout), warn and continue board init instead of failing the
+	  SCMI agent bind (which aborts initr_dm). This is the soft-fail
+	  only: it prints nothing beyond the failure itself and changes no
+	  clock or OPP. A shipping board whose SC may be mute (e.g. the
+	  S905D3 open-SC chain) needs it; the residual / bring-up banner
+	  is the separate SCMI_RESIDUAL_DIAG.
+
+	  Note: scmi_bind_protocols() currently returns 0 on a failed
+	  BASE probe / base-info read unconditionally (needed on
+	  ROC-RK3399-PC too), so this symbol declares the board's
+	  soft-fail requirement and is the dependency of
+	  SCMI_RESIDUAL_DIAG; it gates no output of its own.
+
+config SCMI_RESIDUAL_DIAG
+	bool "Residual / bring-up SCMI diagnostic banner and raw probes"
+	depends on SCMI_BASE_PROBE_OPTIONAL
+	default n
+	help
+	  Residual / open-SC bring-up diagnostics: the "SCMI: ..." UART
+	  banner during agent bind (SC heartbeat / stack-paint / CPU-power
+	  words, protocol list, sensor read, the PERF / CLOCK round-trip
+	  that flips the CPU to the other OPP and back with mdelay waits,
+	  the power-domain probe), the MHU/SMT dump on a failed response,
+	  the simple-CLI interactive loop, and the raw `scmi rd reset`
+	  command. Adds boot time and changes the CPU clock transiently.
+	  Never enable in a product defconfig.
+
 config SCMI_AGENT_MAILBOX
 	bool "Enable SCMI agent mailbox"
 	depends on SCMI_FIRMWARE && DM_MAILBOX

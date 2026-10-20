@@ -36,7 +36,16 @@
 
 #include "fru.h"
 
-#if IS_ENABLED(CONFIG_EFI_HAVE_CAPSULE_SUPPORT)
+/*
+ * zynq_adrv9009 defines its own fw_images[] / update_info in
+ * board/xilinx/zynq/zynq-adrv9009/board.c -- one image covering the single
+ * binman blob it flashes, with image_type_id left zero so lib/efi_loader
+ * derives a per-board UUIDv5 from the DT compatible instead of reusing the
+ * tree-wide XILINX_* GUIDs below (which every Xilinx board would share, so a
+ * capsule built for one would be accepted by another). Both symbols are
+ * global, so exactly one translation unit may define them.
+ */
+#if IS_ENABLED(CONFIG_EFI_HAVE_CAPSULE_SUPPORT) && !defined(CONFIG_ZYNQ_ADRV9009)
 struct efi_fw_image fw_images[] = {
 #if defined(XILINX_BOOT_IMAGE_GUID)
 	{
@@ -464,11 +473,26 @@ int board_late_init_xilinx(void)
 					  &bootscr_flash_size)) {
 		ret |= env_set_hex("script_offset_f", bootscr_flash_offset);
 		ret |= env_set_hex("script_size_f", bootscr_flash_size);
-	} else {
+	} else if (!IS_ENABLED(CONFIG_BOARD_CONFIG)) {
 		debug("!!! Please define bootscr-flash-offset via DT !!!\n");
 		ret |= env_set_hex("script_offset_f",
 				   CONFIG_BOOT_SCRIPT_OFFSET);
 	}
+	/*
+	 * CONFIG_BOARD_CONFIG marks a board that has adopted the Libre
+	 * Computer SPI NOR map (board-bootloader policy §4): bootloader blob at
+	 * 0x0, config sector at 0x1F0000, DT overlay FIT at 0x200000, and NO
+	 * boot-script region -- per-unit configuration is the config sector's
+	 * key=value overrides (board_config_env_import()), not a sourced script. Such a
+	 * board also drops the qspi/nand/nor boot targets that consume
+	 * script_offset_f (include/configs/zynq-common.h), so setting the
+	 * variable here would leave a bare address in the environment with no
+	 * consumer and no region that owns it -- upstream's ARCH_ZYNQ default
+	 * 0xFC0000 and the 0x200000 it was moved to are BOTH inside the overlay
+	 * FIT region. Leave it unset instead. A DT bootscr-flash-offset still
+	 * wins above, so a board that genuinely wants a flash boot script says
+	 * so in its DT.
+	 */
 
 	if (IS_ENABLED(CONFIG_ARCH_ZYNQ) || IS_ENABLED(CONFIG_MICROBLAZE))
 		bootm_size = min(bootm_size, (phys_size_t)(SZ_512M + SZ_256M));

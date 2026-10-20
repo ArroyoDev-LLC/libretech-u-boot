@@ -1,0 +1,9 @@
+if TARGET_MT8188
+
+config SYS_BOARD
+	default "med-mt88-mx-g5"
+
+config SYS_CONFIG_NAME
+	default "mt8188"
+
+endif

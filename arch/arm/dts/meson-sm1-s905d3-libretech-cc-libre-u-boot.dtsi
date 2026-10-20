@@ -1,0 +1,166 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * U-Boot additions for meson-sm1-s905d3-libretech-cc-libre.dts: the same
+ * board, the libre firmware layout, SPI NOR in use (4-bit eMMC). U-Boot
+ * auto-includes only the first matching <dt-name>-u-boot.dtsi, so the
+ * -libre DT names the board's own.
+ */
+
+#include "meson-sm1-s905d3-libretech-cc-common-u-boot.dtsi"
+#include "meson-sm1-s905d3-libretech-cc-nor-u-boot.dtsi"
+
+#if defined(CONFIG_SPL_DFU)
+/*
+ * The DRAM stage's USB flash session (arch/arm/mach-meson/spl-usbflash.c)
+ * needs, in the SPL device tree: the USB glue + dwc2 + the three PHYs it
+ * names, the reset controller and the clock controller they reference, and
+ * the eMMC with its pins for the read-only eMMC alternates.
+ *
+ * The SPL tree is fdtgrep'd down to nodes carrying bootph-*, and a mark on a
+ * bus does not reach its children (doc/device-tree-bindings/bootph.yaml);
+ * dm_scan_fdt_node() also does not recurse into an unmarked bus, so every
+ * parent bus is marked as well (see meson-gxl-s905x-libretech-cc-v2-u-boot.dtsi
+ * for the measured failure).  Pin groups need their mux subnodes marked, or
+ * the group arrives empty.  bootph-pre-ram, not bootph-all: the TPL tree does
+ * not change.  /aliases is kept by fdtgrep for surviving targets, so
+ * mmc0 = &sd_emmc_c holds in SPL as in U-Boot proper.
+ */
+&xtal {
+	bootph-pre-ram;
+};
+
+&apb {
+	bootph-pre-ram;
+};
+
+&usb2_phy0 {
+	bootph-pre-ram;
+};
+
+&usb2_phy1 {
+	bootph-pre-ram;
+};
+
+&usb3_pcie_phy {
+	bootph-pre-ram;
+};
+
+&hiu {
+	bootph-pre-ram;
+};
+
+&hhi {
+	bootph-pre-ram;
+};
+
+&clkc {
+	bootph-pre-ram;
+};
+
+&cbus {
+	bootph-pre-ram;
+};
+
+&reset {
+	bootph-pre-ram;
+};
+
+&usb {
+	bootph-pre-ram;
+};
+
+&dwc2 {
+	bootph-pre-ram;
+};
+
+&sd_emmc_c {
+	bootph-pre-ram;
+};
+
+&periphs {
+	bootph-pre-ram;
+};
+
+&periphs_pinctrl {
+	bootph-pre-ram;
+};
+
+&gpio {
+	bootph-pre-ram;
+};
+
+&emmc_ctrl_pins {
+	bootph-pre-ram;
+
+	mux-0 {
+		bootph-pre-ram;
+	};
+
+	mux-1 {
+		bootph-pre-ram;
+	};
+};
+
+&emmc_data_4b_pins {
+	bootph-pre-ram;
+
+	mux-0 {
+		bootph-pre-ram;
+	};
+};
+
+&emmc_ds_pins {
+	bootph-pre-ram;
+
+	mux {
+		bootph-pre-ram;
+	};
+};
+
+/*
+ * The SD slot (mmc1 = &sd_emmc_b), so the session's run-time alt list can
+ * probe it and list the SD alternates only when a card answers (plan M3).
+ * The card-detect GPIO is on the periphs gpio controller marked above. Its
+ * two GPIO regulators come along so the session can run UHS: VCC_CARD
+ * (GPIOX_2) power-cycles the card, which is the only way a UHS card leaves
+ * 1.8 V signalling for the next stage, and VDDIO_C (GPIOX_4) switches the
+ * IO rail between 3.3 V and 1.8 V.
+ */
+&sd_emmc_b {
+	bootph-pre-ram;
+};
+
+&vcc_card {
+	bootph-pre-ram;
+};
+
+&vddio_c {
+	bootph-pre-ram;
+};
+
+/*
+ * With SPL_DM_REGULATOR the USB PHYs look up their phy-supply (usb2_phy1:
+ * DC_IN, usb3_pcie_phy: VCC_5V); without the nodes their probe fails and the
+ * session has no UDC ("No USB device found"). Both are always-on fixed rails,
+ * VCC_5V enabled by GPIOH_8 as proper and Linux already do.
+ */
+&dc_in {
+	bootph-pre-ram;
+};
+
+&vcc_5v {
+	bootph-pre-ram;
+};
+
+&sdcard_c_pins {
+	bootph-pre-ram;
+
+	mux-0 {
+		bootph-pre-ram;
+	};
+
+	mux-1 {
+		bootph-pre-ram;
+	};
+};
+#endif

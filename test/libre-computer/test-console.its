@@ -1,0 +1,26 @@
+/dts-v1/;
+
+/ {
+	description = "Libre Computer U-Boot hardware test";
+	#address-cells = <1>;
+
+	images {
+		script-1 {
+			description = "hwtest";
+			type = "script";
+			compression = "none";
+			data = /incbin/("test-console.txt");
+			hash {
+				algo = "sha256";
+			};
+		};
+	};
+
+	configurations {
+		default = "conf-1";
+		conf-1 {
+			description = "hwtest";
+			script = "script-1";
+		};
+	};
+};

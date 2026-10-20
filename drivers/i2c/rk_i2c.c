@@ -232,7 +232,16 @@ static int rk_i2c_read(struct rk_i2c *i2c, uchar chip, uint reg, uint r_len,
 			}
 			if (get_timer(start) > I2C_TIMEOUT_MS) {
 				debug("I2C Read Data Timeout\n");
-				err =  -ETIMEDOUT;
+				/*
+				 * Do NOT clobber a NAK already latched above.
+				 * The NAK branch does not break out of this
+				 * loop, so on a slave that NAKs and then never
+				 * raises MBRFIPD the wait below expires and the
+				 * genuine -EREMOTEIO becomes an indistinguish-
+				 * able -ETIMEDOUT. First fault wins.
+				 */
+				if (!err)
+					err = -ETIMEDOUT;
 				rk_i2c_show_regs(regs);
 				goto i2c_exit;
 			}
@@ -319,7 +328,16 @@ static int rk_i2c_write(struct rk_i2c *i2c, uchar chip, uint reg, uint r_len,
 			}
 			if (get_timer(start) > I2C_TIMEOUT_MS) {
 				debug("I2C Write Data Timeout\n");
-				err =  -ETIMEDOUT;
+				/*
+				 * Same as the read path: a NAK latched above
+				 * must survive this timeout. This is the case
+				 * that matters on DDC, where msg[0] is the
+				 * one-byte EDID offset write -- "the sink
+				 * refused" and "the sink never clocked" are
+				 * different faults with different fixes.
+				 */
+				if (!err)
+					err = -ETIMEDOUT;
 				rk_i2c_show_regs(regs);
 				goto i2c_exit;
 			}
@@ -351,8 +369,30 @@ static int rockchip_i2c_xfer(struct udevice *bus, struct i2c_msg *msg,
 					   msg->len);
 		}
 		if (ret) {
-			debug("i2c_write: error sending\n");
-			ret = -EREMOTEIO;
+			/*
+			 * Propagate the real errno instead of flattening every
+			 * failure to -EREMOTEIO. rk_i2c_read()/rk_i2c_write()
+			 * already distinguish -ETIMEDOUT (the slave never
+			 * clocked the transfer to completion -- electrical) from
+			 * -EREMOTEIO (the slave answered and NAKed -- protocol),
+			 * and that distinction was being thrown away one frame
+			 * above the only code that knew it.
+			 *
+			 * Contract is unchanged: every value that can escape
+			 * here is still negative-on-error (-ETIMEDOUT,
+			 * -EREMOTEIO, -EIO). No in-tree consumer of a Rockchip
+			 * i2c xfer branches on the specific value:
+			 * i2c_probe_chip() returns ops->xfer() verbatim to
+			 * callers that only test for non-zero, and the two
+			 * places that do compare against -EREMOTEIO
+			 * (drivers/misc/gsc.c, board/gateworks/fsa.c) are
+			 * Gateworks i.MX boards on mxc_i2c, not this driver.
+			 * A missing chip still NAKs its address, so probe still
+			 * reports -EREMOTEIO for the ordinary absent-chip case;
+			 * only a chip that wedges the bus now reads -ETIMEDOUT,
+			 * which is the truth.
+			 */
+			debug("i2c_xfer: error sending: %d\n", ret);
 			break;
 		}
 

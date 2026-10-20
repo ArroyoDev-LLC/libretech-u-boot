@@ -46,6 +46,38 @@ void i2c_dump_msgs(struct i2c_msg *msg, int nmsgs)
 }
 
 /**
+ * i2c_bus_xfer() - the one place a transfer is handed to the bus driver
+ *
+ * Every transfer the uclass issues goes through here so that the bus can
+ * say whether one is in flight. A bus driver polls its controller with
+ * udelay(), and udelay() runs the cyclic callbacks -- so a cyclic that
+ * itself talks to a chip on this bus (the Type-C port manager's probe-time
+ * pump does) would otherwise re-enter the controller in the middle of
+ * somebody else's transaction. The depth is a counter, not a flag, so a
+ * driver that issues a transfer from inside another one (a deblock, a
+ * retry) keeps the bus marked busy until the outermost one returns.
+ */
+static int i2c_bus_xfer(struct udevice *bus, struct i2c_msg *msg, int nmsgs)
+{
+	struct dm_i2c_bus *i2c = dev_get_uclass_priv(bus);
+	struct dm_i2c_ops *ops = i2c_get_ops(bus);
+	int ret;
+
+	i2c->xfer_depth++;
+	ret = ops->xfer(bus, msg, nmsgs);
+	i2c->xfer_depth--;
+
+	return ret;
+}
+
+bool dm_i2c_xfer_in_progress(struct udevice *bus)
+{
+	struct dm_i2c_bus *i2c = dev_get_uclass_priv(bus);
+
+	return i2c->xfer_depth > 0;
+}
+
+/**
  * i2c_setup_offset() - Set up a new message with a chip offset
  *
  * @chip:	Chip to use
@@ -82,7 +114,6 @@ static int i2c_read_bytewise(struct udevice *dev, uint offset,
 {
 	struct dm_i2c_chip *chip = dev_get_parent_plat(dev);
 	struct udevice *bus = dev_get_parent(dev);
-	struct dm_i2c_ops *ops = i2c_get_ops(bus);
 	struct i2c_msg msg[2], *ptr;
 	uint8_t offset_buf[I2C_MAX_OFFSET_LEN];
 	int ret;
@@ -98,7 +129,7 @@ static int i2c_read_bytewise(struct udevice *dev, uint offset,
 		ptr->buf = &buffer[i];
 		ptr++;
 
-		ret = ops->xfer(bus, msg, ptr - msg);
+		ret = i2c_bus_xfer(bus, msg, ptr - msg);
 		if (ret)
 			return ret;
 	}
@@ -111,7 +142,6 @@ static int i2c_write_bytewise(struct udevice *dev, uint offset,
 {
 	struct dm_i2c_chip *chip = dev_get_parent_plat(dev);
 	struct udevice *bus = dev_get_parent(dev);
-	struct dm_i2c_ops *ops = i2c_get_ops(bus);
 	struct i2c_msg msg[1];
 	uint8_t buf[I2C_MAX_OFFSET_LEN + 1];
 	int ret;
@@ -122,7 +152,7 @@ static int i2c_write_bytewise(struct udevice *dev, uint offset,
 			return -EINVAL;
 		buf[msg->len++] = buffer[i];
 
-		ret = ops->xfer(bus, msg, 1);
+		ret = i2c_bus_xfer(bus, msg, 1);
 		if (ret)
 			return ret;
 	}
@@ -157,7 +187,7 @@ int dm_i2c_read(struct udevice *dev, uint offset, uint8_t *buffer, int len)
 	}
 	msg_count = ptr - msg;
 
-	return ops->xfer(bus, msg, msg_count);
+	return i2c_bus_xfer(bus, msg, msg_count);
 }
 
 int dm_i2c_write(struct udevice *dev, uint offset, const uint8_t *buffer,
@@ -204,7 +234,7 @@ int dm_i2c_write(struct udevice *dev, uint offset, const uint8_t *buffer,
 	msg->len += len;
 	memcpy(buf + chip->offset_len, buffer, len);
 
-	ret = ops->xfer(bus, msg, 1);
+	ret = i2c_bus_xfer(bus, msg, 1);
 	if (buf != _buf)
 		free(buf);
 	return ret;
@@ -218,7 +248,7 @@ int dm_i2c_xfer(struct udevice *dev, struct i2c_msg *msg, int nmsgs)
 	if (!ops->xfer)
 		return -ENOSYS;
 
-	return ops->xfer(bus, msg, nmsgs);
+	return i2c_bus_xfer(bus, msg, nmsgs);
 }
 
 int dm_i2c_reg_read(struct udevice *dev, uint offset)
@@ -267,12 +297,16 @@ int dm_i2c_reg_clrset(struct udevice *dev, uint offset, u32 clr, u32 set)
 static int i2c_probe_chip(struct udevice *bus, uint chip_addr,
 			  enum dm_i2c_chip_flags chip_flags)
 {
+	struct dm_i2c_bus *i2c = dev_get_uclass_priv(bus);
 	struct dm_i2c_ops *ops = i2c_get_ops(bus);
 	struct i2c_msg msg[1];
 	int ret;
 
 	if (ops->probe_chip) {
+		/* A probe is a bus transaction too; keep it under the guard */
+		i2c->xfer_depth++;
 		ret = ops->probe_chip(bus, chip_addr, chip_flags);
+		i2c->xfer_depth--;
 		if (ret != -ENOSYS)
 			return ret;
 	}
@@ -286,7 +320,7 @@ static int i2c_probe_chip(struct udevice *bus, uint chip_addr,
 	msg->len = 0;
 	msg->buf = NULL;
 
-	return ops->xfer(bus, msg, 1);
+	return i2c_bus_xfer(bus, msg, 1);
 }
 
 static int i2c_bind_driver(struct udevice *bus, uint chip_addr, uint offset_len,

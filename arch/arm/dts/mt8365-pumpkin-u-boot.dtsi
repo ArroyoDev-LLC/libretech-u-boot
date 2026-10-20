@@ -1,0 +1,179 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * u-boot-only overrides for the OLogic Pumpkin i350 (MT8365) SSUSB (single OTG
+ * port). This overlay applies to dts/upstream/.../mt8365-pumpkin.dts. It is NOT
+ * the MediaTek Genio 350 EVK -- that is a separate upstream board we do not
+ * build (mt8365-evk.dts / mt8365_evk_defconfig, both hook-blocked).
+ *
+ * The MT8365 has ONE SSUSB dual-role controller (U3D_BASE 0x11200000, IPPC at
+ * 0x11203e00). It drives EITHER an mtu3 peripheral (gadget, for the brick-safe
+ * DFU-into-DRAM download transport) OR an xhci host (for the on-board Microchip
+ * LAN9512 USB-hub+Ethernet on the RJ45). Both bind; only one role is live at a
+ * time, and the runtime hand-off is `unbind usb_gadget 0; usb stop; usb start`.
+ * There is NO mux on the i350 -- the LAN9512 is wired directly to a U2 SSUSB
+ * port; the blocker was OTG role + DM bind, not routing.
+ *
+ * This overlay used to rewrite the SSUSB nodes: force dr_mode = "peripheral",
+ * delete usb-role-switch + the connector, add a legacy "mediatek,ssusb" child,
+ * /delete-node/ &usb_host, and redeclare the xhci as a top-level soc node. All of
+ * that is GONE, and must not come back. Two reasons:
+ *
+ *  1. It leaked into the OS. bootefi hands Linux u-boot's control FDT whenever no
+ *     ESP DTB resolves, so those overrides landed in the running kernel's device
+ *     tree -- peripheral-only mtu3, no role switch, no nested usb_host. The i500
+ *     hit the identical bug (u-boot 3345660ab76 / 53174203850).
+ *
+ *  2. The driver reasons for it are all fixed upstream of the DT now:
+ *     - The gadget no longer needs the legacy 2-level shape. mtu3_plat.c speaks
+ *       the flat upstream binding (mac + ippc + dr_mode on the glue node) and
+ *       backs the flat "mac" off by SSUSB_DEV_BASE to recover U3D_BASE, so
+ *       mtu3-peripheral binds straight to usb@11201000. dr_mode = "otg" already
+ *       maps to peripheral in get_ssusb_rscs()/mtu3_glue_bind().
+ *     - The host no longer needs a top-level node. CONFIG_USB_MTU3_XHCI_CHILD
+ *       makes mtu3_glue_bind() bind xhci-mtk on the nested "mediatek,mtk-xhci"
+ *       child that the glue's custom .bind was otherwise suppressing. The child
+ *       carries "mac" + the full 5-clock SSUSB set; xhci_mtk_ofdata_get() falls
+ *       back to the glue PARENT for "ippc" and the port-disable masks, and
+ *       generic_phy_get_bulk() already falls back to the parent for "phys".
+ *     - vbus-supply is not needed: GPIO25 is muxed to USB_DRVVBUS by the parent's
+ *       pinctrl-0 = <&usb_pins>, so the controller drives VBUS in hardware. The
+ *       usb_otg_vbus fixed-regulator is an unreferenced orphan in the board DTS;
+ *       binding it here would drive GPIO25 as a plain GPIO against its own
+ *       pinmux. A missing vbus-supply is tolerated -- device_get_supply_regulator()
+ *       leaves it NULL and regulator_set_enable(NULL) returns -ENOSYS, which
+ *       xhci_mtk_ldos_enable() ignores.
+ *
+ * What remains below is additive only, so the control FDT stays semantically the
+ * kernel's DT: mediatek,force-vbus (a real Linux mtu3 binding) for the gadget,
+ * and the console baud.
+ */
+
+/*
+ * Console baud: pin 115200, matching the rest of the boot chain.
+ *
+ * BROM, BL2, and BL31 (mt8365-usbdl TF-A, UART_BAUDRATE=115200) all run the
+ * console at 115200, and u-boot's serial-uclass PARSES the baud out of the dtb
+ * (serial-uclass.c: fdtdec_get_chosen_prop "stdout-path" -> "fetch the baudrate
+ * from the dtb and update the value"), OVERRIDING CONFIG_BAUDRATE. A dtb that
+ * said 921600 would therefore make u-boot the lone 921600 stage in an otherwise
+ * 115200 chain, so the 115200 BROM/BL2/BL31 stages print garbage and only
+ * u-boot reads clean.
+ *
+ * The i350's own dts/upstream/.../mt8365-pumpkin.dts already sets
+ * `stdout-path = "serial0:115200n8"`, so this block is belt-and-braces, not the
+ * fix. (The 921600 came from the EVK: the i350 was once built from
+ * mt8365-evk.dts, which upstream sets to 921600. The Pumpkin does not include
+ * that file -- do not "fix" the EVK dts, it is an upstream board we do not
+ * build.) The broker (tools/uart-console/boards.conf
+ * [mt8365-g350-pumpkin-2g] baud) is 115200 to match. See
+ * mediatek/software/mt8365/uart-115200-conversion.md.
+ */
+/ {
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+};
+
+&ssusb {
+	/*
+	 * Force VBUS-valid (sets VBUS_FRC_EN|VBUS_ON in U3D_MISC_CTRL via
+	 * mtu->force_vbus in ssusb_gadget_init/mtu3_dev_setup). Without it u-boot
+	 * takes the "vbus detected by HW" path and CLEARS those bits, so the MAC
+	 * only pulls up D+ if the U2 PHY's VBUS comparator asserts session-valid.
+	 * The brick-safe BL2 USB-DL receiver forces VBUS-valid unconditionally
+	 * (mtu3_gadget.c: RG_VBUSVALID/RG_BVALID + clear RG_SESSEND), which is why
+	 * it always connects; this makes the u-boot gadget match that behaviour and
+	 * connect independent of cable/port VBUS sensing. force_vbus is read from
+	 * this glue node (mtu3_probe's dev).
+	 *
+	 * This is a real Linux mtu3 binding, not a u-boot invention, so it is safe
+	 * in the control FDT. Keep dr_mode = "otg" + usb-role-switch + the connector
+	 * exactly as the board DTS has them.
+	 */
+	mediatek,force-vbus;
+};
+
+/*
+ * The LAN9512 host is the upstream nested usb_host child (usb@11200000,
+ * "mediatek,mtk-xhci"), bound by CONFIG_USB_MTU3_XHCI_CHILD. No node is deleted
+ * and none is redeclared, so the control FDT keeps the kernel's USB topology.
+ * FORCE_HOST in xhci_mtk_host_enable() overrides the OTG role at probe.
+ */
+
+/*
+ * ---------------------------------------------------------------------------
+ * HDMI boot-splash display path: SoC DPI0 -> ITE IT66121 bridge -> HDMI.
+ *
+ * The ported MTK display drivers (clk-mt8365 mmsys, mtk_dpi/rdma/mutex/smi,
+ * mtk-power-domain-mt8365, ite-it66121) expect the BayLibre-BSP phandle-style
+ * bindings, not the upstream OF-graph-only bindings. This overlay adds the
+ * phandle props + clock-names the drivers read and enables dpi0.
+ *
+ * NOTE (hardware): on the g350 Pumpkin the DPI0 pins (GPIO0-15) are hard-wired
+ * to the IT66121 HDMI bridge -- there is NO board mux switch. (The EVK's SW2101
+ * DPI/RMII selector does not exist on the Pumpkin i350; that was an EVK-schematic
+ * assumption, since corrected.) We use the LAN9512 USB ethernet, so the SoC RMII
+ * &ethernet stays disabled and DPI0 reaches the IT66121 directly.
+ * ---------------------------------------------------------------------------
+ */
+
+/*
+ * Keep the upstream nested scpsys/spm power-domain tree as-is: the ported
+ * mtk-power-domain-mt8365 driver binds the "mediatek,mt8365-power-controller"
+ * (spm) node and powers the MM domain, which the upstream display nodes already
+ * reference as power-domains = <&spm MT8365_POWER_DOMAIN_MM>. Only the
+ * driver-specific phandle bindings + clock-names + the dpi0 "okay" status are
+ * added here; smi_common / larb0 / mutex / rdma1 are not status="disabled"
+ * upstream so they bind already.
+ */
+&smi_common {
+	clocks = <&mmsys CLK_MM_MM_SMI_COMMON>,
+		 <&mmsys CLK_MM_MM_SMI_COMM0>,
+		 <&mmsys CLK_MM_MM_SMI_COMM1>;
+	clock-names = "common", "comm0", "comm1";
+};
+
+&larb0 {
+	clocks = <&mmsys CLK_MM_MM_SMI_LARB0>;
+	clock-names = "larb";
+	mediatek,smi = <&smi_common>;
+};
+
+&rdma1 {
+	clocks = <&mmsys CLK_MM_MM_DISP_RDMA1>;
+	mediatek,larb = <&larb0>;
+};
+
+&dpi0 {
+	clocks = <&mmsys CLK_MM_DPI0_DPI0>,
+		 <&mmsys CLK_MM_MM_DPI0>,
+		 <&apmixedsys CLK_APMIXED_LVDSPLL>,
+		 <&topckgen CLK_TOP_DPI0_SEL>;
+	clock-names = "dpi_sel", "engine", "pll", "pixel";
+	assigned-clocks = <&topckgen CLK_TOP_DPI0_SEL>;
+	assigned-clock-parents = <&topckgen CLK_TOP_LVDSPLL_D4>;
+	mediatek,rdma = <&rdma1>;
+	mediatek,mutex = <&mutex>;
+	mediatek,mmsys = <&mmsys>;
+	status = "okay";
+};
+
+/*
+ * Pumpkin it66121 power rails -- belt-and-braces. The EVK's it66121 supplies
+ * (vcn33 = vibr, vcn18 = vsim2) mis-power the bridge on the Pumpkin i350 -> no
+ * i2c response -> "dpi: Failed to get bridge". These overrides date from when
+ * the i350 was built from mt8365-evk.dts; the control DTB is now
+ * dts/upstream/.../mt8365-pumpkin.dts (CONFIG_DEFAULT_DEVICE_TREE=
+ * "mediatek/mt8365-pumpkin"), which already carries the correct Pumpkin rails,
+ * so this block re-asserts identical values rather than fixing anything.
+ *
+ * It still matters that the values match the kernel DT: mt8365.h defines no
+ * fdtfile, so no OS DTB is ever loaded from the ESP and bootefi hands Linux
+ * u-boot's control FDT -- everything in this overlay propagates into the OS
+ * device tree. See mediatek/software/mt8183/todo.md for the open items that
+ * follow from that (the &ssusb / usb_host overrides above are NOT value-neutral).
+ */
+&it66121_hdmi {
+	vcn33-supply = <&mt6357_vcn33_bt_reg>;
+	vcn18-supply = <&mt6357_vcn18_reg>;
+};

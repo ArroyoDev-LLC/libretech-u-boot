@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 /*
- * Copyright (c) 2023 Neil Armstrong <neil.armstrong@linaro.org>
+ * U-Boot additions for meson-sm1-s905d3-libretech-cc.dts (vendor chain):
+ * the shared S905D3-CC additions plus the SPI NOR / 4-bit eMMC split.
  */
 
-#include "meson-g12-common-u-boot.dtsi"
-
-&sd_emmc_c {
-	pinctrl-0 = <&emmc_ctrl_pins>, <&emmc_data_4b_pins>, <&emmc_ds_pins>;
-	bus-width = <4>;
-};
-
-&spifc {
-	status = "okay";
-};
+#include "meson-sm1-s905d3-libretech-cc-common-u-boot.dtsi"
+#include "meson-sm1-s905d3-libretech-cc-nor-u-boot.dtsi"

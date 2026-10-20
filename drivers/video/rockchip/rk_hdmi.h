@@ -41,6 +41,18 @@ struct rk_hdmi_priv {
 int rk_hdmi_read_edid(struct udevice *dev, u8 *buf, int buf_size);
 
 /**
+ * rk_hdmi_detect() - report whether a sink is attached, from HPD
+ *
+ * Never negative, unlike the -ve-on-error that struct dm_display_ops .detect
+ * allows: the underlying HPD read cannot fail. See the comment on the
+ * definition.
+ *
+ * @dev:	device
+ * Return: 1 if HPD is asserted, 0 if not
+ */
+int rk_hdmi_detect(struct udevice *dev);
+
+/**
  * rk_hdmi_probe_regulators() - probe (autoset + enable) regulators
  *
  * Probes a list of regulators by performing autoset and enable

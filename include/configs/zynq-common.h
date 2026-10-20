@@ -75,7 +75,36 @@
 #define BOOT_TARGET_DEVICES_DHCP(func)
 #endif
 
-#if defined(CONFIG_ZYNQ_QSPI)
+/*
+ * The QSPI boot target sources a boot SCRIPT out of SPI NOR (BOOTENV_DEV_QSPI
+ * below: sf read ${script_offset_f} -> source). That is a valid Xilinx layout,
+ * but it is NOT a sanctioned consumer of the Libre Computer NOR map.
+ *
+ * Board-bootloader policy §4 gives SPI NOR exactly three regions -- the
+ * bootloader blob at 0x0, the 64 KiB config sector at 0x1F0000, and the DT
+ * overlay FIT at 0x200000 (which on OP-TEE boards may also carry BL32). There
+ * is no boot-script region, and the sanctioned per-unit override surface is
+ * the config sector: plain key=value pairs imported by board_config_env_import() (which
+ * can set bootcmd/boot_targets/anything else) plus an "overlays=" list applied
+ * by nor_apply_overlays(). A NOR boot script is redundant with that, and every
+ * offset it could use is inside a region something else owns -- the QSPI slot
+ * was pointed at 0x200000, the overlay-FIT region, before this.
+ *
+ * So a board that has adopted the policy map -- which is exactly what
+ * CONFIG_BOARD_CONFIG marks -- does not get the qspi boot target at all,
+ * and config_distro_bootcmd.h then emits no bootcmd_qspi and no "qspi" token
+ * in the compiled-in boot_targets. CONFIG_ZYNQ_QSPI stays on: it is the driver
+ * the config sector, the overlay FIT and `sf` themselves need.
+ *
+ * Every other Zynq board in this tree leaves BOARD_CONFIG unset and is
+ * unaffected -- only zynq_adrv9009 and zynq_e310 select it.
+ *
+ * The runtime half of this is board_late_init() in board/xilinx/zynq/board.c,
+ * which prepends the DETECTED boot mode: on a QSPI-strapped board it must not
+ * re-add a "qspi" token that has no bootcmd_qspi behind it. See the comment
+ * there.
+ */
+#if defined(CONFIG_ZYNQ_QSPI) && !defined(CONFIG_BOARD_CONFIG)
 # define BOOT_TARGET_DEVICES_QSPI(func)	func(QSPI, qspi, na)
 #else
 # define BOOT_TARGET_DEVICES_QSPI(func)
@@ -157,8 +186,34 @@
 #define BOOTENV_DEV_NAME_USB_THOR(devtypeu, devtypel, instance) \
 	""
 
+/*
+ * Board-bootloader policy §2 "Default boot order": local media first, and
+ * network/PXE is NOT a default target -- it is enabled by overriding
+ * boot_targets from the NOR config sector. An unattended board whose media is
+ * absent or unbootable must NOT fall through to BOOTP/DHCP and run whatever a
+ * LAN PXE server happens to offer.
+ *
+ * So PXE and DHCP are dropped from the compiled-in list, and JTAG is demoted
+ * below every storage target -- it was ahead of all of them, which is the same
+ * "unattended board takes external input first" defect.
+ *
+ * `setenv boot_targets "... pxe dhcp"` still works, but NOT via bootcmd_pxe /
+ * bootcmd_dhcp: config_distro_bootcmd.h only emits a bootcmd_<dev> for devices
+ * that appear in BOOT_TARGET_DEVICES, so on a build with these two dropped
+ * there is no bootcmd_pxe in the default environment at all (verified: 0 hits
+ * for "bootcmd_pxe" in the built u-boot.bin). What makes the override work is
+ * BOOTSTD: boot/bootdev-uclass.c label_to_uclass() special-cases the labels
+ * "pxe" and "dhcp" to UCLASS_ETH with BOOTFLOW_METHF_PXE_ONLY / _DHCP_ONLY, so
+ * `bootflow scan` walks boot_targets and picks them up directly. CMD_PXE and
+ * CMD_DHCP stay enabled for the manual commands.
+ *
+ * The runtime half of this list is board_late_init() in
+ * board/xilinx/zynq/board.c, which prepends the DETECTED boot mode; its JTAG
+ * arm re-added "pxe dhcp" until it was fixed to prepend "jtag" alone.
+ *
+ * Same change rockchip-common.h took. Applies to every Zynq board in this tree.
+ */
 #define BOOT_TARGET_DEVICES(func) \
-	BOOT_TARGET_DEVICES_JTAG(func) \
 	BOOT_TARGET_DEVICES_MMC(func) \
 	BOOT_TARGET_DEVICES_QSPI(func) \
 	BOOT_TARGET_DEVICES_NAND(func) \
@@ -166,8 +221,7 @@
 	BOOT_TARGET_DEVICES_USB_DFU(func) \
 	BOOT_TARGET_DEVICES_USB_THOR(func) \
 	BOOT_TARGET_DEVICES_USB(func) \
-	BOOT_TARGET_DEVICES_PXE(func) \
-	BOOT_TARGET_DEVICES_DHCP(func)
+	BOOT_TARGET_DEVICES_JTAG(func)
 
 #include <config_distro_bootcmd.h>
 

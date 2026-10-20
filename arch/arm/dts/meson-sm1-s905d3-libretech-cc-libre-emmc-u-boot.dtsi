@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * U-Boot additions for meson-sm1-s905d3-libretech-cc-libre-emmc.dts: the
+ * libre firmware layout with the eMMC at 8-bit (HS200, 1.8 V) and the SPI
+ * NOR unused. No NOR split: the upstream cottonwood description stands --
+ * 8b + ds + spi_cs_disable pins, bus-width 8, mmc-hs200-1_8v, spifc
+ * disabled.
+ */
+
+#include "meson-sm1-s905d3-libretech-cc-common-u-boot.dtsi"

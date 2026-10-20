@@ -22,6 +22,7 @@
 #include <u-boot/crc.h>
 #include <usb.h>
 #include <watchdog.h>
+#include <wdt.h>
 #include <asm/global_data.h>
 #include <linux/libfdt_env.h>
 
@@ -2244,6 +2245,8 @@ static efi_status_t EFIAPI efi_exit_boot_services(efi_handle_t image_handle,
 		bootm_disable_interrupts();
 		if (IS_ENABLED(CONFIG_DM_ETH))
 			eth_halt();
+		/* Platform policy: watchdogs stopped unless wdt_handoff=1 */
+		wdt_handoff_to_os();
 		board_quiesce_devices();
 		dm_remove_devices_active();
 	}

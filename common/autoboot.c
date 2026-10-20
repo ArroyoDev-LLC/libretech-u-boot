@@ -370,7 +370,7 @@ static int abortboot_key_sequence(int bootdelay)
 
 static void print_boot_delay(int bootdelay)
 {
-	printf(ANSI_CLEAR_LINE "\rHit any key to stop autoboot: %d", bootdelay);
+	printf(ANSI_CLEAR_LINE "\rPress Esc for menu, booting in: %d", bootdelay);
 }
 
 static int abortboot_single_key(int bootdelay)
@@ -379,15 +379,6 @@ static int abortboot_single_key(int bootdelay)
 	unsigned long ts;
 
 	print_boot_delay(bootdelay);
-
-	/*
-	 * Check if key already pressed
-	 */
-	if (tstc()) {	/* we got a key press	*/
-		getchar();	/* consume input	*/
-		print_boot_delay(0);
-		abort = 1;	/* don't auto boot	*/
-	}
 
 	while ((bootdelay > 0) && (!abort)) {
 		--bootdelay;

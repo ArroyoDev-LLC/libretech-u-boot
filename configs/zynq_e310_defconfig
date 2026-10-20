@@ -1,0 +1,286 @@
+CONFIG_ARM=y
+CONFIG_SPL_SYS_DCACHE_OFF=y
+CONFIG_SYS_L2CACHE_OFF=y
+CONFIG_ARCH_ZYNQ=y
+CONFIG_TEXT_BASE=0x4000000
+CONFIG_DEBUG_UART=y
+CONFIG_DEBUG_UART_ZYNQ=y
+CONFIG_DEBUG_UART_BASE=0xe0001000
+CONFIG_DEBUG_UART_CLOCK=100000000
+CONFIG_DEBUG_UART_ANNOUNCE=y
+CONFIG_CLK=y
+CONFIG_SPL_CLK=y
+CONFIG_CLK_ZYNQ=y
+CONFIG_SF_DEFAULT_BUS=0
+CONFIG_SF_DEFAULT_CS=0
+CONFIG_SF_DEFAULT_SPEED=30000000
+# Env size for FAT uboot.env (Libre Computer policy: env proper on boot media
+# EFI/FAT, NOT in SPI NOR). Matches aml-s905d3-cc_defconfig ENV_SIZE.
+CONFIG_ENV_SIZE=0x2000
+# No CONFIG_BOOT_SCRIPT_OFFSET: this board has no NOR boot script at all. See
+# the block above CONFIG_BOARD_CONFIG below, plus the comments in
+# zynq-common.h (drops the qspi boot target) and board/xilinx/common/board.c
+# (drops the script_offset_f assignment) -- both keyed on BOARD_CONFIG.
+# NOTE to editors: a defconfig comment line must never begin "# include", which
+# kconfig's preprocessor reads as an #include directive.
+CONFIG_DM_GPIO=y
+CONFIG_DEFAULT_DEVICE_TREE="zynq-e310"
+CONFIG_OF_LIBFDT_OVERLAY=y
+CONFIG_SPL_STACK_R_ADDR=0x200000
+CONFIG_SPL_STACK=0xfffffe00
+CONFIG_SPL_HAS_BSS_LINKER_SECTION=y
+CONFIG_SPL_BSS_START_ADDR=0x100000
+CONFIG_SPL_BSS_MAX_SIZE=0x100000
+CONFIG_SPL_STACK_R=y
+# Board-specific code in board/xilinx/zynq/zynq-e310/board.c: misc_init_r()
+# derives a deterministic ethaddr from the QSPI NOR (W25Q256) factory unique
+# ID. Without it net/eth-uclass.c hands out a fresh net_random_ethaddr() on
+# every boot, which violates board-bootloader policy §1.
+CONFIG_ZYNQ_E310=y
+CONFIG_MISC_INIT_R=y
+CONFIG_SYS_BOOTM_LEN=0x3c00000
+CONFIG_SYS_LOAD_ADDR=0x0
+CONFIG_SPL=y
+CONFIG_CMD_FRU=y
+CONFIG_SYS_MEMTEST_START=0x00000000
+CONFIG_SYS_MEMTEST_END=0x00001000
+CONFIG_REMAKE_ELF=y
+CONFIG_SYS_CUSTOM_LDSCRIPT=y
+CONFIG_SYS_LDSCRIPT="arch/arm/mach-zynq/u-boot.lds"
+CONFIG_FIT=y
+CONFIG_FIT_VERBOSE=y
+CONFIG_SPL_FIT_PRINT=y
+CONFIG_SPL_LOAD_FIT=y
+CONFIG_SPL_LOAD_FIT_ADDRESS=0x10000000
+CONFIG_BOOTSTD_FULL=y
+CONFIG_HUSH_PARSER=y
+# CONFIG_ARCH_FIXUP_FDT_MEMORY is not set
+# U-Boot does NOT touch the PL. The bitstream load that used to live in
+# CONFIG_PREBOOT ("mmc dev 0; if load mmc 0:1 0x10000000 system.bit.bin; then
+# fpga load 0 0x10000000 ${filesize}; fi") is RETIRED, not a fallback: userspace
+# owns the PL lifecycle in two ordered steps -- the fpga_manager programs the
+# bitstream at sdr service start, then configfs applies the overlay that adds
+# the PL-dependent AXI nodes (e310-fpga-up). Leaving it built in meant a board
+# with a DEFAULT environment (no uboot.env on the ESP -- e310-beta) programmed
+# the PL behind userspace's back even though e310-alpha had it overridden to
+# empty with fw_setenv. The env override is not reachable on every board, so the
+# retirement has to be here, at the layer that defines the default.
+# CONFIG_USE_PREBOOT is not set
+CONFIG_SYS_PBSIZE=2071
+CONFIG_CLOCKS=y
+CONFIG_SPL_MAX_SIZE=0x30000
+# CONFIG_SPL_SHARES_INIT_SP_ADDR is not set
+CONFIG_SPL_HAVE_INIT_STACK=y
+CONFIG_SPL_SYS_MALLOC=y
+CONFIG_SPL_SYS_MALLOC_SIZE=0x2000000
+CONFIG_SPL_FS_LOAD_PAYLOAD_NAME="u-boot.img"
+# The full production control FDT (~23 KiB: ad9361/cf_axi/fpga-axi) overflows
+# U-Boot-proper's pre-relocation reserve region. zynq-common.h pins that region
+# to an 8 KiB window in high OCM (CFG_SYS_INIT_RAM_ADDR 0xFFFF0000 + SIZE 0x2000),
+# so gd + malloc_f + stack for the bigger FDT grow past 0xFFFF0000 into unmapped
+# space -> data abort (DFAR 0xfffefe38). Move U-Boot-proper's pre-reloc stack
+# into DRAM (already brought up by the SPL) so the reserve chain has room; the
+# SPL keeps its own OCM stack (CONFIG_SPL_STACK, SPL_SHARES_INIT_SP_ADDR unset).
+# 0x03f00000 sits in DRAM just below the u-boot text base (0x04000000), clear of
+# the SPL BSS/stack (0x100000/0x200000) and the top-of-DRAM relocation target.
+CONFIG_HAS_CUSTOM_SYS_INIT_SP_ADDR=y
+CONFIG_CUSTOM_SYS_INIT_SP_ADDR=0x3f00000
+# malloc_f now has DRAM room; keep it generous for the bigger FDT parse.
+CONFIG_SYS_MALLOC_F_LEN=0x2000
+CONFIG_SPL_FPGA=y
+CONFIG_SPL_SPI_FLASH_BAR=y
+CONFIG_SPL_SPI_LOAD=y
+# Offset of the u-boot.img payload INSIDE the combined bootloader blob that
+# binman writes to NOR offset 0 (arch/arm/dts/zynq-e310-u-boot.dtsi). Must be
+# above CONFIG_SPL_MAX_SIZE (0x30000) so the SPL can never grow into the
+# payload, and 64 KiB-erase-sector aligned. Same value as the in-tree Zynq
+# binman precedent brcp150_defconfig.
+CONFIG_SYS_SPI_U_BOOT_OFFS=0x40000
+CONFIG_SYS_MAXARGS=32
+CONFIG_CMD_IMLS=y
+CONFIG_CMD_THOR_DOWNLOAD=y
+CONFIG_THOR_RESET_OFF=y
+CONFIG_CMD_GREPENV=y
+CONFIG_CMD_MEMINFO=y
+CONFIG_CMD_MEMTEST=y
+CONFIG_SYS_ALT_MEMTEST=y
+CONFIG_CMD_DFU=y
+CONFIG_CMD_FPGA=y
+CONFIG_CMD_FPGA_LOADP=y
+CONFIG_CMD_FPGA_LOADBP=y
+CONFIG_CMD_FPGA_LOADFS=y
+CONFIG_CMD_FPGA_LOADMK=y
+CONFIG_CMD_GPIO=y
+CONFIG_CMD_MMC=y
+CONFIG_MMC_SPEED_MODE_SET=y
+CONFIG_CMD_MTD=y
+CONFIG_CMD_SF_TEST=y
+CONFIG_CMD_USB=y
+CONFIG_CMD_CACHE=y
+CONFIG_CMD_TIME=y
+CONFIG_CMD_TIMER=y
+CONFIG_CMD_FAT=y
+CONFIG_CMD_EXT4=y
+CONFIG_CMD_EXT4_WRITE=y
+CONFIG_CMD_INI=y
+CONFIG_CMD_MTDPARTS=y
+CONFIG_CMD_BOOTEFI=y
+CONFIG_OF_SEPARATE=y
+CONFIG_OF_LIST="zynq-e310"
+# Libre Computer board-bootloader policy: U-Boot env proper is NOT in NOR.
+# Store on the OS EFI/FAT partition as uboot.env (same contract as Amlogic
+# aml-s905d3-cc: ENV_IS_IN_FAT + ENV_FAT_DEVICE_AND_PART=":auto").
+# QSPI remains firmware-only (SPL + u-boot.img); ADI qspi-uboot-env@0x100000
+# is unused by U-Boot. boot.ini on the same FAT is the media-side override
+# surface (CMD_INI). Do NOT enable ENV_IS_NOWHERE — a missing uboot.env would
+# make env_load pick nowhere (always "OK") and saveenv becomes impossible.
+# CONFIG_ENV_IS_NOWHERE is not set
+CONFIG_ENV_IS_IN_FAT=y
+CONFIG_ENV_FAT_INTERFACE="mmc"
+CONFIG_ENV_FAT_DEVICE_AND_PART=":auto"
+CONFIG_ENV_FAT_FILE="uboot.env"
+# CONFIG_ENV_IS_IN_SPI_FLASH is not set
+CONFIG_SPL_DM_SEQ_ALIAS=y
+CONFIG_SIMPLE_PM_BUS=y
+CONFIG_DFU_TIMEOUT=y
+CONFIG_DFU_MMC=y
+CONFIG_DFU_RAM=y
+CONFIG_DFU_SF=y
+# QSPI NOR DFU alternate-setting map is built in board/xilinx/zynq/zynq-e310/
+# board.c's set_dfu_alt_info(), NOT as an environment default: our env lives on
+# the ESP FAT (ENV_IS_IN_FAT) and may be absent exactly when DFU recovery is
+# needed, and zynq-common.h's bootcmd_usb_dfu*/usb_thor* overwrite
+# dfu_alt_info with "boot.scr ram ..." during a bootstd scan, which would
+# destroy an env-based default. The hook keys on the interface so that
+# boot.scr-over-DFU path keeps working unchanged.
+CONFIG_SET_DFU_ALT_INFO=y
+CONFIG_SYS_DFU_DATA_BUF_SIZE=0x600000
+CONFIG_FPGA_XILINX=y
+CONFIG_FPGA_ZYNQPL=y
+CONFIG_MMC_SDHCI=y
+CONFIG_MMC_SDHCI_ZYNQ=y
+CONFIG_SPI_FLASH_ISSI=y
+CONFIG_SPI_FLASH_MACRONIX=y
+CONFIG_SPI_FLASH_SPANSION=y
+CONFIG_SPI_FLASH_STMICRO=y
+CONFIG_SPI_FLASH_SST=y
+CONFIG_SPI_FLASH_WINBOND=y
+# CONFIG_SPI_FLASH_USE_4K_SECTORS is not set
+CONFIG_SPI_FLASH_MTD=y
+CONFIG_DM_ETH_PHY=y
+CONFIG_MII=y
+CONFIG_ZYNQ_GEM=y
+CONFIG_PHY_MARVELL=y
+CONFIG_PHY_REALTEK=y
+CONFIG_DM_RTC=y
+CONFIG_RTC_EMULATION=y
+CONFIG_ARM_DCC=y
+CONFIG_ZYNQ_SERIAL=y
+# PS SPI0 (e0006000) = AD9361 control (Linux only). Leave ZYNQ_SPI off so SPI
+# bus 0 is QSPI for SPL/u-boot.img load (sf probe). Env is on MMC FAT, not NOR.
+# CONFIG_ZYNQ_SPI is not set
+CONFIG_ZYNQ_QSPI=y
+CONFIG_FS_FAT=y
+CONFIG_FAT_WRITE=y
+CONFIG_FS_EXT4=y
+CONFIG_EFI_LOADER=y
+CONFIG_USB=y
+CONFIG_USB_EHCI_HCD=y
+CONFIG_USB_ULPI=y
+CONFIG_USB_GADGET=y
+CONFIG_USB_GADGET_MANUFACTURER="Xilinx"
+CONFIG_USB_GADGET_VENDOR_NUM=0x03fd
+CONFIG_USB_GADGET_PRODUCT_NUM=0x0300
+CONFIG_CI_UDC=y
+CONFIG_USB_GADGET_DOWNLOAD=y
+# USB-gadget re-imaging over the OTG port (no card pull needed):
+#   ums 0 mmc 0:1      -> export the ESP (FAT) to the host as mass storage.
+#                         USE THE :1 FORM. The bare `ums 0 mmc 0` is the
+#                         whole-disk form: cmd/usb_mass_storage.c maps partnum
+#                         0 to sector 0..lba, so it offers the partition
+#                         table, the ESP *and* the rootfs to the host
+#                         read-write with no confirmation. A host that
+#                         automounts and replays a log has then written to the
+#                         board's rootfs. :1 limits the blast radius to the
+#                         ESP, which is the partition re-imaging actually
+#                         needs (uboot.env, boot.scr, the bitstream).
+#   dfu 0 mmc 0 / sf 0 -> DFU (dfu_alt_info), already wired above
+#   fastboot usb 0     -> fastboot. NOTE FASTBOOT_FLASH_MMC_DEV=0 below aims
+#                         `fastboot flash` at that same whole card.
+# All three ride CONFIG_CI_UDC, which reaches the controller through
+# usb_setup_ehci_gadget() -> the ehci-zynq UCLASS_USB device, so they need
+# usb@e0002000 enabled in the DT (done in zynq-e310.dts).
+CONFIG_CMD_USB_MASS_STORAGE=y
+CONFIG_USB_FUNCTION_MASS_STORAGE=y
+CONFIG_USB_FUNCTION_FASTBOOT=y
+CONFIG_FASTBOOT=y
+CONFIG_CMD_FASTBOOT=y
+# 0x18000000 + 128 MiB = 0x20000000: inside the 1 GiB DRAM and clear of the
+# u-boot text base (0x04000000), the SPL BSS/stack (0x00100000/0x00200000),
+# the preboot bitstream load address (0x10000000) and the top-of-DRAM
+# relocation target.
+CONFIG_FASTBOOT_BUF_ADDR=0x18000000
+CONFIG_FASTBOOT_BUF_SIZE=0x8000000
+CONFIG_FASTBOOT_FLASH=y
+CONFIG_FASTBOOT_FLASH_MMC=y
+CONFIG_FASTBOOT_FLASH_MMC_DEV=0
+CONFIG_SYS_TIMER_COUNTS_DOWN=y
+# BL33 compression, per the BL33 compression policy: LZ4 first, LZMA only with a
+# recorded shortfall, GZIP banned outright (strictly dominated -- worse ratio
+# than LZMA, slower than LZ4). The ladder in
+# arch/arm/dts/zynq-sdr-nor-u-boot.dtsi selects off this symbol and drives BOTH
+# the FIT `compression` metadata and the binman `compress` property, so the
+# label and the payload can never disagree. No shortfall to record here: LZ4
+# already clears the 0x1F0000 gate with a wide margin, so the ladder does not
+# reach for LZMA.
+#
+# This REPLACES a "no SPL decompressor" arrangement whose stated blocker was
+# real and is now resolved: the Makefile's mkimage "-f auto" path CANNOT
+# compress -- it writes the payload raw and only stamps the compression property
+# -- so a -C lz4 there yields a FIT that lies about its contents and an SPL that
+# ulz4fn()s raw ARM code. The fix is the layer that owns the artifact: the
+# binman `u-boot-img` entry is replaced by an explicit `fit` node whose
+# u-boot-nodtb subentry carries `compress`, which is what actually runs the
+# compressor. Prior to that, CONFIG_SPL_GZIP=y was set here against a FIT
+# marking every entry compression = "none", i.e. 13 064 B of unreachable SPL
+# text.
+#
+# The FIT offset (CONFIG_SYS_SPI_U_BOOT_OFFS=0x40000 above) does NOT move: it is
+# already the derived floor -- the smallest 64 KiB-erase-aligned offset above
+# CONFIG_SPL_MAX_SIZE (0x30000), which is itself the 192 KiB low-OCM window the
+# Zynq SPL executes from. The gap below it is the SPL's silicon-capped growth
+# reserve, not fixed-offset filler.
+CONFIG_SPL_LZ4=y
+# SPI NOR config sector (board-bootloader policy "SPI NOR config sector"):
+# one 64 KiB erase block at 0x1F0000 of plain-text key=value env *overrides*,
+# imported by board_config_env_import() from misc_init_r(). The env proper stays on the
+# ESP FAT (ENV_IS_IN_FAT above). Backend hooks: board/xilinx/zynq/zynq-e310/board.c.
+CONFIG_BOARD_CONFIG=y
+# PINNED at the value this board has always used, and it must stay pinned --
+# but NOT merely because the board cannot report a size. It cannot (its read
+# path is spi_flash_probe_bus_cs(), which needs driver model, and the block is
+# read before driver model exists), and that alone no longer decides anything:
+# an unmeasurable board now DEFAULTS to the last block of the addressable
+# window, 0xFF0000. The reason to pin is that 0xFF0000 is occupied here.
+#
+# This board's 32 MiB W25Q256 is tiled by three DFU alts in board.c with no
+# gaps and no overlap: "bootloader raw 0x0 0x1f0000", "config raw 0x1f0000
+# 0x10000", "spare raw 0x200000 0x1e00000". 0xFF0000 is inside that last one,
+# so the config block would sit in the middle of a 30 MiB region offered as a
+# single writable alt -- one `dfu` write of a spare image erases it, silently,
+# and the block is also where a golden copy of the bootloader blob lives.
+# Moving the block would mean splitting "spare" in two around a 64 KiB hole
+# and giving up whole-region writes, to gain nothing: 0x1F0000 is free,
+# erase-block aligned, and is already what LBS_TARGET_MAX_SIZE=0x1F0000
+# (configs/xilinx-zynq7) gates the bootloader blob against, so the blob
+# provably cannot grow into it.
+CONFIG_BOARD_CONFIG_NOR_OFFSET_PIN=y
+CONFIG_BOARD_CONFIG_NOR_OFFSET=0x1F0000
+# Overlay half OFF. The E310 ships no .dtbo set, and NOR 0x200000 -- the
+# default CONFIG_BOARD_CONFIG_NOR_FIT_OFFSET -- holds the golden copy of the
+# bootloader blob, which would be parsed as a FIT. Leaving it off also keeps
+# fdtdec_board_setup() out of the image entirely.
+# CONFIG_BOARD_CONFIG_OVERLAYS is not set
+# Platform boot-source variables (policy §4 "Boot source variables"): not on
+# by default here because SYS_VENDOR is "xilinx", so it is opted into.
+CONFIG_BOOTSOURCE=y

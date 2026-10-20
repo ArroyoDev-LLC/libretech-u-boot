@@ -34,7 +34,15 @@ obj-$(CONFIG_$(PHASE_)LOAD_IMX_CONTAINER) += spl_imx_container.o
 obj-$(CONFIG_$(PHASE_)SATA) += spl_sata.o
 obj-$(CONFIG_$(PHASE_)NVME) += spl_nvme.o
 obj-$(CONFIG_$(PHASE_)SEMIHOSTING) += spl_semihosting.o
+# The "DFU" boot method (spl_ram.c -> spl_dfu_cmd()) reads its alternate list
+# from the environment, so it exists only in a phase that has one.  A phase
+# with DFU and no environment runs the flash session (spl_usbflash.c)
+# through the DFU core directly.
+ifdef CONFIG_$(PHASE_)ENV_SUPPORT
 obj-$(CONFIG_$(PHASE_)DFU) += spl_dfu.o
+endif
+obj-$(CONFIG_$(PHASE_)USBFLASH) += spl_usbflash.o
+obj-$(CONFIG_$(PHASE_)XPL_BOOTLOG) += xpl_bootlog.o
 obj-$(CONFIG_$(PHASE_)SPI_LOAD) += spl_spi.o
 obj-$(CONFIG_$(PHASE_)RAM_SUPPORT) += spl_ram.o
 obj-$(CONFIG_$(PHASE_)USB_SDP_SUPPORT) += spl_sdp.o

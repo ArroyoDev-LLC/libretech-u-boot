@@ -81,7 +81,7 @@ static struct sandbox_scmi_pwd scmi_pwdom[] = {
 
 static struct sandbox_scmi_clk scmi_clk[] = {
 	{ .rate = 333, .perm = 0xE0000000 },
-	{ .rate = 200, .perm = 0xE0000000 },
+	{ .rate = 200, .perm = 0xE0000000, .readonly = true },
 	{ .rate = 1000, .perm = 0xE0000000 },
 };
 
@@ -786,6 +786,8 @@ static int sandbox_scmi_clock_rate_set(struct udevice *dev,
 		dev_err(dev, "Unexpected clock ID %u\n", in->clock_id);
 
 		out->status = SCMI_NOT_FOUND;
+	} else if (clk_state->readonly) {
+		out->status = SCMI_DENIED;
 	} else {
 		u64 rate = ((u64)in->rate_msb << 32) + in->rate_lsb;
 
@@ -826,6 +828,48 @@ static int sandbox_scmi_clock_rate_get(struct udevice *dev,
 	return 0;
 }
 
+static int sandbox_scmi_clock_describe_rates(struct udevice *dev,
+					     struct scmi_msg *msg)
+{
+	struct scmi_clk_describe_rates_in *in = NULL;
+	struct scmi_clk_describe_rates_out *out = NULL;
+	struct sandbox_scmi_clk *clk_state = NULL;
+
+	if (!msg->in_msg || msg->in_msg_sz < sizeof(*in) ||
+	    !msg->out_msg || msg->out_msg_sz < sizeof(*out))
+		return -EINVAL;
+
+	in = (struct scmi_clk_describe_rates_in *)msg->in_msg;
+	out = (struct scmi_clk_describe_rates_out *)msg->out_msg;
+	memset(out, 0, sizeof(*out));
+
+	clk_state = get_scmi_clk_state(in->clock_id);
+	if (!clk_state) {
+		dev_err(dev, "Unexpected clock ID %u\n", in->clock_id);
+		out->status = SCMI_NOT_FOUND;
+		return 0;
+	}
+	if (in->rate_index != 0) {
+		out->status = SCMI_SUCCESS;
+		return 0;
+	}
+	/* Clock 2 is a range analog of fclk_cm0s: min=rate/32, max=rate, step=1. */
+	if (in->clock_id == 2) {
+		ulong min = clk_state->rate / 32;
+
+		out->num_rates_flags = SCMI_CLK_DESC_RATES_RANGE | 3;
+		out->rate[0].rate_lsb = (u32)min;
+		out->rate[1].rate_lsb = (u32)clk_state->rate;
+		out->rate[2].rate_lsb = 1;
+	} else {
+		out->num_rates_flags = 1;
+		out->rate[0].rate_lsb = (u32)clk_state->rate;
+		out->rate[0].rate_msb = (u32)((u64)clk_state->rate >> 32);
+	}
+	out->status = SCMI_SUCCESS;
+	return 0;
+}
+
 static int sandbox_scmi_clock_gate(struct udevice *dev, struct scmi_msg *msg)
 {
 	struct scmi_clk_state_in_v2 *in = NULL;
@@ -844,6 +888,8 @@ static int sandbox_scmi_clock_gate(struct udevice *dev, struct scmi_msg *msg)
 		dev_err(dev, "Unexpected clock ID %u\n", in->clock_id);
 
 		out->status = SCMI_NOT_FOUND;
+	} else if (clk_state->readonly) {
+		out->status = SCMI_DENIED;
 	} else if (in->attributes > 1) {
 		out->status = SCMI_PROTOCOL_ERROR;
 	} else {
@@ -1245,6 +1291,8 @@ static int sandbox_scmi_test_process_msg(struct udevice *dev,
 			return sandbox_scmi_clock_protocol_attribs(dev, msg);
 		case SCMI_CLOCK_ATTRIBUTES:
 			return sandbox_scmi_clock_attribs(dev, msg);
+		case SCMI_CLOCK_DESCRIBE_RATES:
+			return sandbox_scmi_clock_describe_rates(dev, msg);
 		case SCMI_CLOCK_RATE_SET:
 			return sandbox_scmi_clock_rate_set(dev, msg);
 		case SCMI_CLOCK_RATE_GET:

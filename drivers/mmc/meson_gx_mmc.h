@@ -10,8 +10,8 @@
 #include <linux/bitops.h>
 
 enum meson_gx_mmc_compatible {
-	MMC_COMPATIBLE_GX,
-	MMC_COMPATIBLE_SM1,
+	MMC_COMPATIBLE_V2,
+	MMC_COMPATIBLE_V3,
 };
 
 #define SDIO_PORT_A			0
@@ -35,11 +35,18 @@ enum meson_gx_mmc_compatible {
 #define   CLK_TX_PHASE_270		(3 << 10)
 #define   CLK_ALWAYS_ON			BIT(24)
 
+#define MESON_SD_EMMC_ADJUST		0x08
+#define MESON_SD_EMMC_V3_ADJUST		0x0c
+#define   ADJUST_ADJ_EN			BIT(13)
+#define   ADJUST_ADJ_DELAY_MASK		GENMASK(21, 16)
+#define   ADJUST_ADJ_DELAY_SHIFT	16
+
 #define MESON_SD_EMMC_CFG		0x44
 #define   CFG_BUS_WIDTH_MASK		GENMASK(1, 0)
 #define   CFG_BUS_WIDTH_1		0
 #define   CFG_BUS_WIDTH_4		1
 #define   CFG_BUS_WIDTH_8		2
+#define   CFG_DDR			BIT(2)
 #define   CFG_BL_LEN_MASK		GENMASK(7, 4)
 #define   CFG_BL_LEN_SHIFT		4
 #define   CFG_BL_LEN_512		(9 << 4)
@@ -84,11 +91,19 @@ enum meson_gx_mmc_compatible {
 #define MESON_SD_EMMC_CMD_RSP2		0x64
 #define MESON_SD_EMMC_CMD_RSP3		0x68
 
+struct meson_gx_mmc_version_data {
+	uint32_t clk_always_on;
+	uint32_t adjust;
+};
+
 struct meson_mmc_plat {
+	struct meson_gx_mmc_version_data *version;
 	struct mmc_config cfg;
 	struct mmc mmc;
 	void *regbase;
 	void *w_buf;
+	/* "amlogic,untuned-max-frequency": bus clock cap for modes not tuned, 0 = none */
+	u32 untuned_max;
 };
 
 #endif

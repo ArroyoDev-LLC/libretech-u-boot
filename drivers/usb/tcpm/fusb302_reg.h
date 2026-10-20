@@ -174,4 +174,21 @@ enum fusb302_txfifo_tokens {
 	FUSB302_TKN_TXOFF = 0xFE,
 };
 
+/*
+ * Tokens defined for the FUSB302 RX FIFO.
+ *
+ * The first byte of a received packet carries the packet CLASS in bits [7:5]
+ * and leaves bits [4:0] undefined (FUSB302B datasheet, "Tokens used in
+ * RxFIFO"): 111b_bbbb = SOP, 110b_bbbb = SOP', 101b_bbbb = SOP''. This is
+ * the table the RX path had no names for, which is why it used to print a
+ * raw byte and guess at what produced it.
+ *
+ * SOP' and SOP'' reach the FIFO ONLY when CONTROL1.ENSOP1 / CONTROL1.ENSOP2
+ * are set, per that same table.
+ */
+#define FUSB302_RX_TOKEN_CLASS_MASK		0xe0
+#define FUSB302_RX_TOKEN_SOP			0xe0
+#define FUSB302_RX_TOKEN_SOP1			0xc0
+#define FUSB302_RX_TOKEN_SOP2			0xa0
+
 #endif

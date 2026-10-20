@@ -775,6 +775,16 @@ config DRAM_ODT_EN
 	---help---
 	Select this to enable dram odt (on die termination).
 
+config DRAM_SWEEP
+	bool "DRAM parameter sweep mode"
+	depends on SUNXI_DRAM_DW
+	help
+	  Replace sunxi_dram_init() with a sweep version that iterates
+	  through a table of (clk, zq, odt) combinations, testing DRAM
+	  stability at each point. Results are printed over UART as CSV.
+	  After the sweep, the board returns to FEL mode.
+	  Only for development/testing -- do not enable in production.
+
 if MACH_SUN4I || MACH_SUN5I || MACH_SUN7I
 config DRAM_EMR1
 	int "sunxi dram emr1 value"
@@ -877,8 +887,20 @@ config SYS_CONFIG_NAME
 	default "sun50i" if MACH_SUN50I_A133
 	default "sun55i" if MACH_SUN55I_A523
 
+config SYS_VENDOR
+	string "Board vendor name"
+	default ""
+
 config SYS_BOARD
+	string "Board name"
 	default "sunxi"
+	help
+	  The board directory under board/<vendor>/ and the name of the
+	  built-in splash logo (<board>.bmp) tools/Makefile bakes in.
+	  Prompted so a Libre Computer defconfig can name its own logo
+	  through a board directory that is a symlink to the shared
+	  board/libre-computer/sunxi/; without a prompt the defconfig's
+	  CONFIG_SYS_BOARD line is silently dropped.
 
 config SYS_SOC
 	default "sunxi"

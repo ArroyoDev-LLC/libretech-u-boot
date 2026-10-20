@@ -6,6 +6,13 @@
 
 #include "meson-gx-u-boot.dtsi"
 
+/ {
+	aliases {
+		/* the OTG port env usb_otg sets the role of (boot/usb_otg_role.c) */
+		usb-otg = &usb;
+	};
+};
+
 #if defined(CONFIG_BINMAN)
 /* GXL-specific binman configuration */
 &binman {
@@ -17,8 +24,23 @@
 		fit: fit {
 			images {
 				atf {
+#if defined(CONFIG_MESON_GX_LIBRE_SECURE_LAYOUT)
+					/*
+					 * Open TF-A: BL31_BASE moved into the
+					 * 16 MiB secure block at DRAM start
+					 * (plat/amlogic/gxl/gxl_def.h).  Must
+					 * equal it exactly -- the FIT loader
+					 * copies to `load` and branches to
+					 * `entry`, neither of which is read
+					 * back out of the BL31 image.
+					 */
+					load = <0x100000>;
+					entry = <0x100000>;
+#else
+					/* Vendor bl31.img load address. */
 					load = <0x5100000>;
 					entry = <0x5100000>;
+#endif
 				};
 			};
 		};

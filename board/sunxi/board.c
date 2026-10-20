@@ -42,6 +42,7 @@
 #include <sunxi_gpio.h>
 #include <asm/io.h>
 #include <u-boot/crc.h>
+#include <chip_serial.h>
 #include <env_internal.h>
 #include <linux/libfdt.h>
 #include <fdt_support.h>
@@ -534,8 +535,6 @@ int mmc_get_env_dev(void)
 {
 	switch (sunxi_get_boot_device()) {
 	case BOOT_DEVICE_MMC1:
-		return 0;
-	case BOOT_DEVICE_MMC2:
 		return 1;
 	default:
 		return CONFIG_ENV_MMC_DEVICE_INDEX;
@@ -782,15 +781,18 @@ static bool get_unique_sid(unsigned int *sid)
 
 /*
  * Note this function gets called multiple times.
- * It must not make any changes to env variables which already exist.
+ * It must not make any changes to env variables which already exist, except
+ * serial#: that is always this chip's id, replacing a saved one from another
+ * board (arch/arm/mach-sunxi/chip-serial.c, the same SID words as below).
  */
 static void setup_environment(const void *fdt)
 {
-	char serial_string[17] = { 0 };
 	unsigned int sid[4];
 	uint8_t mac_addr[6];
 	char ethaddr[16];
 	int i;
+
+	chip_serial_env();
 
 	if (!get_unique_sid(sid))
 		return;
@@ -818,13 +820,6 @@ static void setup_environment(const void *fdt)
 
 		eth_env_set_enetaddr(ethaddr, mac_addr);
 	}
-
-	if (!env_get("serial#")) {
-		snprintf(serial_string, sizeof(serial_string),
-			"%08x%08x", sid[0], sid[3]);
-
-		env_set("serial#", serial_string);
-	}
 }
 
 int misc_init_r(void)
@@ -843,9 +838,9 @@ int misc_init_r(void)
 		parse_spl_header(SPL_ADDR);
 	/* or if we booted from MMC, and which one */
 	} else if (boot == BOOT_DEVICE_MMC1) {
-		env_set("mmc_bootdev", "0");
-	} else if (boot == BOOT_DEVICE_MMC2) {
 		env_set("mmc_bootdev", "1");
+	} else if (boot == BOOT_DEVICE_MMC2) {
+		env_set("mmc_bootdev", "0");
 	}
 
 	/* Set fdtfile to match the FIT configuration chosen in SPL. */

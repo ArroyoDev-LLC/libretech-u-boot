@@ -731,6 +731,9 @@ struct dwc3_scratchpad_array {
  * @is_fpga: true when we are using the FPGA board
  * @needs_fifo_resize: not all users might want fifo resizing, flag it
  * @pullups_connected: true when Run/Stop bit is set
+ * @ss_fallback_armed: started at SuperSpeed, no SETUP from the host yet, high-speed
+ *	fallback pending (USB_DWC3_SS_FALLBACK_MS)
+ * @ss_fallback_start: get_timer() when the fallback was armed
  * @resize_fifos: tells us it's ok to reconfigure our TxFIFO sizes.
  * @setup_packet_pending: true when there's a Setup Packet in FIFO. Workaround
  * @start_config_issued: true when StartConfig command has been issued
@@ -801,6 +804,7 @@ struct dwc3 {
 	u32			num_event_buffers;
 	u32			u1u2;
 	u32			maximum_speed;
+	unsigned long		ss_fallback_start;
 
 	u32			ip;
 
@@ -897,6 +901,7 @@ struct dwc3 {
 	unsigned		is_fpga:1;
 	unsigned		needs_fifo_resize:1;
 	unsigned		pullups_connected:1;
+	unsigned		ss_fallback_armed:1;
 	unsigned		resize_fifos:1;
 	unsigned		setup_packet_pending:1;
 	unsigned		start_config_issued:1;

@@ -3,6 +3,7 @@
  * Copyright (c) 2013 - 2017 Xilinx Inc.
  */
 
+#include <bootsource.h>
 #include <asm/io.h>
 #include <malloc.h>
 #include <asm/arch/hardware.h>
@@ -159,6 +160,32 @@ u32 zynq_slcr_get_boot_mode(void)
 	/* Get the bootmode register value */
 	return readl(&slcr_base->boot_mode);
 }
+
+#if CONFIG_IS_ENABLED(BOOTSOURCE)
+/*
+ * The BOOT_MODE strap in the platform vocabulary (include/bootsource.h).
+ * The BootROM has no USB download mode; a JTAG boot is a stage a debugger
+ * placed in memory, which the vocabulary spells "ram".
+ */
+enum bootsource zynq_bootsource(void)
+{
+	switch (zynq_slcr_get_boot_mode() & ZYNQ_BM_MASK) {
+	case ZYNQ_BM_QSPI:
+		return BOOTSOURCE_SPI;
+	case ZYNQ_BM_NOR:
+		/* parallel NOR: no shipped board has one, and "spi" would lie */
+		return BOOTSOURCE_UNKNOWN;
+	case ZYNQ_BM_NAND:
+		return BOOTSOURCE_NAND;
+	case ZYNQ_BM_SD:
+		return BOOTSOURCE_SD;
+	case ZYNQ_BM_JTAG:
+		return BOOTSOURCE_RAM;
+	default:
+		return BOOTSOURCE_UNKNOWN;
+	}
+}
+#endif
 
 u32 zynq_slcr_get_idcode(void)
 {

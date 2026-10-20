@@ -17,6 +17,7 @@
 #include <linux/compat.h>
 #include <linux/io.h>
 #include <linux/ioport.h>
+#include <linux/kernel.h>
 
 #include "smt.h"
 
@@ -62,6 +63,39 @@ int scmi_dt_get_smt_buffer(struct udevice *dev, struct scmi_smt *smt)
 		scmi_smt_enable_intr(smt, true);
 
 	return 0;
+}
+
+/*
+ * SMT shmem is often ordinary DRAM (RK3399: 0x00100000). The agent maps it
+ * cacheable; the platform (BL31) maps it MT_DEVICE. Without a clean before
+ * the doorbell and an invalidate after, the platform never sees CHANNEL_BUSY
+ * and the agent then reads its own cached BUSY as "Channel unexpectedly busy".
+ * a5a0134570c dropped a generic DCACHE_OFF here as platform-specific; the
+ * SMCCC transport calls these instead of changing the MMU.
+ */
+static void scmi_smt_dcache_range(struct scmi_smt *smt, bool flush)
+{
+	unsigned long start, stop;
+
+	if (!IS_ENABLED(CONFIG_ARM) || !dcache_status())
+		return;
+
+	start = ALIGN_DOWN((unsigned long)smt->buf, ARCH_DMA_MINALIGN);
+	stop = ALIGN((unsigned long)smt->buf + smt->size, ARCH_DMA_MINALIGN);
+	if (flush)
+		flush_dcache_range(start, stop);
+	else
+		invalidate_dcache_range(start, stop);
+}
+
+void scmi_smt_flush(struct scmi_smt *smt)
+{
+	scmi_smt_dcache_range(smt, true);
+}
+
+void scmi_smt_inval(struct scmi_smt *smt)
+{
+	scmi_smt_dcache_range(smt, false);
 }
 
 /**

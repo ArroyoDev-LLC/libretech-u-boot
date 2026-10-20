@@ -11,8 +11,30 @@
 #define FIT_ARCH		"arm"
 #endif
 
-#if defined(CONFIG_SPL_GZIP)
-#define FIT_UBOOT_COMP		"gzip"
+/*
+ * BL33 compression ladder: LZ4, then LZMA, then none. The ORDER here is
+ * upstream's C preprocessor shape, not a preference -- the defconfig picks the
+ * arm, and LZMA is what our boards set: it is the better ratio, and the SPL
+ * text it costs grows into padding that already exists in front of the FIT.
+ * GZIP is not offered: it is strictly dominated -- a worse ratio than LZMA and
+ * slower to decompress than LZ4 -- so whichever axis is binding, one of the
+ * other two wins.
+ *
+ * LZ4 stays in the ladder because it is genuinely the right answer where an SPL
+ * cannot afford the LZMA decoder's text, and because deleting a branch from a
+ * ladder is how the defect below happened in the first place.
+ *
+ * The LZ4 branch was missing here, which meant a board setting CONFIG_SPL_LZ4=y
+ * (and nothing else) fell through to "none" and silently shipped an
+ * uncompressed U-Boot -- the symbol was set, the payload was not compressed.
+ * The ladder in sunxi-u-boot.dtsi is the in-tree precedent this follows.
+ *
+ * The same macro drives both the FIT `compression` property (metadata the SPL
+ * reads) and the binman `compress` property (what actually compresses the
+ * data), so the two can never disagree.
+ */
+#if defined(CONFIG_SPL_LZ4)
+#define FIT_UBOOT_COMP		"lz4"
 #elif defined(CONFIG_SPL_LZMA)
 #define FIT_UBOOT_COMP		"lzma"
 #else
@@ -226,6 +248,55 @@
 		};
 	};
 #endif /* CONFIG_ROCKCHIP_SPI_IMAGE */
+
+#ifdef CONFIG_ROCKCHIP_UNIFIED_IMAGE
+	/*
+	 * One byte stream for SD, eMMC and SPI NOR. The idblock is the
+	 * contiguous rksd form the MMC BootROM reads at sector 64; the FIT
+	 * sits at CONFIG_SYS_SPI_U_BOOT_OFFS, where the SPI BootROM's page
+	 * interleave of the idblock (2x its size) has already ended and
+	 * where SPL's SPI loader reads today. Writing this image to NOR is
+	 * the rkspi spread of its first (init_offset + init_boot_size)
+	 * blocks and a verbatim copy of the rest -- simple-bin-spi above is
+	 * exactly that stream, produced here for the tooling that still
+	 * flashes a pre-spread file. The MMC SPL finds the FIT here through
+	 * arch_spl_mmc_get_uboot_raw_sector() (arch/arm/mach-rockchip/spl.c).
+	 *
+	 * The idblock gets its own filename: binman writes each image's
+	 * symbols into its own copy of SPL, so this copy carries the FIT
+	 * image-pos of THIS layout (it equals the SPI image's, not the
+	 * compact MMC image's).
+	 */
+	simple-bin-unified {
+		filename = "u-boot-rockchip-unified.bin";
+		pad-byte = <0xff>;
+
+		mkimage {
+			filename = "idbloader-unified.img";
+			args = "-n", CONFIG_SYS_SOC, "-T", "rksd";
+			multiple-data-files;
+
+#ifdef CONFIG_ROCKCHIP_EXTERNAL_TPL
+			rockchip-tpl {
+			};
+#elif defined(CONFIG_TPL)
+			u-boot-tpl {
+			};
+#endif
+			u-boot-spl {
+			};
+		};
+
+#ifdef HAS_FIT
+		fit {
+			insert-template = <&fit_template>;
+#else
+		u-boot-img {
+#endif
+			offset = <CONFIG_SYS_SPI_U_BOOT_OFFS>;
+		};
+	};
+#endif /* CONFIG_ROCKCHIP_UNIFIED_IMAGE */
 
 #ifdef CONFIG_ROCKCHIP_MASKROM_IMAGE
 	simple-bin-usb471 {

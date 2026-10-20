@@ -16,3 +16,25 @@
 	phy-mode = "rmii";
 	phy-handle = <&internal_phy>;
 };
+
+/*
+ * GPU OPP table override for S905X.
+ *
+ * Per claude:amlogic/software/gpu/lima/audit/gp0-pll-dco-ceiling-
+ * per-die.md (2026-05-14 canonical-methodology walk-up on
+ * S905X-V2 die 82d7f3ee6f5d): runtime-stable ceiling is 828 MHz
+ * (M=69 OD=1 DCO=1656). 840 MHz starts firing PP soft-recovery.
+ *
+ * For the default daily-driver max we conservatively pick 744 MHz
+ * (M=62 OD=1 DCO=1488) -- the highest historical "stock" OPP in
+ * the upstream meson-gxl.dtsi table, well below the per-die
+ * ceiling. 792 MHz upstream OPP is removed at the SoC level;
+ * per-die variance argues for the conservative cap. Per-board
+ * dts files can re-add it if a deployment validates.
+ *
+ * The Linux lima_devfreq.c per-SoC cap mirrors this: 744 MHz for
+ * amlogic,s905x. Both must move together when revising.
+ */
+&gpu_opp_table {
+	/delete-node/ opp-792000000;
+};

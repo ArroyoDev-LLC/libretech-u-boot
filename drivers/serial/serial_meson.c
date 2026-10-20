@@ -13,6 +13,7 @@
 #include <linux/compiler.h>
 #include <serial.h>
 #include <clk.h>
+#include <asm/arch/gx-bootlog.h>
 
 struct meson_uart {
 	u32 wfifo;
@@ -157,6 +158,7 @@ static int meson_serial_putc(struct udevice *dev, const char ch)
 		return -EAGAIN;
 
 	writel(ch, &uart->wfifo);
+	gx_bootlog_putc(ch);
 
 	return 0;
 }
@@ -366,8 +368,10 @@ __weak struct serial_device *default_serial_console(void)
 
 #include <debug_uart.h>
 
+/* The GX TPL's first C on the debug UART: its boot log starts here */
 static inline void _debug_uart_init(void)
 {
+	gx_bootlog_start();
 }
 
 static inline void _debug_uart_putc(int ch)
@@ -378,6 +382,7 @@ static inline void _debug_uart_putc(int ch)
 		;
 
 	writel(ch, &regs->wfifo);
+	gx_bootlog_putc(ch);
 }
 
 DEBUG_UART_FUNCS

@@ -1,0 +1,7 @@
+MED-MT88-MX-G5 (MT8370 / MT8188)
+M:	Libre Computer Project <support@libre.computer>
+S:	Maintained
+F:	board/mediatek/med-mt88-mx-g5
+F:	include/configs/mt8188.h
+F:	configs/med_mt88_mx_g5_defconfig
+F:	configs/med_mt88_mx_g5_uartdl_defconfig

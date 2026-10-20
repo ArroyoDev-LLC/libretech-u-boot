@@ -198,6 +198,7 @@ dtb-$(CONFIG_ARCH_UNIPHIER_SLD8) += \
 
 dtb-$(CONFIG_ARCH_ZYNQ) += \
 	bitmain-antminer-s9.dtb \
+	zynq-adrv9009.dtb \
 	zynq-cc108.dtb \
 	zynq-cse-nand.dtb \
 	zynq-cse-nor.dtb \
@@ -209,9 +210,11 @@ dtb-$(CONFIG_ARCH_ZYNQ) += \
 	zynq-cse-qspi-x2-single.dtb \
 	zynq-cse-qspi-x2-stacked.dtb \
 	zynq-dlc20-rev1.0.dtb \
+	zynq-e310.dtb \
 	zynq-microzed.dtb \
 	zynq-minized.dtb \
 	zynq-picozed.dtb \
+	zynq-pluto-sdr.dtb \
 	zynq-syzygy-hub.dtb \
 	zynq-topic-miami.dtb \
 	zynq-topic-miamilite.dtb \
@@ -1111,7 +1114,6 @@ dtb-$(CONFIG_ARCH_MEDIATEK) += \
 	mt7986b-emmc-rfb.dtb \
 	mt7988-rfb.dtb \
 	mt7988-sd-rfb.dtb \
-	mt8183-pumpkin.dtb \
 	mt8371-genio-520-evk.dtb \
 	mt8371-genio-520-evk-ufs.dtb \
 	mt8391-genio-720-evk.dtb \

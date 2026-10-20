@@ -120,10 +120,13 @@ struct dm_i2c_chip {
  *
  * @speed_hz: Bus speed in hertz (typically 100000)
  * @max_transaction_bytes: Maximal size of single I2C transfer
+ * @xfer_depth: Number of transfers the uclass currently has handed to the
+ *	bus driver (> 0 while one is on the wire); see dm_i2c_xfer_in_progress()
  */
 struct dm_i2c_bus {
 	int speed_hz;
 	int max_transaction_bytes;
+	int xfer_depth;
 };
 
 /*
@@ -268,6 +271,19 @@ int dm_i2c_reg_clrset(struct udevice *dev, uint offset, u32 clr, u32 set);
  * Return: 0 on success, -ve on error
  */
 int dm_i2c_xfer(struct udevice *dev, struct i2c_msg *msg, int nmsgs);
+
+/**
+ * dm_i2c_xfer_in_progress() - is a transfer on the wire of this bus?
+ *
+ * Bus drivers poll their controller with udelay(), which runs the cyclic
+ * callbacks. A cyclic callback that talks to a chip on this bus must ask
+ * this first and step aside while it answers true, or it re-enters the
+ * controller in the middle of another device's transaction.
+ *
+ * @bus:	I2C bus udevice
+ * Return: true while the uclass has a transfer handed to the bus driver
+ */
+bool dm_i2c_xfer_in_progress(struct udevice *bus);
 
 /**
  * dm_i2c_set_bus_speed() - set the speed of a bus

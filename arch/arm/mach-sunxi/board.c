@@ -9,6 +9,7 @@
  * Some init for sunxi platform.
  */
 
+#include <bootsource.h>
 #include <cpu_func.h>
 #include <init.h>
 #include <log.h>
@@ -326,6 +327,32 @@ uint32_t sunxi_get_boot_device(void)
 	return -1;		/* Never reached */
 }
 
+#if CONFIG_IS_ENABLED(BOOTSOURCE)
+/*
+ * The BootROM's boot source in the platform vocabulary (include/bootsource.h).
+ * The SD is the BootROM's MMC0 and the eMMC its MMC2 on every sunxi board we
+ * ship; an SPL without a valid eGON/TOC0 header in SRAM was sent by `sunxi-fel`
+ * over USB.
+ */
+enum bootsource sunxi_bootsource(void)
+{
+	switch (sunxi_get_boot_device()) {
+	case BOOT_DEVICE_MMC1:
+		return BOOTSOURCE_SD;
+	case BOOT_DEVICE_MMC2:
+		return BOOTSOURCE_EMMC;
+	case BOOT_DEVICE_NAND:
+		return BOOTSOURCE_NAND;
+	case BOOT_DEVICE_SPI:
+		return BOOTSOURCE_SPI;
+	case BOOT_DEVICE_BOARD:
+		return BOOTSOURCE_USB;
+	default:
+		return BOOTSOURCE_UNKNOWN;
+	}
+}
+#endif
+
 #ifdef CONFIG_XPL_BUILD
 uint32_t sunxi_get_spl_size(void)
 {
@@ -482,6 +509,10 @@ void board_init_f(ulong dummy)
 
 	spl_init();
 	preloader_console_init();
+
+	/* Where the BootROM found us, before the "Trying to boot from" lines. */
+	if (CONFIG_IS_ENABLED(BOOTSOURCE))
+		bootsource_announce(sunxi_bootsource());
 
 #if CONFIG_IS_ENABLED(I2C) && CONFIG_IS_ENABLED(SYS_I2C_LEGACY)
 	/* Needed early by sunxi_board_init if PMU is enabled */

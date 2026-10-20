@@ -29,6 +29,7 @@
 #if defined(CONFIG_CMD_USB)
 #include <usb.h>
 #endif
+#include <wdt.h>
 #else
 #include "mkimage.h"
 #endif
@@ -1209,6 +1210,8 @@ void bootm_final(int flag)
 	if (IS_ENABLED(CONFIG_BOOTSTAGE_REPORT))
 		bootstage_report();
 
+	/* Platform policy: watchdogs stopped unless wdt_handoff=1 */
+	wdt_handoff_to_os();
 	board_quiesce_devices();
 
 	/*

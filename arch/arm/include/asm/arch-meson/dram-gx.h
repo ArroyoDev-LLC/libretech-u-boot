@@ -105,12 +105,32 @@
 #define AM_DDR_PLL_CNTL5	(DDR_MMC_BASE + 0x14)
 #endif
 
-#define DDR0_CLK_CTRL	(DDR_MMC_BASE + 0x400)
+/*
+ * DDR0_CLK_CTRL is GXBB-only and lives in dram-gxbb.h.  On GXL the vendor
+ * moved it: cmd/amlogic/cmd_ddr_test.c's P_DDR_PHY_905X arm defines
+ * DDR_CLK_CNTL as MMC_REG_BASE + (0x7 << 2) and then
+ * "#define P_DDR0_CLK_CTRL DDR_CLK_CNTL" -- one register, two vendor names,
+ * at DDR_MMC_BASE + 0x1c, which dram-gxl.h already carries as DDR_CLK_CNTL.
+ * dram-gxl.h defines DDR0_CLK_CTRL to 0 so the IS_ENABLED(CONFIG_MESON_GXBB)
+ * arm of dram-gx.c still compiles there; that arm never runs on GXL.
+ */
 
 /* DMC SEC */
 #define DMC_SEC_REG_BASE	0xda838400
 
 #define DMC_SEC_CTRL		(DMC_SEC_REG_BASE + (0x00 << 2))
+/*
+ * Six secure-range windows.  Each word is [15:0] = start >> 16,
+ * [31:16] = end >> 16 -- a 64 KiB granule.  DMC_SEC_CTRL bit 31 commits
+ * them; DMC_SEC_RANGE_CTRL bits 0-5 carry each range's secure level and
+ * bit 6 the default-region level.
+ */
+#define DMC_SEC_RANGE0_CTRL	(DMC_SEC_REG_BASE + (0x01 << 2))
+#define DMC_SEC_RANGE1_CTRL	(DMC_SEC_REG_BASE + (0x02 << 2))
+#define DMC_SEC_RANGE2_CTRL	(DMC_SEC_REG_BASE + (0x03 << 2))
+#define DMC_SEC_RANGE3_CTRL	(DMC_SEC_REG_BASE + (0x04 << 2))
+#define DMC_SEC_RANGE4_CTRL	(DMC_SEC_REG_BASE + (0x05 << 2))
+#define DMC_SEC_RANGE5_CTRL	(DMC_SEC_REG_BASE + (0x06 << 2))
 #define DMC_SEC_RANGE_CTRL	(DMC_SEC_REG_BASE + (0x07 << 2))
 #define DMC_SEC_AXI_PORT_CTRL	(DMC_SEC_REG_BASE + (0x0e << 2))
 
@@ -188,12 +208,24 @@
 	writel(0x55555555, REGION## _SEC_WRITE_CTRL);			\
 	writel(0x55555555, REGION## _SEC_READ_CTRL)
 
-/* TODO: Timeout */
-#define WAIT_FOR(a)							\
-	while (!(readl(a) & 1))						\
-		;							\
-	if (!(readl(a) & 1))						\
-		panic("%s: init failed, err=%d", __func__, -ETIMEDOUT)
+/*
+ * WAIT_FOR() was an UNBOUNDED spin whose only refusal could not fire.  The
+ * loop `while (!(readl(a) & 1));` exits only when bit 0 is set, so the
+ * `if (!(readl(a) & 1)) panic(...)` beneath it is dead code -- the same class
+ * as a negative control whose verdict cannot execute, which this arc has now
+ * found four times.  Its `TODO: Timeout` had been standing since the file was
+ * written, and N27 measured what that costs: with the retry ladder driven into
+ * a second attempt, dram_init()'s third attempt WEDGES inside one of these
+ * spins, printing nothing for a full 45 s drain -- no `DDR init FAILED after
+ * 3 attempts`, no SPL refusal.  A ladder that cannot say it exhausted is
+ * indistinguishable from a hang anywhere else in the stage.
+ *
+ * Bounded, named, report-and-continue: the callers that CAN refuse do so
+ * through meson_dram_wait_bit0()'s return value; the ones that cannot (the
+ * GXBB arm, which this board family does not ship) at least leave a line on
+ * the console instead of a dark board.
+ */
+#define WAIT_FOR(a)	meson_dram_wait_bit0((a), #a)
 
 /**
  * Register values
@@ -216,6 +248,36 @@
 
 /* PCTL_STAT */
 #define PCTL_STAT_ACCESS	(BIT(1) | BIT(0))
+
+/*
+ * Bound shared by every DRAM-init wait: 100 ms, ~4 orders of magnitude over
+ * any transition this hardware makes.
+ *
+ * It is a Kconfig symbol only so that N27's failure path can be reached on
+ * healthy silicon: shortened, these waits genuinely time out, and
+ * `PCTL ACCESS timeout!` / `DDR wait <who>: bit0 never set` -- neither of
+ * which a working board can produce -- print through the shipping code with
+ * nothing injected.  Both spellings are compile-time constants, so at the
+ * default the generated image is unchanged.  See
+ * MESON_DRAM_PCTL_STATE_TIMEOUT_US in arch/arm/mach-meson/Kconfig.
+ */
+#if defined(CONFIG_MESON_DRAM_PCTL_STATE_TIMEOUT_US) && \
+	CONFIG_MESON_DRAM_PCTL_STATE_TIMEOUT_US > 0
+#define PCTL_STATE_TIMEOUT_US	CONFIG_MESON_DRAM_PCTL_STATE_TIMEOUT_US
+#else
+#define PCTL_STATE_TIMEOUT_US	100000
+#endif
+
+/* Bounded bit-0 wait behind WAIT_FOR().  dram-gx.c. */
+int meson_dram_wait_bit0(unsigned long a, const char *who);
+
+/*
+ * Whether THIS dram_init() attempt is training and decoding a rank 1.  Set by
+ * the ladder in dram-gx.c, read by the DTCR1 rank-set write in dram-gxl.c so
+ * the training bit and the DMC range can never disagree.  One SKU, one config:
+ * the build declares the maximum rank count and the board settles the rest.
+ */
+extern bool meson_dram_rank1_active;
 
 /* PCTL_POWCTL: power control */
 #define PCTL_POWCTL_POWERON	BIT(0)
@@ -264,9 +326,18 @@
 #define PUB_PIR_RDEYE		BIT(14)
 #define PUB_PIR_WREYE		BIT(15)
 #define PUB_PIR_ICPC		BIT(16)
+#define PUB_PIR_VREF		BIT(17)	/* DDR4 VREF training (shared with PLLBYP) */
 #define PUB_PIR_PLLBYP		BIT(17)
 #define PUB_PIR_CTLDINIT	BIT(18)
 #define PUB_PIR_RDIMMINIT	BIT(19)
+/*
+ * PUB_PIR_CLRSR is documented by the vendor but is MEASURED NOT TO EXIST on
+ * this PHY: writing BIT(27) alone, or with PUB_PIR_INIT, reads back 0 and moves
+ * no PGSR0 bit (DDR3 arc; N95/N104/N559).  It has NO user in this tree -- the
+ * one function that wrote it was removed in the N560 landing, see the block
+ * where it used to live in dram-gx.c.  Kept here because the header documents
+ * the register, not our use of it; do not write it.
+ */
 #define PUB_PIR_CLRSR		BIT(27)
 #define PUB_PIR_LOCKBYP		BIT(28)
 #define PUB_PIR_DCALBYP		BIT(29)
@@ -333,9 +404,15 @@ struct meson_gx_dram_timings {
 
 /* Functions */
 int dram_init(void);
-void meson_dram_prepare_pctl(void);
-void meson_dram_phy_init(void);
+int meson_dram_prepare_pctl(void);
+int meson_dram_phy_init(void);
 void meson_dram_phy_setup_ranks(void);
-void meson_dram_finalise_init(void);
-extern const struct meson_gx_dram_timings timings;
+int meson_dram_finalise_init(void);
+/*
+ * Not const: on GXL DDR3 dram_init()'s clock ladder re-derives the
+ * clock-dependent fields before each attempt (gxl_ddr3_timings_at()).
+ */
+extern struct meson_gx_dram_timings timings;
+/* The clock the current or last dram_init() attempt trained at, in MHz. */
+extern u32 meson_dram_clk;
 #endif

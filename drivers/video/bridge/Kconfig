@@ -74,3 +74,10 @@ config VIDEO_BRIDGE_SAMSUNG_CMC623
 	help
 	  Samsung CMC623 image converter chip driver.
 	  Found in several Samsung devices such as N1
+
+config VIDEO_BRIDGE_ITE_IT66121
+	bool "ITE IT66121 HDMI bridge"
+	depends on VIDEO_BRIDGE
+	help
+	  Support for ITE IT66121 HDMI bridge (DPI/RGB in, HDMI out).
+	  Used on the MT8365 Pumpkin i350 (SoC DPI0 -> IT66121 -> HDMI).

@@ -306,7 +306,10 @@ LOGO-$(CONFIG_VIDEO_LOGO) += $(LOGO_DATA_H)
 ifeq ($(LOGO_BMP),)
 LOGO_BMP= $(srctree)/$(src)/logos/denx.bmp
 
-# Use board logo and fallback to vendor
+# Use board-specific logo, then board logo, then vendor logo, then default
+ifneq ($(wildcard $(srctree)/board/$(VENDOR)/$(BOARD)/$(BOARD).bmp),)
+LOGO_BMP= $(srctree)/board/$(VENDOR)/$(BOARD)/$(BOARD).bmp
+else
 ifneq ($(wildcard $(srctree)/$(src)/logos/$(BOARD).bmp),)
 LOGO_BMP= $(srctree)/$(src)/logos/$(BOARD).bmp
 else
@@ -314,8 +317,34 @@ ifneq ($(wildcard $(srctree)/$(src)/logos/$(VENDOR).bmp),)
 LOGO_BMP= $(srctree)/$(src)/logos/$(VENDOR).bmp
 endif
 endif
+endif
 
 endif # !LOGO_BMP
+
+# Rules for compressed logo files. Whether the BUILT-IN logo is stored
+# compressed is CONFIG_VIDEO_LOGO_GZIP, not CONFIG_VIDEO_BMP_GZIP: the latter
+# is the run-time decoder, which a board keeps for bitmaps loaded from storage
+# even when its own logo ships raw (because U-Boot proper is already packed
+# LZMA/LZ4 in the FIT). `gzip -n` omits the input's name and mtime from the
+# stream, so the embedded bytes depend on the bitmap's content only, not on
+# when the checkout was made.
+#ifdef CONFIG_VIDEO_BMP_LZMA
+#COMPRESSED_LOGO = $(obj)/logo.bmp.lzma
+#COMPRESSION_CMD = lzma -c
+#else
+ifdef CONFIG_VIDEO_LOGO_GZIP
+COMPRESSED_LOGO = $(obj)/logo.bmp.gz
+COMPRESSION_CMD = gzip -nc
+endif
+#endif
+
+$(obj)/logo.bmp.lzma: $(LOGO_BMP)
+	$(Q)mkdir -p $(obj)
+	$(Q)$(COMPRESSION_CMD) $< > $@
+
+$(obj)/logo.bmp.gz: $(LOGO_BMP)
+	$(Q)mkdir -p $(obj)
+	$(Q)$(COMPRESSION_CMD) $< > $@
 
 #
 # Use native tools and options
@@ -338,8 +367,14 @@ $(LOGO_H):	$(obj)/bmp_logo $(LOGO_BMP)
 	$(obj)/bmp_logo --gen-info $(LOGO_BMP) > $@
 
 ifeq ($(CONFIG_VIDEO),y)
+#ifneq ($(CONFIG_VIDEO_BMP_LZMA)$(CONFIG_VIDEO_LOGO_GZIP),)
+ifneq ($(CONFIG_VIDEO_LOGO_GZIP),)
+$(LOGO_DATA_H):	$(obj)/bmp_logo $(LOGO_BMP) $(COMPRESSED_LOGO)
+	$(obj)/bmp_logo --gen-bmp $(LOGO_BMP) $(COMPRESSED_LOGO) > $@
+else
 $(LOGO_DATA_H):	$(obj)/bmp_logo $(LOGO_BMP)
 	$(obj)/bmp_logo --gen-bmp $(LOGO_BMP) > $@
+endif
 else
 $(LOGO_DATA_H):	$(obj)/bmp_logo $(LOGO_BMP)
 	$(obj)/bmp_logo --gen-data $(LOGO_BMP) > $@
@@ -359,4 +394,4 @@ $(obj)/.strip: $(call objectify,$(hostprogs-always-y))
 
 always-y += .strip
 endif
-clean-files += .strip
+clean-files += .strip logo.bmp.lzma logo.bmp.gz

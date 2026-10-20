@@ -3,11 +3,13 @@
  * (C) Copyright 2017 Theobroma Systems Design und Consulting GmbH
  */
 
+#include <bootsource.h>
 #include <dm.h>
 #include <fdt_support.h>
 #include <log.h>
 #include <mmc.h>
 #include <spl.h>
+#include <usbflash-proto.h>
 #include <asm/arch-rockchip/bootrom.h>
 #include <asm/global_data.h>
 #include <dm/uclass-internal.h>
@@ -103,10 +105,18 @@ __weak const char *board_spl_was_booted_from(void)
 void board_boot_order(u32 *spl_boot_list)
 {
 	int idx = 0;
+	u32 brom_id = rockchip_brom_bootsource();
+
+	/*
+	 * Say where the BootROM found us, once, before the list is walked:
+	 * "same-as-spl" below puts that medium first, so the "Trying to boot
+	 * from" lines that follow are read against it.
+	 */
+	bootsource_announce(rockchip_bootsource(brom_id));
 
 	/* Add RAM boot for maskrom mode boot over USB */
 	if (BROM_BOOTSOURCE_ID_ADDR && CONFIG_IS_ENABLED(RAM_DEVICE) &&
-	    read_brom_bootsource_id() == BROM_BOOTSOURCE_USB) {
+	    brom_id == BROM_BOOTSOURCE_USB) {
 		spl_boot_list[idx++] = BOOT_DEVICE_RAM;
 	}
 
@@ -168,7 +178,36 @@ void board_boot_order(u32 *spl_boot_list)
 
 	/* If we had no matches, fall back to spl_boot_device */
 	if (idx == 0)
-		spl_boot_list[0] = spl_boot_device();
+		spl_boot_list[idx++] = spl_boot_device();
+
+	/*
+	 * Last resort, after every device in u-boot,spl-boot-order: put the
+	 * board into the BootROM's download mode (board_return_to_bootrom():
+	 * BOOT_BROM_DOWNLOAD flag + reset). Without it board_init_r() ends in
+	 * hang(), and a hang here is not recoverable from a power cycle: the
+	 * BootROM finds the same valid idbloader on the same medium, loads
+	 * the same SPL, and the SPL fails the same way -- a card or NOR whose
+	 * FIT is bad (a hash mismatch, a truncated write, a stale header)
+	 * wedges the board until the medium is pulled. Returning to the
+	 * BootROM instead puts the SoC on USB as the MaskROM device, where
+	 * `rkdeveloptool`/`rockusb` can load a bootloader over the failed one.
+	 *
+	 * Only when SPL is NOT already a return-to-BROM stage: with
+	 * SPL_ROCKCHIP_BACK_TO_BROM the list is BOOT_DEVICE_BOOTROM alone
+	 * (spl_boot_device()), and there the BootROM loads the next stage.
+	 *
+	 * board_init_r()'s spl_boot_list has 5 slots; a DT order that fills
+	 * all 5 leaves no room, and the append is skipped rather than
+	 * overrunning it.
+	 */
+	if (CONFIG_IS_ENABLED(BOOTROM_SUPPORT) &&
+	    !CONFIG_IS_ENABLED(ROCKCHIP_BACK_TO_BROM)) {
+		if (idx < 5)
+			spl_boot_list[idx++] = BOOT_DEVICE_BOOTROM;
+		else
+			debug("%s: no slot left for BOOT_DEVICE_BOOTROM\n",
+			      __func__);
+	}
 }
 
 int spl_decode_boot_device(u32 boot_device, char *buf, size_t buflen)
@@ -245,6 +284,18 @@ int spl_decode_boot_device(u32 boot_device, char *buf, size_t buflen)
 		return ofnode_get_path(dev_ofnode(dev), buf, buflen);
 	}
 
+	/*
+	 * Only an MMC device is left to decode. Everything else that can be in
+	 * spl_boot_list -- BOOT_DEVICE_RAM (a MaskROM/USB boot),
+	 * BOOT_DEVICE_BOOTROM -- has no block device behind it; the old
+	 * "MMC1 ? 0 : 1" fell through to mmc1's ofpath for those, so a
+	 * USB-loaded U-Boot proper read /chosen/u-boot,spl-boot-device as the
+	 * SD controller and took its boot.ini and env from a card it did not
+	 * boot from.
+	 */
+	if (boot_device != BOOT_DEVICE_MMC1 && boot_device != BOOT_DEVICE_MMC2)
+		return -ENODEV;
+
 #if CONFIG_IS_ENABLED(BLK)
 	dev_num = (boot_device == BOOT_DEVICE_MMC1) ? 0 : 1;
 
@@ -267,6 +318,7 @@ void spl_perform_arch_fixups(struct spl_image_info *spl_image)
 	const char *bootrom_ofpath = board_spl_was_booted_from();
 	void *blob = spl_image_fdt_addr(spl_image);
 	char boot_ofpath[512];
+	const char *token;
 	int chosen, ret;
 
 	if (!blob)
@@ -283,7 +335,10 @@ void spl_perform_arch_fixups(struct spl_image_info *spl_image)
 	 * Falcon-mode) was booted from into the FDT.
 	 */
 	ret = spl_decode_boot_device(spl_image->boot_device, boot_ofpath, sizeof(boot_ofpath));
-	if (ret)
+	if (ret == -ENODEV)
+		debug("%s: boot_device %u has no ofpath (RAM/BootROM)\n",
+		      __func__, spl_image->boot_device);
+	else if (ret)
 		pr_err("%s: could not map boot_device to ofpath: %d\n", __func__, ret);
 	else
 		fdt_setprop_string(blob, chosen,
@@ -294,8 +349,23 @@ void spl_perform_arch_fixups(struct spl_image_info *spl_image)
 	 * stage from into the FDT.
 	 */
 	if (!bootrom_ofpath)
-		pr_err("%s: could not map BootROM boot device to ofpath\n", __func__);
+		debug("%s: BootROM boot device %u has no ofpath\n", __func__,
+		      rockchip_brom_bootsource());
 	else
 		fdt_setprop_string(blob, chosen, "bootsource", bootrom_ofpath);
+
+	/*
+	 * And its NAME, independent of whether it has an ofpath: a USB
+	 * (MaskROM) boot has none, and U-Boot proper still needs to know it
+	 * was one. Same vocabulary as the SPL banner and the `bootsource`
+	 * env, under the vendor-neutral property every SoC family writes.
+	 */
+	token = rockchip_bootsource_token(rockchip_brom_bootsource());
+	if (token)
+		fdt_setprop_string(blob, chosen, BOOTSOURCE_PROP, token);
+
+	/* The USB flash session's mark for U-Boot proper (spl_usbflash.c) */
+	if (CONFIG_IS_ENABLED(USBFLASH))
+		spl_usbflash_fdt_fixup(blob);
 }
 #endif

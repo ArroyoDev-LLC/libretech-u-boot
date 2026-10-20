@@ -504,16 +504,44 @@ static void efi_firmware_get_fw_version(const void **p_image,
 					efi_uintn_t *p_image_size,
 					struct fmp_state *state)
 {
-	const struct fmp_payload_header *header;
+	struct fmp_payload_header header;
 	u32 fmp_hdr_signature = FMP_PAYLOAD_HDR_SIGNATURE;
 
-	header = *p_image;
-	if (header->signature == fmp_hdr_signature) {
-		/* FMP header is inserted above the capsule payload */
-		state->fw_version = header->fw_version;
+	if (*p_image_size < sizeof(header))
+		return;
 
-		*p_image += header->header_size;
-		*p_image_size -= header->header_size;
+	/*
+	 * The header is NOT guaranteed to be aligned. It sits immediately
+	 * after EFI_FIRMWARE_IMAGE_AUTHENTICATION, whose length is
+	 * 8 (monotonic count) + auth_info.hdr.dwLength, and dwLength is the
+	 * DER-encoded PKCS#7 length -- an arbitrary byte count that depends on
+	 * the signing certificate. For the certificate this tree ships it is
+	 * 0x511, so the payload header lands on offset 1 mod 4.
+	 *
+	 * Dereferencing a struct pointer there is a data abort on 32-bit ARM
+	 * even with SCTLR.A clear, because the compiler is free to emit LDM/STM
+	 * for a multi-word struct access and LDM/STM always require alignment.
+	 * MEASURED on zynq_adrv9009 (armhf Cortex-A9): applying a correctly
+	 * signed capsule aborted here with
+	 *
+	 *   Code: e5972000 e59db00c e1520003 11a08000 (09970108)
+	 *
+	 * i.e. `ldmibeq r7, {r3, r8}` with r7 = 0x10000575 -- capsuleaddr
+	 * 0x10000000 plus an odd offset. It aborted AFTER authentication
+	 * succeeded and BEFORE any flash write, so it was not destructive, but
+	 * it made capsule update unusable on that board.
+	 *
+	 * memcpy into an aligned local instead; it is a 16-byte copy on a path
+	 * that is about to rewrite the bootloader.
+	 */
+	memcpy(&header, *p_image, sizeof(header));
+
+	if (header.signature == fmp_hdr_signature) {
+		/* FMP header is inserted above the capsule payload */
+		state->fw_version = header.fw_version;
+
+		*p_image += header.header_size;
+		*p_image_size -= header.header_size;
 	}
 }
 

@@ -1680,8 +1680,9 @@
 			assigned-clock-parents = <&topckgen CLK_TOP_UNIVPLL_D5_D4>;
 			clocks = <&pericfg_ao CLK_PERI_AO_SSUSB_BUS>,
 				 <&topckgen CLK_TOP_SSUSB_TOP_REF>,
-				 <&pericfg_ao CLK_PERI_AO_SSUSB_XHCI>;
-			clock-names = "sys_ck", "ref_ck", "mcu_ck";
+				 <&pericfg_ao CLK_PERI_AO_SSUSB_XHCI>,
+				 <&topckgen CLK_TOP_UNIVPLL_192M_D4>;
+			clock-names = "sys_ck", "ref_ck", "mcu_ck", "dma_ck";
 			phys = <&u2port1 PHY_TYPE_USB2>, <&u3port1 PHY_TYPE_USB3>;
 			wakeup-source;
 			mediatek,syscon-wakeup = <&pericfg 0x468 2>;
@@ -2202,6 +2203,10 @@
 			#address-cells = <1>;
 			#size-cells = <1>;
 
+			unique_id: unique-id@140 {
+				reg = <0x140 0x8>;
+			};
+
 			dp_calib_data: dp-calib@1a0 {
 				reg = <0x1a0 0xc>;
 			};
@@ -2219,7 +2224,7 @@
 				reg = <0x7a0 0x4>;
 			};
 
-			socinfo-data2@7e0 {
+			socinfo_data2: socinfo-data2@7e0 {
 				reg = <0x7e0 0x4>;
 			};
 		};

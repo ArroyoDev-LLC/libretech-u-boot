@@ -36,6 +36,25 @@ config USB_MTU3_GADGET
 
 endchoice
 
+config USB_MTU3_XHCI_CHILD
+	bool "Bind the nested mtk-xhci host child of the mtu3 glue"
+	depends on USB_XHCI_MTK
+	help
+	  The upstream device trees nest an "mediatek,mtk-xhci" host node
+	  under the "mediatek,mtu3" glue (mt8183 usb_host, mt8188 xhci0..2).
+	  This glue supplies its own .bind, so the DM never scans that child
+	  and the standalone xhci-mtk driver never binds -- usb_init() then
+	  reports no working controllers even with USB_XHCI_MTK enabled.
+
+	  Say Y to bind xhci-mtk on that child, giving the DFU/UMS gadget and
+	  the xhci host on the one SSUSB, without any -u-boot.dtsi surgery.
+
+	  This is opt-in per board because it adds a USB controller that a
+	  BOOT_TARGET_USB distro scan will probe at autoboot. Enable it only
+	  on boards where the host path has been validated on hardware.
+
+	  If unsure, say N.
+
 config USB_MTU3_DEBUG
 	bool "Enable Debugging Messages"
 	help

@@ -238,7 +238,15 @@ static int sdhci_send_command(struct mmc *mmc, struct mmc_cmd *cmd,
 				log_warning("timeout increasing to: %u ms\n",
 					    cmd_timeout);
 			} else {
+				/*
+				 * The controller never released the CMD /
+				 * DAT lines from the previous command: it is
+				 * the host that is stuck, and only a reset of
+				 * both engines lets the next command in.
+				 */
 				log_warning("timeout\n");
+				sdhci_reset(host, SDHCI_RESET_CMD);
+				sdhci_reset(host, SDHCI_RESET_DATA);
 				return -ECOMM;
 			}
 		}
@@ -316,8 +324,19 @@ static int sdhci_send_command(struct mmc *mmc, struct mmc_cmd *cmd,
 		}
 
 		if (get_timer(start) >= SDHCI_READ_STATUS_TIMEOUT) {
+			/*
+			 * Neither a response nor an error in a second: the
+			 * controller's own timeout (TIMEOUT_CONTROL) should
+			 * have fired long before this, so the CMD engine is
+			 * stuck. Reset it -- and the DATA engine, which a
+			 * data command will have armed -- so the next command
+			 * does not sit behind the inhibit bits until the
+			 * inhibit wait above gives up as well.
+			 */
 			log_warning("Timeout for status update: %08x %08x\n",
 				    stat, mask);
+			sdhci_reset(host, SDHCI_RESET_CMD);
+			sdhci_reset(host, SDHCI_RESET_DATA);
 			return -ETIMEDOUT;
 		}
 	} while ((stat & mask) != mask);

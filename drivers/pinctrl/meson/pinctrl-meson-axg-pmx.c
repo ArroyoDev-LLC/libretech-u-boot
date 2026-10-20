@@ -143,6 +143,8 @@ const struct pinconf_param meson_axg_pinconf_params[] = {
 	{ "bias-pull-up", PIN_CONFIG_BIAS_PULL_UP, 1 },
 	{ "bias-pull-down", PIN_CONFIG_BIAS_PULL_DOWN, 1 },
 	{ "drive-strength-microamp", PIN_CONFIG_DRIVE_STRENGTH_UA, 0 },
+	{ "output-high", PIN_CONFIG_OUTPUT, 1 },
+	{ "output-low", PIN_CONFIG_OUTPUT, 0 },
 };
 
 const struct pinctrl_ops meson_axg_pinctrl_ops = {

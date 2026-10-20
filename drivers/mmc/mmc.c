@@ -27,6 +27,7 @@
 #include <linux/list.h>
 #include <linux/printk.h>
 #include <div64.h>
+#include <u-boot/schedule.h>
 #include "mmc_private.h"
 
 #define DEFAULT_CMD6_TIMEOUT_MS  500
@@ -700,6 +701,13 @@ static int sd_send_op_cond(struct mmc *mmc, bool uhs_en)
 
 		if (cmd.response[0] & OCR_BUSY)
 			break;
+
+		/*
+		 * The OCR busy wait can run for a full second at a time.
+		 * Yield so cyclic services, including the AO watchdog petter,
+		 * still get to run while a card or controller is stuck busy.
+		 */
+		schedule();
 
 		if (timeout-- <= 0)
 			return -EOPNOTSUPP;
@@ -1914,12 +1922,22 @@ static int sd_select_mode_and_width(struct mmc *mmc, uint card_caps)
 #endif
 
 #if CONFIG_IS_ENABLED(MMC_WRITE)
+				/*
+				 * The SD Status only feeds the erase chunking
+				 * (ssr.au / erase_timeout); a failed read costs
+				 * that, not the bus mode the card and host have
+				 * just proven -- Linux's mmc_read_ssr() warns and
+				 * carries on, and so does this. Falling back to
+				 * a slower mode here left a tuned card at a
+				 * mode it never confirmed.
+				 */
 				err = sd_read_ssr(mmc);
-				if (err)
+				if (err) {
 					pr_warn("unable to read ssr\n");
+					memset(&mmc->ssr, 0, sizeof(mmc->ssr));
+				}
 #endif
-				if (!err)
-					return 0;
+				return 0;
 
 error:
 				/* revert to a safer bus speed */
@@ -2745,6 +2763,14 @@ static int mmc_startup(struct mmc *mmc)
 		err = mmc_get_capabilities(mmc);
 		if (err)
 			return err;
+#if CONFIG_IS_ENABLED(MMC_HS200_SUPPORT)
+		{
+			struct mmc_config *cfg = (struct mmc_config *)mmc->cfg;
+
+			cfg->host_caps |= MMC_CAP(MMC_HS_200);
+			mmc->host_caps |= MMC_CAP(MMC_HS_200);
+		}
+#endif
 		err = mmc_select_mode_and_width(mmc, mmc->card_caps);
 	}
 #endif

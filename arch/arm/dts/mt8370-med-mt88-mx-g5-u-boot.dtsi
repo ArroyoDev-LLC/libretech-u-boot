@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: GPL-2.0 OR MIT
+/*
+ * U-Boot-only overlay for MED-MT88-MX-G5.
+ * Board DTS is dts/upstream/.../mt8370-med-mt88-mx-g5.dts (Linux KEEP).
+ */
+
+#include "mt8188-u-boot.dtsi"
+#include "smbios.dtsi"
+
+/ {
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	smbios {
+		smbios {
+			system {
+				product = "MED-MT88-MX-G5";
+				family = "Libre Computer";
+			};
+			baseboard {
+				manufacturer = "libre-computer";
+				product = "med-mt88-mx-g5";
+			};
+		};
+	};
+};
+
+/* UMS/fastboot gadget: U-Boot mtu3 wants forced VBUS and a peripheral role. */
+&ssusb0 {
+	mediatek,force-vbus;
+	dr_mode = "peripheral";
+};

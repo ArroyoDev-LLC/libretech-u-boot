@@ -74,6 +74,14 @@ void main_loop(void)
 
 	autoboot_command(s);
 
+	/*
+	 * Reaching here means autoboot ran and did not boot anything -- there
+	 * is no return path from a successful boot. That is a boot failure and
+	 * it must be visible even on a silent console, or the board drops to a
+	 * prompt nobody can see and looks dead. Harmless when not silent.
+	 */
+	console_silent_defeat("autoboot did not reach an OS");
+
 	/* if standard boot if enabled, assume that it will be able to boot */
 	if (IS_ENABLED(CONFIG_BOOTSTD_PROG)) {
 		int ret;

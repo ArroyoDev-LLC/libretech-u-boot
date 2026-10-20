@@ -14,6 +14,7 @@
 #include <reset.h>
 #include <spl.h>
 #include <watchdog.h>
+#include <xpl_bootlog.h>
 #include <linux/err.h>
 #include <linux/types.h>
 #include <asm/io.h>
@@ -358,6 +359,7 @@ static inline void _debug_uart_putc(int ch)
 #endif
 	}
 	serial_dout(&com_port->thr, ch);
+	xpl_bootlog_putc(ch);
 }
 
 DEBUG_UART_FUNCS
@@ -372,6 +374,7 @@ int ns16550_serial_putc(struct udevice *dev, const char ch)
 	if (!(serial_in(&com_port->lsr) & UART_LSR_THRE))
 		return -EAGAIN;
 	serial_out(ch, &com_port->thr);
+	xpl_bootlog_putc(ch);
 
 	/*
 	 * Call schedule() upon newline. This is done here in putc

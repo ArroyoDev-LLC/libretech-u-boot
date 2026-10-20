@@ -106,6 +106,26 @@ config RENESAS_R8A78000_POWER_DOMAIN
 	  and reset driver. The MDLC is responsible for managing both
 	  power domains and resets on R-Car R8A78000 X5H SoC.
 
+config ROCKCHIP_RK3399_POWER_DOMAIN
+	bool "Enable the Rockchip RK3399 power domain driver"
+	depends on POWER_DOMAIN && ROCKCHIP_RK3399
+	select CLK
+	help
+	  Provider for the "rockchip,rk3399-power-controller" node, which
+	  rk3399-base.dtsi's 33 power-domain consumers (gmac, sdmmc, sdhci,
+	  both USB3 controllers, both VOPs, cdn_dp, the Type-C PHYs, ...)
+	  point at. Powers a domain on through the PMU: ungate its clocks,
+	  clear PWRDN_CON, poll PWRDN_ST, release the NoC idle request, poll
+	  ACK then STATUS, restore QoS. The table is Linux's rk3399_pm_domains[].
+
+config CMD_RK3399_PD
+	bool "rkpd bring-up command"
+	depends on ROCKCHIP_RK3399_POWER_DOMAIN
+	help
+	  A 'rkpd' command that lists every RK3399 power domain with its raw
+	  PMU state and drives one on or off directly, so the transition can
+	  be exercised and its register readbacks recorded without a consumer.
+
 config SANDBOX_POWER_DOMAIN
 	bool "Enable the sandbox power domain test driver"
 	depends on POWER_DOMAIN && SANDBOX

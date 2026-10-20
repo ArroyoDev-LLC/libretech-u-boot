@@ -206,14 +206,14 @@ struct mtu3_fifo_info {
  *	If TXQ_CS_EN / RXQ_CS_EN bit is set, an interrupt is issued
  *	when checksum validation fails;
  *	Checksum value is calculated over the 16 bytes of the GPD by default;
- * @data_buf_len (RX ONLY): This value indicates the length of
- *	the assigned data buffer
+ * @data_buf_len (RX ONLY): assigned RX buffer length. OG: this le16.
+ *	gen2cp EL: 20-bit length in dw0[31:12] (chksum[7:4] + this le16).
  * @next_gpd: Physical address of the next GPD
  * @buffer: Physical address of the data buffer
  * @buf_len:
- *	(TX): This value indicates the length of the assigned data buffer
- *	(RX): The total length of data received
- * @ext_len: reserved
+ *	(TX): assigned TX length (low 16). gen2cp: + ext_len[3:0] = 20-bit
+ *	(RX): received length (same 16/20-bit packing as TX)
+ * @ext_len: gen2cp: high 4 bits of 20-bit TX length / RX actual
  * @ext_flag:
  *	bit5 (TX ONLY): Zero Length Packet (ZLP),
  */

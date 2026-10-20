@@ -45,6 +45,10 @@ struct arch_global_data {
 	unsigned long	pllb_rate_hz;
 	unsigned long	at91_pllb_usb_init;
 #endif
+#if defined(CONFIG_MESON_GX_XPL_CHAIN)
+	/* The live boot log of this phase, NULL until it is found (gx-bootlog.c) */
+	void *gx_bootlog;
+#endif
 	/* "static data" needed by most of timer.c on ARM platforms */
 	unsigned long timer_rate_hz;
 	unsigned int tbu;

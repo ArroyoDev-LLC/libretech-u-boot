@@ -15,9 +15,6 @@
 #include <usb/dwc2_udc.h>
 
 /*-------------------------------------------------------------------------*/
-/* DMA bounce buffer size, 16K is enough even for mass storage */
-#define DMA_BUFFER_SIZE	(16*SZ_1K)
-
 #define EP0_FIFO_SIZE		64
 #define EP_FIFO_SIZE		512
 #define EP_FIFO_SIZE2		1024
@@ -57,6 +54,12 @@ struct dwc2_ep {
 	unsigned long pio_irqs;
 	int len;
 	void *dma_buf;
+	/*
+	 * Non-control IN only: setdma_tx() gave the hardware the head
+	 * request's transfer, and neither its completion nor a bus reset
+	 * (dwc2_ep_in_count_before_reset()) has been handled yet.
+	 */
+	bool in_hw;
 
 	u8 stopped;
 	u8 bEndpointAddress;

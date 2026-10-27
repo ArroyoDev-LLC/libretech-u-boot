@@ -3157,9 +3157,11 @@ class TestFunctional(unittest.TestCase):
         lc = props % 9
         lp = (props // 9) % 5
         pb = (props // 9) // 5
-        self.assertEqual((1, 0, 0), (lc, lp, pb),
+        self.assertEqual((1, 0), (lc, lp),
                          'lzma_alone flags drifted: an xPL sized for lc+lp=1 '
                          'will refuse this stream at boot')
+        # pb does not size the table; pinned so a change is still deliberate
+        self.assertEqual(2, pb)
         self.assertEqual(14080, (1984 + (0x300 << (lc + lp))) * 4)
 
     def testExtractBadEntry(self):

@@ -227,6 +227,46 @@ int console_remove_by_name(const char *name);
  */
 void console_flush_stdin(void);
 
+/**
+ * console_poll_key() - the input device's next key, not reading kept keys
+ *
+ * Return: the key, or -1 when none is waiting
+ */
+int console_poll_key(void);
+
+/**
+ * console_keep_key() - keep a key for the command line
+ *
+ * For a reader that looked at a key and did not act on it (the autoboot
+ * countdown). Up to 32 keys are kept, after relocation only; more are dropped.
+ * getchar() / tstc() return them once cli_loop() calls
+ * console_kept_keys_to_cli().
+ *
+ * @c: the key
+ */
+void console_keep_key(int c);
+
+/**
+ * console_drop_kept_keys() - drop the keys console_keep_key() kept
+ */
+void console_drop_kept_keys(void);
+
+/**
+ * console_kept_keys_to_cli() - let getchar() / tstc() return the kept keys
+ *
+ * Called by cli_loop(): kept keys reach the command line, and nothing that
+ * reads input before it.
+ */
+void console_kept_keys_to_cli(void);
+
+/**
+ * console_discard_input() - drop the kept keys and every pending input key
+ *
+ * For a reader that waits on a key the user presses after its prompt (pause,
+ * bootmenu): input typed before the prompt is discarded, not acted on.
+ */
+void console_discard_input(void);
+
 /*
  * CONSOLE multiplexing.
  */

@@ -204,11 +204,19 @@ int dfu_config_interfaces(char *env)
 	return ret;
 }
 
+/* f_acm.c with USB_FUNCTION_ACM_DFU: the usbacm console's gadget holds the list */
+__weak void dfu_console_release(void)
+{
+}
+
 int dfu_init_env_entities(char *interface, char *devstr)
 {
 	const char *str_env;
 	char *env_bkp;
 	int ret = 0;
+
+	/* One entity list: whoever builds one now takes it from the console */
+	dfu_console_release();
 
 	dfu_reinit_needed = false;
 	dfu_alt_info_changed = false;
@@ -323,6 +331,23 @@ static char *dfu_get_hash_algo(void)
 	return NULL;
 }
 
+/*
+ * Whether a transfer prints its progress: a '#' per buffer and the lines that
+ * close it.  Errors print either way.  See dfu_set_progress().
+ */
+static bool dfu_progress = true;
+
+void dfu_set_progress(bool on)
+{
+	dfu_progress = on;
+}
+
+static void dfu_progress_puts(const char *s)
+{
+	if (dfu_progress)
+		puts(s);
+}
+
 static int dfu_write_buffer_drain(struct dfu_entity *dfu)
 {
 	long w_size;
@@ -347,7 +372,7 @@ static int dfu_write_buffer_drain(struct dfu_entity *dfu)
 	/* update offset */
 	dfu->offset += w_size;
 
-	puts("#");
+	dfu_progress_puts("#");
 
 	return ret;
 }
@@ -438,7 +463,7 @@ int dfu_flush(struct dfu_entity *dfu, void *buf, int size, int blk_seq_num)
 	if (dfu->flush_medium)
 		ret = dfu->flush_medium(dfu);
 
-	if (dfu_hash_algo)
+	if (dfu_hash_algo && dfu_progress)
 		printf("\nDFU complete %s: 0x%08x\n", dfu_hash_algo->name,
 		       dfu->crc);
 
@@ -578,7 +603,7 @@ static int dfu_read_buffer_fill(struct dfu_entity *dfu, void *buf, int size)
 			dfu->offset += dfu->b_left;
 			dfu->r_left -= dfu->b_left;
 
-			puts("#");
+			dfu_progress_puts("#");
 		}
 	}
 
@@ -660,7 +685,7 @@ int dfu_read_direct(struct dfu_entity *dfu, int size, int blk_seq_num)
 	dfu->offset += n;
 	dfu->r_left -= n;
 	if (n < size) {
-		puts("\nUPLOAD ... done\nCtrl+C to exit ...\n");
+		dfu_progress_puts("\nUPLOAD ... done\nCtrl+C to exit ...\n");
 		dfu_transaction_cleanup(dfu);
 	}
 
@@ -696,7 +721,7 @@ int dfu_read(struct dfu_entity *dfu, void *buf, int size, int blk_seq_num)
 		if (dfu_hash_algo)
 			debug("%s: %s %s: 0x%x\n", __func__, dfu->name,
 			      dfu_hash_algo->name, dfu->crc);
-		puts("\nUPLOAD ... done\nCtrl+C to exit ...\n");
+		dfu_progress_puts("\nUPLOAD ... done\nCtrl+C to exit ...\n");
 
 		dfu_transaction_cleanup(dfu);
 	}
@@ -887,6 +912,11 @@ void dfu_show_entities(void)
 int dfu_get_alt_number(void)
 {
 	return dfu_alt_num;
+}
+
+bool dfu_entities_in_use(void)
+{
+	return !list_empty(&dfu_list);
 }
 
 struct dfu_entity *dfu_get_entity(int alt)

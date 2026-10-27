@@ -312,6 +312,31 @@ config USB_GADGET_DNL_ACM
 	  `usbacm` console are unchanged. Needs three free data endpoints on
 	  the UDC (bulk IN, bulk OUT, interrupt IN); DFU uses ep0 only.
 
+config USB_FUNCTION_ACM_DFU
+	bool "The usbacm console's gadget also serves DFU"
+	depends on USB_FUNCTION_ACM && DFU_OVER_USB
+	help
+	  One composite gadget from the console's start: the stand-alone
+	  usbacm console and a DFU function in one configuration. A host reads
+	  and writes the alternates of USB_FUNCTION_ACM_DFU_ALT at U-Boot's
+	  prompt, with no `dfu` command: the board never leaves the bus, and
+	  the console stays open through the transfer. The DFU requests are
+	  served while the console polls the controller (at the prompt), and a
+	  DETACH changes nothing. `dfu`, `ums`, `fastboot` and the other
+	  download gadgets still take the controller as before; the console
+	  comes back with its DFU function at its next input poll once they
+	  are done.
+
+config USB_FUNCTION_ACM_DFU_ALT
+	string "Interface and device of the console's DFU alternates"
+	depends on USB_FUNCTION_ACM_DFU
+	default "sf 0:0"
+	help
+	  "<interface> <devstr>", as `dfu 0 <interface> <devstr>` takes them:
+	  the list is dfu_alt_info for that interface (a board's
+	  set_dfu_alt_info() writes it). When the list cannot be built (no
+	  such device), the console runs without DFU.
+
 endif # USB_GADGET_DOWNLOAD
 
 config USB_ETHER

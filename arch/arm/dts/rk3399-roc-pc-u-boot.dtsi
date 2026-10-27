@@ -656,6 +656,14 @@
  */
 &tcphy0 {
 	bootph-pre-ram;
+	/*
+	 * Measured on a V1.2 board with a DP monitor on Type-C0 (CC reading
+	 * a normal plug): the link trains only with the lanes muxed for the
+	 * reversed orientation and AUX polarity set for the normal one. The
+	 * V1.2A drawings show Type-C0 and Type-C1 wired alike; Type-C1 trains
+	 * with the plain CC orientation.
+	 */
+	libretech,typec-orientation-inverted;
 };
 
 &tcphy0_usb3 {

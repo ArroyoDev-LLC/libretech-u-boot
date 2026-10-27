@@ -385,17 +385,29 @@ static int abortboot_single_key(int bootdelay)
 		/* delay 1000 ms */
 		ts = get_timer(0);
 		do {
-			if (tstc()) {	/* we got a key press	*/
-				int key;
+			/*
+			 * With a menu key, only that key stops autoboot: any other key is
+			 * kept for whatever reads input next (console_keep_key()), not
+			 * consumed. Keys typed before the menu key are dropped with it.
+			 */
+			int key = console_poll_key();
 
-				abort  = 1;	/* don't auto boot	*/
-				bootdelay = 0;	/* no more delay	*/
-				key = getchar();/* consume input	*/
-				if (IS_ENABLED(CONFIG_AUTOBOOT_USE_MENUKEY))
-					menukey = key;
-				break;
+			if (key == -1) {
+				udelay(10000);
+				continue;
 			}
-			udelay(10000);
+			if (IS_ENABLED(CONFIG_AUTOBOOT_USE_MENUKEY) &&
+			    key != AUTOBOOT_MENUKEY) {
+				console_keep_key(key);
+				continue;
+			}
+			abort  = 1;	/* don't auto boot	*/
+			bootdelay = 0;	/* no more delay	*/
+			if (IS_ENABLED(CONFIG_AUTOBOOT_USE_MENUKEY)) {
+				menukey = key;
+				console_drop_kept_keys();
+			}
+			break;
 		} while (!abort && get_timer(ts) < 1000);
 
 		print_boot_delay(bootdelay);

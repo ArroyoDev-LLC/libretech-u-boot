@@ -37,6 +37,8 @@
 
 #include <spl.h>
 #include <bootsource.h>
+#include <cpu_func.h>
+#include <asm/global_data.h>
 #include <asm/arch/boot.h>
 #include <asm/io.h>
 #include <asm/system.h>
@@ -238,10 +240,13 @@ static void dram_stage_note(u32 code, u32 fault)
 	       (void *)GX_XPL_PROG_ADDR);
 	asm volatile("dsb sy" ::: "memory");
 
+	/* The handoff's marks are diagnostics (MESON_GX_XPL_VERBOSE); a refusal always prints. */
 	if (code == GX_DRAM_STAGE_OK) {
-		dram_puts("S2 OK\n");
+		if (IS_ENABLED(CONFIG_MESON_GX_XPL_VERBOSE))
+			dram_puts("S2 OK\n");
 	} else if (code == GX_DRAM_STAGE_FIT) {
-		dram_puts("S2 FIT\n");
+		if (IS_ENABLED(CONFIG_MESON_GX_XPL_VERBOSE))
+			dram_puts("S2 FIT\n");
 	} else {
 		dram_puts("S2 REFUSE ");
 		dram_puthex(code);
@@ -258,6 +263,34 @@ static void dram_stage_note(u32 code, u32 fault)
  * the behaviour the block exists to prevent.  The note is written and printed
  * first, then the EE watchdog resets the board into the BootROM.
  */
+/*
+ * The D-cache (and so the MMU) for this stage's loading.  Without it every
+ * data access the FIT load makes -- the copy out of NOR or RAM, the SHA-256
+ * of each image, LZMA's decode of U-Boot -- goes to DRAM uncached: on
+ * AML-S805X-AC-V2 the decode alone took 2.44 s of the BootROM watchdog's
+ * 5000 ms.  The page tables are gx_mem_map's (board-gx.c: DRAM normal, MMIO
+ * device), at GX_SPL_TLB_ADDR: DRAM between this stage's stack top
+ * (CONFIG_SPL_STACK, 0x09000000) and its malloc arena (0x0a000000), which
+ * nothing else in this stage or the next uses.  bl31_entry() (spl_atf.c)
+ * cleans and disables the cache before BL31; the one reader past the cache
+ * before that, the SC-ROM's fetch of the SC image, is cleaned for in
+ * spl-gxl-scp.c.
+ */
+#define GX_SPL_TLB_ADDR		0x09800000UL
+#define GX_SPL_TLB_SIZE		0x00080000UL
+
+DECLARE_GLOBAL_DATA_PTR;
+
+static void gx_dram_stage_dcache_enable(void)
+{
+	if (CONFIG_IS_ENABLED(SYS_DCACHE_OFF))
+		return;
+
+	gd->arch.tlb_addr = GX_SPL_TLB_ADDR;
+	gd->arch.tlb_size = GX_SPL_TLB_SIZE;
+	dcache_enable();
+}
+
 static void __noreturn dram_stage_refuse(u32 code, u32 fault)
 {
 	void meson_gx_wdt_arm_ms(u32 ms);
@@ -307,7 +340,8 @@ void board_init_f(ulong dummy)
 	       (void *)GX_DRAM_STAGE_ADDR);
 	writel(readl((void *)GX_XPL_PROG_ADDR) | GX_XPL_PROG_DRAM_ENTRY,
 	       (void *)GX_XPL_PROG_ADDR);
-	dram_puts("S2\n");
+	if (IS_ENABLED(CONFIG_MESON_GX_XPL_VERBOSE))
+		dram_puts("S2\n");
 
 	/*
 	 * Magic first: TPL writes it LAST, behind a barrier, so finding it means
@@ -350,11 +384,13 @@ void board_init_f(ulong dummy)
 	if (!(flags & GX_HANDOFF_F_SPL) || spl_addr != CONFIG_SPL_TEXT_BASE)
 		dram_stage_refuse(GX_DRAM_STAGE_BAD_ADDR, spl_addr);
 
-	dram_puts("S2 dram ");
-	dram_puthex(size_mb);
-	dram_puts(" MB @ ");
-	dram_puthex(spl_addr);
-	dram_puts("\n");
+	if (IS_ENABLED(CONFIG_MESON_GX_XPL_VERBOSE)) {
+		dram_puts("S2 dram ");
+		dram_puthex(size_mb);
+		dram_puts(" MB @ ");
+		dram_puthex(spl_addr);
+		dram_puts("\n");
+	}
 
 	dram_stage_note(GX_DRAM_STAGE_OK, 0);
 
@@ -407,6 +443,7 @@ void board_init_f(ulong dummy)
 
 	spl_init();
 	icache_enable();
+	gx_dram_stage_dcache_enable();
 	preloader_console_init();
 
 	/* First console line after the banner: where the BootROM found us. */

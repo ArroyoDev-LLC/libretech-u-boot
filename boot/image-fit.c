@@ -1322,7 +1322,9 @@ static int fit_image_check_hash(const void *fit, int noffset, const void *data,
 		*err_msgp = "Can't get hash algo property";
 		return -1;
 	}
-	printf("%s", algo);
+	/* SPL_FIT_QUIET: progress marks only; a failure still prints in full. */
+	if (!CONFIG_IS_ENABLED(FIT_QUIET))
+		printf("%s", algo);
 
 	if (!tools_build()) {
 		fit_image_hash_get_ignore(fit, noffset, &ignore);
@@ -1385,7 +1387,8 @@ int fit_image_verify_with_data(const void *fit, int image_noffset,
 			if (fit_image_check_hash(fit, noffset, data, size,
 						 &err_msg))
 				goto error;
-			puts("+ ");
+			if (!CONFIG_IS_ENABLED(FIT_QUIET))
+				puts("+ ");
 		} else if (FIT_IMAGE_ENABLE_VERIFY && verify_all &&
 				!strncmp(name, FIT_SIG_NODENAME,
 					strlen(FIT_SIG_NODENAME))) {
@@ -1400,7 +1403,7 @@ int fit_image_verify_with_data(const void *fit, int image_noffset,
 			 */
 			if (ret)
 				puts("- ");
-			else
+			else if (!CONFIG_IS_ENABLED(FIT_QUIET))
 				puts("+ ");
 		}
 	}

@@ -12,9 +12,11 @@
 #include <asm/gpio.h>
 #include <dm/device_compat.h>
 #include <dm/lists.h>
+#include <dm/ofnode_graph.h>
 #include <linux/delay.h>
 #include <linux/usb/gadget.h>
 #include <power/regulator.h>
+#include <usb/tcpm.h>
 #include <usb/xhci.h>
 #include "core.h"
 #include "dwc3-generic.h"
@@ -255,12 +257,55 @@ U_BOOT_DRIVER(dwc3_generic_peripheral) = {
 #endif
 
 #if CONFIG_IS_ENABLED(USB_HOST)
+/*
+ * dwc3_generic_take_host_role() - get the host data role from the role switch
+ *
+ * A controller behind a USB role switch follows the data role its Type-C
+ * port manager negotiated, and a sink port starts as the USB device: the
+ * partner sourcing VBUS is the host until a DR_Swap says otherwise. Starting
+ * xHCI there drives a bus whose other end is a host too, and nothing on it
+ * enumerates. So ask the port manager at the far end of the role-switch
+ * graph link for the host role first, and refuse to start if the partner
+ * keeps it. A port with nothing attached, or no port manager, starts as
+ * before.
+ */
+static int dwc3_generic_take_host_role(struct udevice *dev)
+{
+	struct udevice *tcpm;
+	ofnode ep;
+
+	if (!CONFIG_IS_ENABLED(TYPEC_TCPM) ||
+	    !dev_read_bool(dev, "usb-role-switch"))
+		return 0;
+
+	ep = ofnode_graph_get_endpoint_by_regs(dev_ofnode(dev), -1, -1);
+	if (!ofnode_valid(ep) ||
+	    uclass_get_device_by_ofnode(UCLASS_TCPM,
+					ofnode_graph_get_remote_port_parent(ep),
+					&tcpm))
+		return 0;
+
+	if (!tcpm_is_connected(tcpm))
+		return 0;
+	tcpm_request_host_role(tcpm);
+	if (tcpm_get_data_role(tcpm) == TYPEC_HOST)
+		return 0;
+
+	dev_warn(dev, "%s keeps the host data role; not starting the host\n",
+		 tcpm->name);
+	return -EBUSY;
+}
+
 static int dwc3_generic_host_probe(struct udevice *dev)
 {
 	struct xhci_hcor *hcor;
 	struct xhci_hccr *hccr;
 	struct dwc3_generic_host_priv *priv = dev_get_priv(dev);
 	int rc;
+
+	rc = dwc3_generic_take_host_role(dev);
+	if (rc)
+		return rc;
 
 	rc = dwc3_generic_probe(dev, &priv->gen_priv, USB_DR_MODE_HOST);
 	if (rc)
@@ -587,6 +632,31 @@ static int dwc3_glue_bind_common(struct udevice *parent, ofnode node)
 		debug("%s: not able to bind usb device mode\n",
 		      __func__);
 		return ret;
+	}
+
+	/*
+	 * An OTG controller behind a USB role switch takes whatever data role
+	 * the Type-C port manager negotiates, and nothing here switches the
+	 * binding when that role changes. So U-Boot proper binds the host
+	 * driver beside the gadget one: `usb start` drives the port as a host
+	 * and a gadget command still finds its device. Both cannot be probed
+	 * at once; whichever is used first owns the controller until removed.
+	 * The SPL keeps the gadget alone (MaskROM/DFU recovery sessions).
+	 *
+	 * Measured on ROC-RK3399-PC Type-C0 with a DisplayPort monitor that
+	 * powers the board and carries a USB hub: the port held the host data
+	 * role, the controller was bound as a gadget only, and `usb tree`
+	 * showed none of the hub's devices.
+	 */
+	if (!IS_ENABLED(CONFIG_XPL_BUILD) && CONFIG_IS_ENABLED(USB_HOST) &&
+	    dr_mode == USB_DR_MODE_OTG &&
+	    !strcmp(driver, "dwc3-generic-peripheral") &&
+	    ofnode_read_bool(node, "usb-role-switch")) {
+		ret = device_bind_driver_to_node(parent, "dwc3-generic-host",
+						 name, node, &dev);
+		if (ret)
+			debug("%s: not able to bind usb host mode\n",
+			      __func__);
 	}
 
 	return 0;

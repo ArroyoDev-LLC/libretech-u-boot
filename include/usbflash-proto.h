@@ -14,6 +14,9 @@
  *   usbflash boot              leave the session, continue the boot
  *   usbflash boot kernel       the same, and U-Boot proper runs `bootm` on the
  *                              FIT the host loaded into the `kernel` alt
+ *   usbflash boot prompt       the same, and U-Boot proper does not autoboot:
+ *                              it waits at its prompt for the host's commands
+ *                              (on the USB console, USB_BOOT_ACM_CONSOLE)
  *   usbflash reset             reset the board
  * <n> is one decimal digit, U-Boot's mmc numbering (0 = eMMC, 1 = SD).
  * Anything else is refused.  Which accepted lines a layer can carry out is
@@ -41,6 +44,11 @@
  * U-Boot proper to `bootm` (common/usbflash_bootm.c).
  */
 #define USBFLASH_FDT_BOOTM	"u-boot,spl-usbflash-bootm"
+/*
+ * After `usbflash boot prompt`: an empty property, for U-Boot proper to skip
+ * its autoboot (common/usbflash_bootm.c).
+ */
+#define USBFLASH_FDT_PROMPT	"u-boot,spl-usbflash-prompt"
 
 /* SPL: set USBFLASH_FDT_PROP in @blob if the session ran (spl_usbflash.c) */
 void spl_usbflash_fdt_fixup(void *blob);
@@ -50,6 +58,7 @@ enum usbflash_verb {
 	USBFLASH_DFU,
 	USBFLASH_BOOT,
 	USBFLASH_BOOT_KERNEL,
+	USBFLASH_BOOT_PROMPT,
 	USBFLASH_RESET,
 };
 
@@ -117,6 +126,11 @@ static inline int usbflash_parse(const char *buf, size_t len,
 	if (n == 3 && usbflash_word(w[1], wl[1], "boot") &&
 	    usbflash_word(w[2], wl[2], "kernel")) {
 		cmd->verb = USBFLASH_BOOT_KERNEL;
+		return 0;
+	}
+	if (n == 3 && usbflash_word(w[1], wl[1], "boot") &&
+	    usbflash_word(w[2], wl[2], "prompt")) {
+		cmd->verb = USBFLASH_BOOT_PROMPT;
 		return 0;
 	}
 	if (n != 2)

@@ -55,7 +55,8 @@ static void SzFree(ISzAllocPtr p, void *address) { free(address); }
  * read out of the LZMA_Alone header's first byte, so the requirement is a
  * property of the encoder, not of the decoder or the payload size.  binman
  * pins them: tools/binman/btool/lzma_alone.py compresses with
- * '-lc1 -lp0 -pb0 -d8', giving 4 * (1984 + (0x300 << 1)) = 14080 bytes.
+ * '-lc1 -lp0' (pb and the dictionary size do not change it), giving
+ * 4 * (1984 + (0x300 << 1)) = 14080 bytes.
  *
  * When SYS_MALLOC_SIMPLE is in effect, malloc() is the bump allocator in
  * common/malloc_simple.c and that 14080 bytes has to come out of the fixed

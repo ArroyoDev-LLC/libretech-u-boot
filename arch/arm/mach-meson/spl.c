@@ -13,6 +13,8 @@
 #include <asm/spl.h>
 #include <asm/arch/boot.h>
 #include <asm/arch/wdt-reset.h>
+#include <timestamp.h>
+#include <version.h>
 #include <vsprintf.h>
 #include <asm/ptrace.h>
 #include <asm/system.h>
@@ -522,6 +524,15 @@ static void __used early_puts(const char *s)
 		early_putc(*s++);
 	}
 }
+/*
+ * A bring-up diagnostic: on GX only with MESON_GX_XPL_VERBOSE (board+bootloader
+ * policy "Boot console output"); G12 keeps printing it.
+ */
+static void __used early_vputs(const char *s)
+{
+	if (!IS_ENABLED(CONFIG_MESON_GX) || IS_ENABLED(CONFIG_MESON_GX_XPL_VERBOSE))
+		early_puts(s);
+}
 /* Fixed-width 8 nibbles: a length is only useful next to another length. */
 static void __used early_puthex(ulong v)
 {
@@ -621,6 +632,7 @@ static void gx_tpl_write_handoff(int ddr_ok)
 
 #if defined(CONFIG_MESON_GX_XPL_CHAIN)
 int gx_tpl_load_spl_mmc(int devnum, void *dst, u32 len, u32 *err);
+int gx_tpl_load_spl_nor(void *dst, u32 len, u32 *err);
 u32 meson_usb_spl_payload_len(void);
 void gx_tpl_nor_probe(void);
 void gx_tpl_mmc_probe(void);
@@ -659,14 +671,10 @@ static int gx_tpl_dm_init(void)
  *
  *  - SD/eMMC is a PULL, and is the product path.  tpl-load-mmc.c.
  *
- *  - SPI NOR is NEITHER YET, and says so with its own code instead of falling
- *    through to a generic "no".  It is not merely unwired: meson_spifc.c does
- *    not LINK in an xPL phase (SPL_REGMAP/TPL_REGMAP are prompt-less bools
- *    nothing selects, drivers/spi/Makefile is not phase-gated, and probe wants
- *    CLKID_SPI via the clk uclass).  Four upstream gaps, one of them an open
- *    design decision -- see the design doc's "SPI NOR as a TPL boot source".
- *    Writing a loader for it now would be writing against a driver that cannot
- *    be built, so the honest thing is a named refusal.
+ *  - SPI NOR is a PULL too, tpl-load-nor.c, and the DRAM stage then reads
+ *    the FIT from the same part (spl-load-nor.c): a board that booted from
+ *    NOR reads every stage from NOR.  A build without MESON_GX_LOAD_NOR says
+ *    so with its own code instead of falling through to a generic "no".
  *
  * A stage that guesses here is worse than one that stops: every failure below
  * hands back a code and the boot device id, and the caller refuses.
@@ -725,8 +733,16 @@ static u32 gx_tpl_fetch_spl(u32 *err)
 #endif
 
 	case BOOT_DEVICE_SPI:
-		*err = GX_TPL_LOAD_NO_NOR;
+		if (!IS_ENABLED(CONFIG_MESON_GX_LOAD_NOR)) {
+			*err = GX_TPL_LOAD_NO_NOR;
+			return 0;
+		}
+#if IS_ENABLED(CONFIG_MESON_GX_LOAD_NOR)
+		return gx_tpl_load_spl_nor(dst, CONFIG_MESON_GX_SPL_MAX_SIZE,
+					   err);
+#else
 		return 0;
+#endif
 	}
 
 	*err = GX_TPL_LOAD_NO_SRC;
@@ -821,7 +837,7 @@ static void gx_tpl_jump_to_spl(void)
 	writel(GX_HANDOFF_MAGIC, &h->magic);
 
 	wdt_stop();
-	early_puts("JMP\n");
+	early_vputs("JMP\n");
 	prod_stage(0x7b);
 	writel(readl((void *)GX_XPL_PROG_ADDR) | GX_XPL_PROG_JUMP,
 	       (void *)GX_XPL_PROG_ADDR);
@@ -1183,15 +1199,20 @@ void board_init_f(ulong dummy)
 	wdt_start_ms(8000);
 	prod_stage(0x5C); /* smc_skipped */
 	wdt_pet();
-	early_puts("1\n");
+	early_vputs("1\n");
 
 	/*
-	 * The chip id under the TPL's own early console (include/chip_serial.h):
-	 * this stage jumps on before preloader_console_init(), which says it for
-	 * the stages that reach it.
+	 * The banner and chip id under the TPL's own early console
+	 * (include/chip_serial.h): this stage jumps on before
+	 * preloader_console_init(), which says both for the stages that reach
+	 * it, in the same form.
 	 */
 	if (IS_ENABLED(CONFIG_TPL_BUILD)) {
 		char id[CHIP_SERIAL_MAX];
+
+		if (IS_ENABLED(CONFIG_MESON_GX))
+			early_puts("\nU-Boot TPL " PLAIN_VERSION " (" U_BOOT_DATE " - "
+				   U_BOOT_TIME " " U_BOOT_TZ ")\n");
 
 		if (chip_serial_get(id, sizeof(id))) {
 			early_puts("Chip id: unreadable\n");
@@ -1204,11 +1225,11 @@ void board_init_f(ulong dummy)
 
 	prod_stage(0x53);
 	meson_power_init();
-	early_puts("2\n");
+	early_vputs("2\n");
 	prod_stage(4);
 	wdt_pet();
 
-	early_puts("4\n");
+	early_vputs("4\n");
 	prod_stage(5);
 	wdt_pet();
 
@@ -1306,7 +1327,7 @@ void board_init_f(ulong dummy)
 	}
 	/* DDR is trained: the boot log moves from SRAM to DRAM */
 	gx_bootlog_dram_ready();
-	early_puts("5\n");
+	early_vputs("5\n");
 	prod_stage(6);
 
 #if defined(CONFIG_MESON_G12A) && defined(CONFIG_MESON_G12A_XPL_CHAIN) && \
@@ -1512,20 +1533,39 @@ void board_init_f(ulong dummy)
 	 */
 #if CONFIG_IS_ENABLED(MESON_USB_BOOT)
 	/*
-	 * Always re-enum for FIT after DDR when built with RAM_DEVICE.
-	 * Do not gate on meson_get_boot_device() — AO boot-id can disagree
-	 * with "we were loaded via BROM USB" (would skip receive_fit forever).
+	 * Re-enumerate for the next stage after DDR, unless the BootROM booted
+	 * this stage from a medium the chain pulls the next stage from itself:
+	 * SPI NOR (MESON_GX_LOAD_NOR) or SD/eMMC (TPL_MESON_GX_LOAD_MMC).  Then
+	 * every stage comes from that medium (gx_tpl_fetch_spl()), and a USB
+	 * session here would wait for a host that is not there.
+	 *
+	 * Every other boot-id -- USB, and anything unexpected -- still takes
+	 * the USB session, as this always did: an AO boot-id that disagrees
+	 * with "we were loaded via BROM USB" must not skip receive_fit.
 	 */
 	{
 		u32 bd = (u32)meson_get_boot_device();
+		bool pull = false;
 
+#if defined(CONFIG_MESON_GX_XPL_CHAIN)
+		pull = (bd == BOOT_DEVICE_SPI && IS_ENABLED(CONFIG_MESON_GX_LOAD_NOR)) ||
+		       ((bd == BOOT_DEVICE_SD || bd == BOOT_DEVICE_EMMC) &&
+			IS_ENABLED(CONFIG_TPL_MESON_GX_LOAD_MMC));
+#endif
 		prod_stage(0xB000 | (bd & 0xff));
-		early_puts("USB\n");
-										/* I-cache before bulk PIO (was after receive_fit) */
+		if (!IS_ENABLED(CONFIG_MESON_GX) || IS_ENABLED(CONFIG_MESON_GX_XPL_VERBOSE)) {
+			early_puts("BOOT ");
+			early_puthex(bd);
+			early_puts(pull ? " pull\n" : "\n");
+		}
+		/* I-cache before bulk PIO (was after receive_fit), or before the pull */
 		icache_enable();
-		meson_usb_receive_fit();
-		early_puts("FIT\n");
-		prod_stage(7);
+		if (!pull) {
+			early_vputs("USB\n");
+			meson_usb_receive_fit();
+			early_vputs("FIT\n");
+			prod_stage(7);
+		}
 	}
 #endif
 

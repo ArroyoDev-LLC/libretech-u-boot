@@ -15,6 +15,7 @@
 #include <spl.h>
 #include <watchdog.h>
 #include <xpl_bootlog.h>
+#include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/types.h>
 #include <asm/io.h>
@@ -204,15 +205,39 @@ int ns16550_calc_divisor(struct ns16550 *port, int clock, int baudrate)
 	return DIV_ROUND_CLOSEST(clock, mode_x_div * baudrate);
 }
 
+/*
+ * A DesignWare APB UART (snps,dw-apb-uart) ignores a write to LCR while it
+ * is busy: receiving a character, or holding any in its RX FIFO. A rate
+ * change made while the other end is still sending -- `loady` switching
+ * back after an aborted download -- then left the divisor latch closed and
+ * the old rate in force, with U-Boot announcing the new one. Check that the
+ * write landed; if not, drop the RX FIFO, which is what keeps the UART busy,
+ * and write again. A true 16550 reads LCR back at the first try.
+ */
+static void ns16550_write_lcr(struct ns16550 *com_port, int lcr_val)
+{
+	int tries;
+
+	for (tries = 0; tries < 1000; tries++) {
+		serial_out(lcr_val, &com_port->lcr);
+		if ((serial_in(&com_port->lcr) & 0xff) == (lcr_val & 0xff))
+			return;
+		serial_out(ns16550_getfcr(com_port) | UART_FCR_RXSR,
+			   &com_port->fcr);
+		serial_in(&com_port->rbr);
+		udelay(10);
+	}
+}
+
 void ns16550_setbrg(struct ns16550 *com_port, int baud_divisor)
 {
 	/* to keep serial format, read lcr before writing BKSE */
 	int lcr_val = serial_in(&com_port->lcr) & ~UART_LCR_BKSE;
 
-	serial_out(UART_LCR_BKSE | lcr_val, &com_port->lcr);
+	ns16550_write_lcr(com_port, UART_LCR_BKSE | lcr_val);
 	serial_out(baud_divisor & 0xff, &com_port->dll);
 	serial_out((baud_divisor >> 8) & 0xff, &com_port->dlm);
-	serial_out(lcr_val, &com_port->lcr);
+	ns16550_write_lcr(com_port, lcr_val);
 }
 
 void ns16550_init(struct ns16550 *com_port, int baud_divisor)

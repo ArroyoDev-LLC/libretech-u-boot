@@ -55,6 +55,15 @@ int typec_dp_discover(struct udevice *tcpm, struct typec_dp_state *dp)
 	int ret;
 
 	/*
+	 * Get the host data role first, before anything below is read: a
+	 * successful swap clears port->dp, and @dp is that state.
+	 */
+	ret = tcpm_wait_ready(tcpm, PD_T_SINK_WAIT_CAP * 4);
+	if (ret)
+		return ret;
+	tcpm_request_host_role(tcpm);
+
+	/*
 	 * Clear only what discovery itself produces. This used to be a
 	 * `memset(dp, 0, sizeof(*dp))`, which was harmless while @dp was a
 	 * stack local in cmd/tcpm.c and became a bug the moment it became the

@@ -273,10 +273,12 @@ config USB_BOOT_ACM_CONSOLE
 	depends on BOOTSOURCE && USB_FUNCTION_ACM && CONSOLE_MUX
 	help
 	  When the published boot source is USB, start the usbacm stdio
-	  device at the end of init and add it to stdin, stdout and stderr
+	  device after preboot and add it to stdin, stdout and stderr
 	  beside the UART, so the host that booted the board over USB reads
-	  and drives the console with no serial cable. With CONSOLE_RECORD the
-	  recorded output so far is sent first. Set
+	  and drives the console with no serial cable. After preboot, so the
+	  gadget is never left unanswered by preboot's work right after the
+	  host configures it. With CONSOLE_RECORD the recorded output so far
+	  is sent first. Set
 	  USB_FUNCTION_ACM_CONNECT_TIMEOUT_MS: if no host configures the
 	  gadget in time, the boot goes on on the UART alone.
 

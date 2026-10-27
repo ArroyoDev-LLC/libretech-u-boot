@@ -22,6 +22,7 @@
 #include <div64.h>
 #include <dm.h>
 #include <edid.h>
+#include <env.h>
 #include <log.h>
 #include <malloc.h>
 #include <reset.h>
@@ -429,10 +430,29 @@ struct rk_cdn_dp_priv {
 	bool init_done;
 
 	/*
-	 * The DisplayPort half of the Type-C PHY the monitor is actually on.
-	 * Index 1 of the node's `phys`, i.e. tcphy1 -- see cdn_dp_get_dp_phy().
+	 * Whether the last cdn_dp_training_start() saw ANY non-zero event byte.
+	 * Both bytes: event[0] carries the firmware's HPD events and event[1]
+	 * its training progress. A good run reads 0x09 then 0x08 in event[0]
+	 * from the first poll, and event[1] steps 0x01, 0x04, 0x08 some 200 ms
+	 * later. A run with neither byte ever set is a firmware that sees no
+	 * HPD and did not act on LINK_TRAINING_RUN at all.
+	 */
+	bool train_any_event;
+
+	/*
+	 * Whether the last cdn_dp_training_start() ended because a
+	 * DPTX_READ_EVENT round trip failed, i.e. the firmware stopped
+	 * answering the mailbox partway through training.
+	 */
+	bool train_mailbox_dead;
+
+	/*
+	 * The DisplayPort half of the Type-C PHY the monitor is actually on,
+	 * and its index in the node's `phys` (1 = tcphy1, front Type-C1;
+	 * 0 = tcphy0, rear Type-C0) -- see cdn_dp_get_dp_phy().
 	 */
 	struct phy dp_phy;
+	int dp_phy_index;
 	bool phy_on;
 
 	void __iomem *grf_base;
@@ -1189,8 +1209,8 @@ static int cdn_dp_get_hpd_status(struct rk_cdn_dp_priv *priv)
  * read into a scratch buffer rather than skipped with a loop of discards so the
  * shape stays identical to the reference.
  */
-static int cdn_dp_dpcd_read(struct rk_cdn_dp_priv *priv, u32 addr, u8 *data,
-			    u16 len)
+static int cdn_dp_dpcd_read_once(struct rk_cdn_dp_priv *priv, u32 addr,
+				 u8 *data, u16 len)
 {
 	u8 msg[5], reg[5];
 	int ret;
@@ -1221,6 +1241,31 @@ static int cdn_dp_dpcd_read(struct rk_cdn_dp_priv *priv, u32 addr, u8 *data,
 		return log_msg_ret("dpcd rd data", ret);
 
 	return 0;
+}
+
+/*
+ * A sink may leave its AUX receiver in a low-power state while the link is
+ * idle and miss the first transaction; the source is expected to retry (DP
+ * 1.2 2.7.7.1.4, at least three times). The firmware reports such a read as a
+ * reply carrying only the 5-byte echo -- the -EINVAL "size" mismatch, drained
+ * by the mailbox layer so the stream stays in step. Measured on slot7 after
+ * 10 minutes idle at the prompt: the first read of 0x202 came back that way,
+ * the next reads answered.
+ */
+static int cdn_dp_dpcd_read(struct rk_cdn_dp_priv *priv, u32 addr, u8 *data,
+			    u16 len)
+{
+	int tries, ret;
+
+	for (tries = 0; tries < 3; tries++) {
+		ret = cdn_dp_dpcd_read_once(priv, addr, data, len);
+		if (ret != -EINVAL)
+			break;
+		log_debug("cdn-dp: DPCD %05x read got no data; retrying\n", addr);
+		mdelay(1);
+	}
+
+	return ret;
 }
 
 /**
@@ -1817,6 +1862,7 @@ static int cdn_dp_training_start(struct rk_cdn_dp_priv *priv, u8 *event_bits,
 	*polls = 0;
 	*run_delivered = false;
 	*poll_aborted = false;
+	priv->train_any_event = false;
 
 	ret = cdn_dp_mailbox_send(priv, MB_MODULE_ID_DP_TX,
 				  DPTX_TRAINING_CONTROL, sizeof(msg), &msg);
@@ -1878,6 +1924,8 @@ static int cdn_dp_training_start(struct rk_cdn_dp_priv *priv, u8 *event_bits,
 		 * asked and answered -- not what it answered.
 		 */
 		(*polls)++;
+		if (event[0] | event[1])
+			priv->train_any_event = true;
 
 		/*
 		 * Accumulated, not latched to the last read. The status byte
@@ -2379,6 +2427,7 @@ static int cdn_dp_train_link(struct rk_cdn_dp_priv *priv, u8 *event_bits)
 	 */
 	ret = cdn_dp_training_start(priv, event_bits, &polls, &run_delivered,
 				    &poll_aborted);
+	priv->train_mailbox_dead = ret && poll_aborted;
 	if (ret) {
 		cdn_dp_training_diag(priv, "fail", *event_bits, polls,
 				     run_delivered, poll_aborted);
@@ -2869,18 +2918,43 @@ static int cdn_dp_get_dp_phy(struct udevice *dev)
 	struct rockchip_typec_phy_dp_state dp_state;
 	int ret;
 
-	if (!priv->dp_phy.dev) {
-		ret = generic_phy_get_by_index(dev, 1, &priv->dp_phy);
-		if (ret)
-			return log_msg_ret("dp phy", ret);
-	}
-
 	/*
-	 * Ask the PHY what the connector is doing BEFORE powering it on, and
-	 * fail loudly if the port is not in DisplayPort alt mode. Powering the
-	 * PHY into DP on a connector carrying USB would re-mux four live lanes.
+	 * Which receptacle: the front (index 1) first, then the rear (index 0),
+	 * keeping the first whose port manager produces a DisplayPort link --
+	 * a monitor may sit on either, and both connectors declare DP alt mode.
+	 * `setenv cdn_dp_phy 0|1` pins one. Once a port has DP it is kept, so
+	 * a later call asks the same port again.
 	 */
-	ret = rockchip_typec_phy_get_dp_state(&priv->dp_phy, &dp_state);
+	if (!priv->dp_phy.dev) {
+		const char *pin = env_get("cdn_dp_phy");
+		int order[2] = { 1, 0 }, n = 2, i;
+
+		if (pin) {
+			order[0] = dectoul(pin, NULL) ? 1 : 0;
+			n = 1;
+		}
+		ret = -ENODEV;
+		for (i = 0; i < n; i++) {
+			ret = generic_phy_get_by_index(dev, order[i], &priv->dp_phy);
+			if (ret)
+				continue;
+			ret = rockchip_typec_phy_get_dp_state(&priv->dp_phy,
+							      &dp_state);
+			if (!ret) {
+				priv->dp_phy_index = order[i];
+				break;
+			}
+			memset(&priv->dp_phy, 0, sizeof(priv->dp_phy));
+		}
+	} else {
+		/*
+		 * Ask the PHY what the connector is doing BEFORE powering it
+		 * on, and fail loudly if the port is not in DisplayPort alt
+		 * mode. Powering the PHY into DP on a connector carrying USB
+		 * would re-mux four live lanes.
+		 */
+		ret = rockchip_typec_phy_get_dp_state(&priv->dp_phy, &dp_state);
+	}
 	if (ret) {
 		/*
 		 * No longer "run `tcpm dp enter` first". Asking the PHY for the
@@ -3086,7 +3160,8 @@ static int rk_cdn_dp_fw_init(struct udevice *dev)
 	ret = cdn_dp_ensure_phy(dev);
 	if (ret)
 		return ret;
-	printf("cdn-dp: PHY up on tcphy1, %u lanes, %s orientation\n",
+	printf("cdn-dp: PHY up on tcphy%d, %u lanes, %s orientation\n",
+	       priv->dp_phy_index,
 	       priv->lanes, priv->flip ? "flipped" : "normal");
 
 	/*
@@ -3382,6 +3457,30 @@ static int rk_cdn_dp_enable(struct udevice *dev, int panel_bpp,
 	priv->color_depth = cdn_dp_edid_bpc(priv);
 
 	ret = cdn_dp_train_link(priv, &bits);
+
+	/*
+	 * A firmware that never reacted to LINK_TRAINING_RUN -- no event byte
+	 * set in any poll -- does not start reacting to the same request sent
+	 * again: measured on ROC-RK3399-PC with a PD monitor on Type-C1, 5 of
+	 * 36 boots answered every poll of every retry with 00 00 for the rest
+	 * of the boot, while the host side matched good boots to within 3 ms.
+	 * Restart the firmware once (block reset, reload, event and host
+	 * capability setup; the PHY stays up) and train again.
+	 *
+	 * The same restart for a firmware that started training and then
+	 * stopped answering the mailbox: measured once, it answered ten event
+	 * polls exactly as a good boot does and then nothing, so every later
+	 * mailbox call (sink caps, HPD) timed out for the rest of the boot.
+	 */
+	if (ret && (!priv->train_any_event || priv->train_mailbox_dead)) {
+		printf("cdn-dp: firmware %s; restarting it\n",
+		       priv->train_any_event ? "stopped answering during training"
+					     : "never started training");
+		ret = rk_cdn_dp_fw_init(dev);
+		if (!ret)
+			ret = cdn_dp_train_link(priv, &bits);
+	}
+
 	if (ret) {
 		log_err("cdn-dp: link training FAILED (%d), status 0x%02x\n",
 			ret, bits);

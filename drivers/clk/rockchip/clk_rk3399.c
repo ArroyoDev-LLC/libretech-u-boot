@@ -133,6 +133,7 @@ enum {
 	PLL_DSMPD_SHIFT			= 3,
 	PLL_DSMPD_MASK			= 1 << PLL_DSMPD_SHIFT,
 	PLL_INTEGER_MODE		= 1,
+	PLL_PWRDOWN_MASK		= 1 << 0,
 
 	/* PMUCRU_CLKSEL_CON0 */
 	PMU_PCLK_DIV_CON_MASK		= 0x1f,
@@ -413,6 +414,17 @@ static int rkclk_set_pll(u32 *pll_con, const struct pll_div *div)
 		     (div->postdiv2 << PLL_POSTDIV2_SHIFT) |
 		     (div->postdiv1 << PLL_POSTDIV1_SHIFT) |
 		     (div->refdiv << PLL_REFDIV_SHIFT));
+
+	/*
+	 * Power the PLL up (PLL_CON3 bit 0), as Linux's
+	 * rockchip_rk3399_pll_enable() does before it waits for lock. A PLL
+	 * still powered down never locks: VPLL, set for a 3840x2160 pixel
+	 * clock, timed out here on every boot and was left on the 24 MHz
+	 * oscillator, so DisplayPort trained and the monitor showed nothing.
+	 * Measured: setting the bit clears the lock bit, clearing it relocks
+	 * within 10 ms. A no-op for a PLL already running.
+	 */
+	rk_clrreg(&pll_con[3], PLL_PWRDOWN_MASK);
 
 	/*
 	 * Wait for lock, BOUNDED. Datasheet: typical 250, max 500 input clock

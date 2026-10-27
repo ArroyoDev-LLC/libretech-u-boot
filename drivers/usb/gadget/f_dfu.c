@@ -49,6 +49,21 @@ struct f_dfu {
 	/* The EP0 buffer, while a zero-copy block points the request elsewhere */
 	void				*ep0_buf;
 
+	/*
+	 * The alternates this function was bound with: the global entity list
+	 * can be rebuilt while it is still bound (a resident function, below,
+	 * and the `dfu` command's own list), so unbind frees what bind made.
+	 */
+	int				alt_num;
+
+	/*
+	 * Resident (USB_FUNCTION_ACM_DFU): the function lives in the usbacm
+	 * console's gadget, in DFU mode from bind to unbind. A DETACH is not a
+	 * request to leave a download session -- there is none to leave -- so
+	 * it changes nothing, and the gadget never re-enumerates for it.
+	 */
+	bool				resident;
+
 #if CONFIG_IS_ENABLED(DFU_BULK)
 	/* The bulk data path (DFU_BULK): its interface, endpoints, one request each */
 	struct usb_descriptor_header	**function_fs;
@@ -624,6 +639,8 @@ static int state_dfu_idle(struct f_dfu *f_dfu,
 		value = handle_getstate(req);
 		break;
 	case USB_REQ_DFU_DETACH:
+		if (f_dfu->resident)
+			break;
 		/*
 		 * Proprietary extension: 'detach' from idle mode and
 		 * get back to runtime mode in case of USB Reset.  As
@@ -770,7 +787,8 @@ static int state_dfu_manifest(struct f_dfu *f_dfu,
 		f_dfu->dfu_state = DFU_STATE_dfuIDLE;
 		value = handle_getstatus(req);
 		f_dfu->blk_seq_num = 0;
-		puts("DOWNLOAD ... OK\nCtrl+C to exit ...\n");
+		if (!f_dfu->resident)
+			puts("DOWNLOAD ... OK\nCtrl+C to exit ...\n");
 		break;
 	case USB_REQ_DFU_GETSTATE:
 		value = handle_getstate(req);
@@ -893,6 +911,12 @@ dfu_handle(struct usb_function *f, const struct usb_ctrlrequest *ctrl)
 	dfu_host_active();
 #endif
 
+	/*
+	 * The resident function shares its gadget with the usbacm console,
+	 * which is the user's terminal while it transfers: no progress marks.
+	 */
+	dfu_set_progress(!f_dfu->resident);
+
 	if (req_type == USB_TYPE_STANDARD) {
 		if (ctrl->bRequest == USB_REQ_GET_DESCRIPTOR &&
 		    (w_value >> 8) == DFU_DT_FUNC) {
@@ -950,7 +974,13 @@ dfu_prepare_strings(struct f_dfu *f_dfu, int n)
 	return 0;
 }
 
-static int dfu_prepare_function(struct f_dfu *f_dfu, int n)
+/*
+ * @intf is the interface number the configuration gave the function: every
+ * alternate carries it. Left at 0 it only worked while DFU was the first
+ * function of its configuration; beside the usbacm console (interfaces 0 and
+ * 1) the host took the alternates for the ACM control interface's.
+ */
+static int dfu_prepare_function(struct f_dfu *f_dfu, int n, int intf)
 {
 	struct usb_interface_descriptor *d;
 	int i = 0;
@@ -966,6 +996,7 @@ static int dfu_prepare_function(struct f_dfu *f_dfu, int n)
 
 		d->bLength =		sizeof(*d);
 		d->bDescriptorType =	USB_DT_INTERFACE;
+		d->bInterfaceNumber =	intf;
 		d->bAlternateSetting =	i;
 		d->bNumEndpoints =	0;
 		d->bInterfaceClass =	USB_CLASS_APP_SPEC;
@@ -1151,8 +1182,9 @@ static int dfu_bind(struct usb_configuration *c, struct usb_function *f)
 
 	f_dfu->dfu_state = DFU_STATE_appIDLE;
 	f_dfu->dfu_status = DFU_STATUS_OK;
+	f_dfu->alt_num = alt_num;
 
-	rv = dfu_prepare_function(f_dfu, alt_num);
+	rv = dfu_prepare_function(f_dfu, alt_num, id);
 	if (rv)
 		goto error;
 #if CONFIG_IS_ENABLED(DFU_BULK)
@@ -1195,7 +1227,7 @@ error:
 static void dfu_unbind(struct usb_configuration *c, struct usb_function *f)
 {
 	struct f_dfu *f_dfu = func_to_dfu(f);
-	int alt_num = dfu_get_alt_number();
+	int alt_num = f_dfu->alt_num;
 	int i;
 
 	if (f_dfu->strings) {
@@ -1270,7 +1302,7 @@ static void dfu_disable(struct usb_function *f)
 	f_dfu->config = 0;
 }
 
-static int dfu_bind_config(struct usb_configuration *c)
+static int dfu_bind_config(struct usb_configuration *c, bool resident)
 {
 	struct f_dfu *f_dfu;
 	int status;
@@ -1278,6 +1310,7 @@ static int dfu_bind_config(struct usb_configuration *c)
 	f_dfu = calloc(sizeof(*f_dfu), 1);
 	if (!f_dfu)
 		return -ENOMEM;
+	f_dfu->resident = resident;
 	f_dfu->usb_function.name = "dfu";
 	f_dfu->usb_function.hs_descriptors = dfu_runtime_descs;
 	f_dfu->usb_function.ss_descriptors = dfu_runtime_descs;
@@ -1298,7 +1331,7 @@ static int dfu_bind_config(struct usb_configuration *c)
 	return status;
 }
 
-int dfu_add(struct usb_configuration *c)
+static int __dfu_add(struct usb_configuration *c, bool resident)
 {
 	int id;
 
@@ -1311,7 +1344,24 @@ int dfu_add(struct usb_configuration *c)
 	debug("%s: cdev: 0x%p gadget:0x%p gadget->ep0: 0x%p\n", __func__,
 	       c->cdev, c->cdev->gadget, c->cdev->gadget->ep0);
 
-	return dfu_bind_config(c);
+	return dfu_bind_config(c, resident);
+}
+
+int dfu_add(struct usb_configuration *c)
+{
+	return __dfu_add(c, false);
 }
 
 DECLARE_GADGET_BIND_CALLBACK(usb_dnl_dfu, dfu_add);
+
+#if IS_ENABLED(CONFIG_USB_FUNCTION_ACM_DFU)
+/*
+ * The resident DFU function of the usbacm console's gadget (f_acm.c, g_dnl.c):
+ * the alternates of the entity list the console built, served while the
+ * console polls the UDC, i.e. at the prompt.
+ */
+int dfu_add_resident(struct usb_configuration *c)
+{
+	return __dfu_add(c, true);
+}
+#endif

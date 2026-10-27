@@ -31,19 +31,22 @@
 	leds {
 		compatible = "gpio-leds";
 
+		/* ready: on once the bootloader has loaded; the OS heartbeat */
 		pwr_led {
-			label = "librecomputer:green";
+			label = "libre-computer:green";
 			color = <LED_COLOR_ID_GREEN>;
 			gpios = <&r_pio 0 10 GPIO_ACTIVE_HIGH>; /* PL10 */
+			linux,default-trigger = "heartbeat";
 			default-state = "on";
 			panic-indicator;
 		};
 
+		/* load: activity */
 		status_led {
-			label = "librecomputer:blue";
+			label = "libre-computer:blue";
 			color = <LED_COLOR_ID_BLUE>;
 			gpios = <&pio 0 7 GPIO_ACTIVE_HIGH>; /* PA7 */
-			linux,default-trigger = "heartbeat";
+			linux,default-trigger = "activity";
 		};
 	};
 

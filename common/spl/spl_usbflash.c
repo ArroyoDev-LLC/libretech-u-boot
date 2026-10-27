@@ -47,6 +47,7 @@
  *                               medium, DFU again
  *   usbflash dfu                DFU again
  *   usbflash boot               the session ends and the boot continues
+ *   usbflash boot prompt        the same, and U-Boot proper does not autoboot
  *   usbflash reset              the family resets the board
  * `usbflash ums mmc <n>` (read-write) is the same UMS writable, and is refused
  * unless the build writes (SPL_USBFLASH_WRITE).  When the session ends and
@@ -131,6 +132,9 @@ static bool usbflash_session_ran;
 
 /* `usbflash boot kernel`: the kernel alt U-Boot proper is to `bootm`, else 0 */
 static ulong usbflash_bootm_addr;
+
+/* `usbflash boot prompt`: U-Boot proper is to skip its autoboot */
+static bool usbflash_prompt;
 
 /* One alternate: dfu_alt_add() arguments, kept intact (usbflash_config()). */
 struct usbflash_alt {
@@ -599,6 +603,9 @@ static void usbflash_mark(int n, const struct usbflash_cmd *cmd)
 	case USBFLASH_BOOT_KERNEL:
 		printf("SPL usbflash: script %d: boot kernel\n", n);
 		break;
+	case USBFLASH_BOOT_PROMPT:
+		printf("SPL usbflash: script %d: boot prompt\n", n);
+		break;
 	case USBFLASH_RESET:
 		printf("SPL usbflash: script %d: reset\n", n);
 		break;
@@ -683,6 +690,11 @@ void spl_usbflash_session(const struct spl_usbflash_family *fam)
 			       usbflash_bootm_addr);
 			break;
 		}
+		if (cmd.verb == USBFLASH_BOOT_PROMPT) {
+			usbflash_prompt = true;
+			puts("SPL usbflash: usbflash boot prompt\n");
+			break;
+		}
 		if (cmd.verb == USBFLASH_RESET) {
 			dfu_free_entities();
 			usbflash_restore();
@@ -731,11 +743,19 @@ void spl_usbflash_fdt_fixup(void *blob)
 	      fdt_setprop_empty(blob, chosen, USBFLASH_FDT_PROP);
 	printf("SPL usbflash: /chosen/" USBFLASH_FDT_PROP " %s (%d)\n",
 	       ret ? "NOT set" : "set", ret);
-	if (ret || !usbflash_bootm_addr)
+	if (ret)
 		return;
-	/* `usbflash boot kernel`: proper boots the FIT in the kernel alt */
-	ret = fdt_setprop_u64(blob, chosen, USBFLASH_FDT_BOOTM,
-			      usbflash_bootm_addr);
-	printf("SPL usbflash: /chosen/" USBFLASH_FDT_BOOTM " 0x%lx %s (%d)\n",
-	       usbflash_bootm_addr, ret ? "NOT set" : "set", ret);
+	if (usbflash_bootm_addr) {
+		/* `usbflash boot kernel`: proper boots the FIT in the kernel alt */
+		ret = fdt_setprop_u64(blob, chosen, USBFLASH_FDT_BOOTM,
+				      usbflash_bootm_addr);
+		printf("SPL usbflash: /chosen/" USBFLASH_FDT_BOOTM " 0x%lx %s (%d)\n",
+		       usbflash_bootm_addr, ret ? "NOT set" : "set", ret);
+	}
+	if (usbflash_prompt) {
+		/* `usbflash boot prompt`: proper skips its autoboot */
+		ret = fdt_setprop_empty(blob, chosen, USBFLASH_FDT_PROMPT);
+		printf("SPL usbflash: /chosen/" USBFLASH_FDT_PROMPT " %s (%d)\n",
+		       ret ? "NOT set" : "set", ret);
+	}
 }

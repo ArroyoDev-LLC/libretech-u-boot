@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
- * U-Boot proper's half of `usbflash boot kernel` (include/usbflash-proto.h).
+ * U-Boot proper's half of `usbflash boot kernel` and `usbflash boot prompt`
+ * (include/usbflash-proto.h).  For `boot prompt` the SPL marks
+ * /chosen/u-boot,spl-usbflash-prompt, and here the autoboot is turned off
+ * (bootdelay -1), so the host reaches the prompt on the USB console.
  *
  * The SPL's USB flash session ends on that line with the host's FIT still in
  * the session's `kernel` alt, and marks the control DTB it hands on with that
@@ -22,10 +25,20 @@
 
 static int usbflash_bootm(void)
 {
+	ofnode chosen = ofnode_path("/chosen");
 	char cmd[64];
 	u64 addr;
 
-	if (ofnode_read_u64(ofnode_path("/chosen"), USBFLASH_FDT_BOOTM, &addr))
+	/*
+	 * `usbflash boot prompt`: the host stays on the line to drive U-Boot
+	 * (its USB console), so there is no autoboot to race it to.
+	 */
+	if (ofnode_read_bool(chosen, USBFLASH_FDT_PROMPT)) {
+		env_set("bootdelay", "-1");
+		printf("usbflash: boot prompt: no autoboot\n");
+		return 0;
+	}
+	if (ofnode_read_u64(chosen, USBFLASH_FDT_BOOTM, &addr))
 		return 0;
 	/* kernel and initramfs from the FIT, the device tree U-Boot runs on */
 	snprintf(cmd, sizeof(cmd), "bootm 0x%llx 0x%llx ${fdtcontroladdr}",

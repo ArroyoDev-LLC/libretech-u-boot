@@ -6,6 +6,7 @@
 
 #include <cli.h>
 #include <command.h>
+#include <console.h>
 #include <stdio.h>
 
 static int do_pause(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
@@ -15,6 +16,13 @@ static int do_pause(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[
 
 	if (argc == 2)
 		message = argv[1];
+
+	/*
+	 * The key that continues is one pressed after the prompt: keys typed
+	 * before it (during the boot, or kept by the autoboot countdown for the
+	 * command line) are discarded, not taken as the answer.
+	 */
+	console_discard_input();
 
 	/* No newline, so it sticks to the bottom of the screen */
 	printf("%s", message);

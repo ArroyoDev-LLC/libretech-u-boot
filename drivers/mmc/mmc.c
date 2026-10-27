@@ -3055,9 +3055,18 @@ retry:
 
 		if (err) {
 #if !defined(CONFIG_XPL_BUILD) || defined(CONFIG_SPL_LIBCOMMON_SUPPORT)
-			if (!quiet)
+			/*
+			 * No answer at all (-ETIMEDOUT) is an empty slot or an
+			 * unfitted module socket -- a state, not an error, and a
+			 * boot scan probes it once per bootdev pass. Any other
+			 * failure is a card that answered wrongly.
+			 */
+			if (!quiet && err != -ETIMEDOUT)
 				log_err("Card did not respond to voltage select! : %d\n",
 					err);
+			else
+				log_debug("Card did not respond to voltage select! : %d\n",
+					  err);
 #endif
 			return -EOPNOTSUPP;
 		}

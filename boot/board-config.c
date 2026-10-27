@@ -982,7 +982,12 @@ static int board_config_import_entries(const char *start, u32 size,
 			continue;
 		}
 
-		printf("board-env-%s: %s=%s\n", tag, key, val);
+		/*
+		 * The value is in the environment now (printenv says it); the
+		 * console gets the count below, not a second copy of the block --
+		 * whose overlays= the overlay pass has already printed.
+		 */
+		debug("board-env-%s: %s=%s\n", tag, key, val);
 		count++;
 
 		p += vlen;
@@ -1008,7 +1013,7 @@ static int board_config_dram_env_import(void)
 	count = board_config_import_entries(env, env_size, &rejected, "dram");
 
 	if (count)
-		printf("board-env-dram: imported %d variables\n", count);
+		printf("board-env-dram: imported %d variable%s\n", count, count == 1 ? "" : "s");
 	if (rejected)
 		printf("board-env-dram: %d entries NOT applied\n", rejected);
 
@@ -1071,7 +1076,7 @@ static int board_config_nor_env_import(void)
 	 * whose entries were refused does not.
 	 */
 	if (count)
-		printf("board-env-nor: imported %d variables\n", count);
+		printf("board-env-nor: imported %d variable%s\n", count, count == 1 ? "" : "s");
 	if (rejected)
 		printf("board-env-nor: %d entries NOT applied\n", rejected);
 
@@ -1101,8 +1106,13 @@ int board_config_env_import(void)
 }
 
 #if IS_ENABLED(CONFIG_BOARD_CONFIG_OVERLAYS)
+__weak void board_config_begin(void)
+{
+}
+
 int fdtdec_board_setup(const void *fdt_blob)
 {
+	board_config_begin();
 #if IS_ENABLED(CONFIG_BOARD_CONFIG_DRAM)
 	if (board_config_dram_overlays((void *)fdt_blob))
 		return 0;

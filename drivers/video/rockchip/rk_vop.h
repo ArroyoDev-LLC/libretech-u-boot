@@ -88,6 +88,16 @@ int rk_vop_probe(struct udevice *dev);
 int rk_vop_bind(struct udevice *dev);
 
 /**
+ * rk_vop_remove() - put the VOP in standby, so it stops fetching
+ *
+ * For drivers flagged DM_FLAG_OS_PREPARE: removed before the OS starts.
+ *
+ * @dev:	device
+ * Return: 0 (always OK)
+ */
+int rk_vop_remove(struct udevice *dev);
+
+/**
  * rk_vop_probe_regulators() - probe (autoset + enable) regulators
  *
  * Probes a list of regulators by performing autoset and enable

@@ -65,7 +65,9 @@
 	led-blue {
 		compatible = "gpio-leds";
 
+		/* load: activity */
 		led {
+			label = "libre-computer:blue";
 			color = <LED_COLOR_ID_BLUE>;
 			function = LED_FUNCTION_ACTIVITY;
 			linux,default-trigger = "activity";
@@ -76,10 +78,13 @@
 	led-green {
 		compatible = "gpio-leds";
 
+		/* ready: on once the bootloader has loaded; the OS heartbeat */
 		led {
+			label = "libre-computer:green";
 			color = <LED_COLOR_ID_GREEN>;
 			function = LED_FUNCTION_STATUS;
-			linux,default-trigger = "default-on";
+			linux,default-trigger = "heartbeat";
+			default-state = "on";
 			gpios = <&gpio GPIOX_3 GPIO_ACTIVE_LOW>;
 		};
 	};
@@ -87,9 +92,12 @@
 	led-orange {
 		compatible = "gpio-leds";
 
+		/* fault: cleared once a stage has loaded, lit on panic */
 		led {
-			color = <LED_COLOR_ID_AMBER>;
-			function = LED_FUNCTION_STANDBY;
+			label = "libre-computer:orange";
+			color = <LED_COLOR_ID_ORANGE>;
+			function = LED_FUNCTION_FAULT;
+			default-state = "off";
 			gpios = <&gpio GPIOX_6 GPIO_ACTIVE_LOW>;
 			panic-indicator;
 		};

@@ -100,6 +100,28 @@ int do_print_info(struct udevice *dev)
 	printf("Voltage:     %2d.%03d V\n", mv / 1000, mv % 1000);
 	printf("Current:     %2d.%03d A\n", ma / 1000, ma % 1000);
 
+	/*
+	 * What the partner offered decides what this port can ask of it: a
+	 * data-role swap needs DATA_SWAP in its first PDO, and none of it
+	 * applies without a contract (Type-C current only).
+	 */
+	if (pwr_role == TYPEC_SINK) {
+		const u32 *caps;
+		bool contract;
+		unsigned int i, n = tcpm_get_source_caps(dev, &caps, &contract);
+
+		printf("Contract:    %s\n", contract ? "explicit" : "none");
+		printf("Source PDOs:");
+		for (i = 0; i < n; i++)
+			printf(" %08x", caps[i]);
+		printf("%s\n", n ? "" : " none");
+		if (n)
+			printf("PDO1 flags: %s%s%s\n",
+			       caps[0] & PDO_FIXED_DATA_SWAP ? " data-swap" : "",
+			       caps[0] & PDO_FIXED_USB_COMM ? " usb-comm" : "",
+			       caps[0] & PDO_FIXED_DUAL_ROLE ? " dual-role" : "");
+	}
+
 	return 0;
 }
 
@@ -244,11 +266,43 @@ static int do_dp(struct cmd_tbl *cmdtp, int flag, int argc,
 	return CMD_RET_SUCCESS;
 }
 
+static int do_attach(struct cmd_tbl *cmdtp, int flag, int argc,
+		     char *const argv[])
+{
+	enum tcpm_attach_role role = TCPM_ATTACH_DRP;
+	unsigned int timeout_ms = 5000;
+	int ret;
+
+	if (!currdev) {
+		printf("First, set the TCPM device!\n");
+		return CMD_RET_USAGE;
+	}
+
+	if (argc > 1) {
+		if (!strcmp(argv[1], "sink"))
+			role = TCPM_ATTACH_SINK;
+		else if (!strcmp(argv[1], "source"))
+			role = TCPM_ATTACH_SOURCE;
+		else if (strcmp(argv[1], "drp"))
+			return CMD_RET_USAGE;
+	}
+	if (argc > 2)
+		timeout_ms = dectoul(argv[2], NULL);
+
+	ret = tcpm_force_attach(currdev, role, timeout_ms);
+	if (ret)
+		printf("TCPM attach: %d (%s)\n", ret, errno_str(ret));
+	do_print_info(currdev);
+
+	return ret ? CMD_RET_FAILURE : CMD_RET_SUCCESS;
+}
+
 static struct cmd_tbl subcmd[] = {
 	U_BOOT_CMD_MKENT(dev, 2, 1, do_dev, "", ""),
 	U_BOOT_CMD_MKENT(list, 1, 1, do_list, "", ""),
 	U_BOOT_CMD_MKENT(info, 1, 1, do_info, "", ""),
 	U_BOOT_CMD_MKENT(dp, 2, 1, do_dp, "", ""),
+	U_BOOT_CMD_MKENT(attach, 3, 1, do_attach, "", ""),
 };
 
 static int do_tcpm(struct cmd_tbl *cmdtp, int flag, int argc,
@@ -275,6 +329,8 @@ U_BOOT_CMD(tcpm, CONFIG_SYS_MAXARGS, 1, do_tcpm,
 	"tcpm info          - dump information\n"
 	"tcpm dp            - discover the partner's DisplayPort alt mode\n"
 	"tcpm dp enter      - and enter it as a source\n"
+	"tcpm attach [drp|sink|source] [ms] - restart the port's attach and run it\n"
+	"                     to ready, tracing each state (default drp, 5000 ms)\n"
 	"tcpm dp exit [-f]  - leave it, for a partner left stuck in alt mode\n"
 	"                     (-f sends one even when this port has no record,\n"
 	"                      e.g. a partner left in the mode by a prior boot)\n"

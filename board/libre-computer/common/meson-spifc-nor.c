@@ -28,6 +28,7 @@
 
 #define REG_CMD			0x00
 #define REG_CTRL		0x08
+#define REG_CLOCK		0x18
 #define REG_USER		0x1c
 #define REG_USER1		0x20
 #define REG_USER4		0x2c
@@ -150,6 +151,20 @@ static int spifc_chunk(const u8 *dout, u8 *din, int len, bool keep_cs)
 bool board_nor_clk_enabled(void)
 {
 	return !!(readl(HHI_GCLK_MPEG0) & BIT(30));
+}
+
+/*
+ * Program the SPI clock divider: clk81 / (n + 1), with
+ * drivers/spi/meson_spifc.c meson_spifc_set_speed()'s field formula -- DIV n
+ * [17:12], CNT_HIGH (n + 1) / 2 - 1 [11:6], CNT_LOW n [5:0].
+ *
+ * For a stage that has changed clk81 since the BootROM set the divider: the
+ * GX TPL moves clk81 to its run rate before it reads NOR, so the BootROM's
+ * divider no longer names the clock the part sees.
+ */
+void board_nor_set_div(u32 n)
+{
+	spifc_write(REG_CLOCK, (n << 12) | (((n + 1) / 2 - 1) << 6) | n);
 }
 
 /*

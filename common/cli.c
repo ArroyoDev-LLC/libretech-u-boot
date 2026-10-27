@@ -299,6 +299,9 @@ void cli_loop(void)
 	if (IS_ENABLED(CONFIG_CMDLINE_FLUSH_STDIN))
 		console_flush_stdin();
 
+	/* Keys the autoboot countdown kept are typed at this prompt. */
+	console_kept_keys_to_cli();
+
 	/*
 	 * Residual SCMI (CONFIG_SCMI_RESIDUAL_DIAG): hush
 	 * parse_file_outer never emitted => on Solitude after PREBOOT

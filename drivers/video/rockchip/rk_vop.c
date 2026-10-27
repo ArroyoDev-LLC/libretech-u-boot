@@ -26,6 +26,7 @@
 #include <efi.h>
 #include <efi_loader.h>
 #include <linux/bitops.h>
+#include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/string.h>
 #include <power/regulator.h>
@@ -1468,6 +1469,29 @@ int rk_vop_probe(struct udevice *dev)
 	video_set_flush_dcache(dev, 1);
 
 	return ret;
+}
+
+int rk_vop_remove(struct udevice *dev)
+{
+	struct rk_vop_priv *priv = dev_get_priv(dev);
+	struct rk3288_vop *regs = priv->regs;
+
+	if (!regs)
+		return 0;
+
+	/*
+	 * Stop scanning out before the OS starts. A VOP left running keeps
+	 * fetching the framebuffer over AXI, and Linux later asks the PMU to
+	 * idle its power domain before its own VOP driver has bound: the
+	 * bus idle cannot complete with a master streaming, and on RK3399
+	 * the kernel logged "failed to set idle on domain 'vopb'" and hung.
+	 * Standby takes effect at the end of the current frame and stops the
+	 * fetch; 50 ms covers one frame at any rate down to 20 Hz.
+	 */
+	setbits_le32(&regs->sys_ctrl, V_STANDBY_EN(1));
+	mdelay(50);
+
+	return 0;
 }
 
 int rk_vop_bind(struct udevice *dev)

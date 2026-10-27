@@ -203,6 +203,10 @@ static int do_usbflash(struct cmd_tbl *cmdtp, int flag, int argc,
 		env_set("usbflash_next",
 			"bootm ${kernel_addr_r} ${kernel_addr_r} ${fdtcontroladdr}");
 		break;
+	case USBFLASH_BOOT_PROMPT:
+		/* the session runs from preboot, before the autoboot reads bootdelay */
+		env_set("usbflash_next", "setenv bootdelay -1");
+		break;
 	case USBFLASH_RESET:
 		env_set("usbflash_next", "reset");
 		break;
@@ -213,7 +217,7 @@ static int do_usbflash(struct cmd_tbl *cmdtp, int flag, int argc,
 
 U_BOOT_CMD(usbflash, 6, 0, do_usbflash,
 	   "flash-session step, for the next DFU DETACH",
-	   "ums mmc <n> [ro] | dfu | boot [kernel] | reset");
+	   "ums mmc <n> [ro] | dfu | boot [kernel|prompt] | reset");
 
 /*
  * Refuse a `usbflash` line the protocol does not accept at the DFU manifest
@@ -651,6 +655,22 @@ int board_early_init_r(void)
 	gxl_ao_wdt_handoff_start();
 	return 0;
 }
+
+#if IS_ENABLED(CONFIG_BOARD_CONFIG_OVERLAYS)
+/*
+ * U-Boot proper's first board code: the NOR config's overlays are read and
+ * applied before relocation, at initcall #2, long before board_early_init_r()
+ * starts the pet. On a NOR boot the chain reaches here at about 3.3 s of the
+ * ROM's 5000 ms (the SPL's LZMA of U-Boot alone takes 2.44 s), and the
+ * overlay work then ran the watchdog out: AML-S805X-AC-V2 reset after the
+ * first of two overlays, every 5.87 s. One bare store, as every pet here: the
+ * cyclic one starts in board_early_init_r().
+ */
+void board_config_begin(void)
+{
+	writel(0, GXL_AO_WDT_RESET);
+}
+#endif
 
 /*
  * The raw AO watchdog's half of the platform hand-off, called ONCE by

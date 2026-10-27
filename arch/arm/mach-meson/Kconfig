@@ -638,6 +638,22 @@ config SPL_MESON_GX_BOOTLOG
 	  CDC ACM console when that console starts (SPL_USB_GADGET_DNL_ACM), so
 	  a host with no serial cable sees the boot from the TPL's first line.
 
+config MESON_GX_XPL_VERBOSE
+	bool "GX chain: print the TPL / SPL bring-up diagnostics"
+	depends on MESON_GX_XPL_CHAIN
+	help
+	  Off, a good boot prints what the board+bootloader policy's "Boot
+	  console output" asks of these stages: each stage's banner and chip id,
+	  the DRAM result, the boot medium, the SC start.  A failure always
+	  prints, whatever this says.
+
+	  On, they also print the bring-up diagnostics: the first-instruction
+	  "TPL" / "SPL" marks, the TPL's progress marks, the DRAM clock and
+	  training lines, the security self-check and DOS-capability words, the
+	  TPL -> SPL handoff (BOOT, JMP, S2), and the SC upload's detail
+	  (fetch, sha256, mailbox, OSPM / PSCI words). Instrument and
+	  experiment builds that parse those lines need it.
+
 config MESON_GX_BOOTLOG_ADDR
 	hex "DRAM address of the GX boot log"
 	depends on TPL_MESON_GX_BOOTLOG || SPL_MESON_GX_BOOTLOG
@@ -779,6 +795,31 @@ config MESON_GX_DMC_DUMP
 	  TPL->SPL chain it lands in PASS 1, on a rig that cannot complete a
 	  pass-2 FIT transfer at all.  Say Y on a bring-up rig; it costs code
 	  in a stage with a hard ceiling and buys a diagnostic.
+
+config MESON_GX_LOAD_NOR
+	bool "Boot from SPI NOR: TPL reads SPL, SPL reads the FIT, from NOR"
+	depends on MESON_GX_XPL_CHAIN
+	help
+	  A board the BootROM booted from SPI NOR reads every later stage from
+	  NOR too: the TPL reads the DRAM stage (tpl-load-nor.c), and the DRAM
+	  stage reads the FIT (spl-load-nor.c, an SPL_LOAD_IMAGE_METHOD for
+	  BOOT_DEVICE_SPI).
+
+	  Both read through the bare SPIFC reader
+	  (board/libre-computer/common/meson-spifc-nor.c: RDID and READ only),
+	  not the SPI uclass: no DM in the TPL, no SPI flash stack and no SPI
+	  write path in either stage, as the SPL flash session already
+	  requires.  The image is u-boot-meson-with-spl.bin at
+	  MESON_GX_NOR_IMAGE_OFFSET, in the layout binman gives every medium.
+
+config MESON_GX_NOR_IMAGE_OFFSET
+	hex "Byte offset of the combined image in SPI NOR"
+	depends on MESON_GX_LOAD_NOR
+	default 0x0
+	help
+	  Where u-boot-meson-with-spl.bin starts in SPI NOR.  Zero: the BootROM
+	  reads the first stage from the start of the part, as from an eMMC
+	  boot partition.
 
 config TPL_MESON_GX_NOR_PROBE
 	bool "TPL reads the SPI NOR JEDEC ID and one block (READ ONLY)"

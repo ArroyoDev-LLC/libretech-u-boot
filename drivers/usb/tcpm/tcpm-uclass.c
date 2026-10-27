@@ -71,6 +71,19 @@ int tcpm_get_pd_rev(struct udevice *dev)
 	return port->negotiated_rev;
 }
 
+unsigned int tcpm_get_source_caps(struct udevice *dev, const u32 **caps,
+				  bool *explicit_contract)
+{
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+
+	tcpm_settle(dev);
+
+	*caps = port->source_caps;
+	*explicit_contract = port->explicit_contract;
+
+	return port->nr_source_caps;
+}
+
 enum typec_role tcpm_get_pwr_role(struct udevice *dev)
 {
 	struct tcpm_port *port = dev_get_uclass_plat(dev);

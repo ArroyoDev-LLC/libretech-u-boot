@@ -105,6 +105,7 @@ static inline void tcpm_reset_event_cnt(struct udevice *dev)
 {
 	struct tcpm_port *port = dev_get_uclass_plat(dev);
 
+	port->poll_event_count++;
 	port->poll_event_deadline = timer_get_us() +
 				    TCPM_POLL_EVENT_TIME_OUT * 1000ULL;
 }
@@ -176,6 +177,8 @@ static enum typec_cc_status tcpm_rp_cc(struct tcpm_port *port)
 }
 
 static void tcpm_check_and_run_delayed_work(struct udevice *dev);
+static void tcpm_set_state(struct udevice *dev, enum tcpm_state state,
+			   unsigned int delay_ms);
 static void tcpm_ams_start(struct udevice *dev);
 static void tcpm_ams_finish(struct udevice *dev);
 
@@ -257,6 +260,10 @@ static int tcpm_pd_transmit(struct udevice *dev,
 			le16_to_cpu(msg->header));
 	else
 		dev_dbg(dev, "TCPM: PD TX, type: %#x\n", type);
+	if (port->attach_trace)
+		printf("[%5lu] %s: PD TX type %d hdr %04x\n",
+		       get_timer(port->trace_t0), dev->name, type,
+		       msg ? le16_to_cpu(msg->header) : 0);
 
 	ret = tcpm_wake(dev);
 	if (ret < 0)
@@ -305,6 +312,11 @@ void tcpm_pd_transmit_complete(struct udevice *dev,
 	struct tcpm_port *port = dev_get_uclass_plat(dev);
 
 	dev_dbg(dev, "TCPM: PD TX complete, status: %u\n", status);
+	if (port->attach_trace)
+		printf("[%5lu] %s: PD TX done: %s\n", get_timer(port->trace_t0),
+		       dev->name, status == TCPC_TX_SUCCESS ? "GoodCRC received" :
+		       status == TCPC_TX_DISCARDED ? "discarded" :
+		       "FAILED (no GoodCRC after retries)");
 	tcpm_reset_event_cnt(dev);
 	port->tx_status = status;
 	port->tx_complete = true;
@@ -479,6 +491,21 @@ static void tcpm_check_and_run_delayed_work(struct udevice *dev)
 {
 	struct tcpm_port *port = dev_get_uclass_plat(dev);
 
+	/*
+	 * A source-only toggle round (see SNK_ATTACH_WAIT) ends when it
+	 * attaches, or after PD_T_ATTACH_WAIT_MAX with no partner Rd, when the
+	 * port goes back to toggling as a dual-role port.
+	 */
+	if (port->src_toggle_until) {
+		if (port->state != TOGGLING && port->state != SRC_UNATTACHED) {
+			port->src_toggle_until = 0;
+		} else if (get_timer(0) > port->src_toggle_until) {
+			port->src_toggle_until = 0;
+			tcpm_set_state(dev, SNK_UNATTACHED, 0);
+			return;
+		}
+	}
+
 	/* no delayed state changes scheduled */
 	if (port->delay_target == 0)
 		return;
@@ -516,6 +543,10 @@ static void tcpm_set_state(struct udevice *dev, enum tcpm_state state,
 	} else {
 		dev_dbg(dev, "TCPM: state change %s -> %s\n",
 			tcpm_states[port->state], tcpm_states[state]);
+		if (port->attach_trace && port->state != state)
+			printf("[%5lu] %s: %s -> %s\n", get_timer(port->trace_t0),
+			       dev->name, tcpm_states[port->state],
+			       tcpm_states[state]);
 		port->delayed_state = INVALID_STATE;
 		port->prev_state = port->state;
 		port->state = state;
@@ -876,6 +907,10 @@ static void tcpm_pd_ctrl_request(struct udevice *dev,
 
 			tcpm_set_state(dev, next_state, 0);
 			break;
+		case DR_SWAP_SEND:
+			/* The partner keeps its data role; so do we. */
+			tcpm_set_state(dev, ready_state(port), 0);
+			break;
 		default:
 			break;
 		}
@@ -884,6 +919,9 @@ static void tcpm_pd_ctrl_request(struct udevice *dev,
 		switch (port->state) {
 		case SNK_NEGOTIATE_CAPABILITIES:
 			tcpm_set_state(dev, SNK_TRANSITION_SINK, 0);
+			break;
+		case DR_SWAP_SEND:
+			tcpm_set_state(dev, DR_SWAP_CHANGE_DR, 0);
 			break;
 		case SOFT_RESET_SEND:
 			port->message_id = 0;
@@ -970,6 +1008,26 @@ static void tcpm_pd_rx_handler(struct udevice *dev,
 		 */
 		remote_is_host = !!(le16_to_cpu(msg->header) & PD_HEADER_DATA_ROLE);
 		local_is_host = port->data_role == TYPEC_HOST;
+
+		/*
+		 * On the power inlet error recovery opens CC, the source drops
+		 * VBUS and the board loses power. A mismatch there is what a warm
+		 * reset leaves behind: the source kept the contract and the data
+		 * role an earlier DR_Swap gave it, while this port restarted as
+		 * the device. Take the role the partner's header leaves free
+		 * instead. Measured on ROC-RK3399-PC Type-C0 with a DP monitor:
+		 * `reset`, then DisplayPort discovery, power-cycled the board.
+		 */
+		if (remote_is_host == local_is_host &&
+		    port->port_type == TYPEC_PORT_SNK && !port->self_powered) {
+			printf("%s: TCPM: partner is the %s; taking the %s data role\n",
+			       dev->name, remote_is_host ? "host" : "device",
+			       remote_is_host ? "device" : "host");
+			tcpm_set_roles(dev, true, port->pwr_role,
+				       remote_is_host ? TYPEC_DEVICE : TYPEC_HOST);
+			local_is_host = !remote_is_host;
+		}
+
 		if (remote_is_host == local_is_host) {
 			dev_err(dev, "TCPM: data role mismatch, initiating error recovery (hdr=%04x type=%u cnt=%u msgid=%u remote=%s local=%s state=%s)\n",
 				le16_to_cpu(msg->header), type, cnt, msgid,
@@ -988,6 +1046,13 @@ static void tcpm_pd_rx_handler(struct udevice *dev,
 
 void tcpm_pd_receive(struct udevice *dev, const struct pd_message *msg)
 {
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+
+	if (port->attach_trace)
+		printf("[%5lu] %s: PD RX hdr %04x (%u objects)\n",
+		       get_timer(port->trace_t0), dev->name,
+		       le16_to_cpu(msg->header),
+		       pd_header_cnt_le(msg->header));
 	tcpm_reset_event_cnt(dev);
 	tcpm_pd_rx_handler(dev, msg);
 }
@@ -1347,7 +1412,9 @@ static bool tcpm_start_toggling(struct udevice *dev, enum typec_cc_status cc)
 		return false;
 
 	dev_dbg(dev, "TCPM: Start toggling\n");
-	ret = drvops->start_toggling(dev, port->port_type, cc);
+	/* During a source-only round only the partner's Rd can end the toggle */
+	ret = drvops->start_toggling(dev, port->src_toggle_until ?
+				     TYPEC_PORT_SRC : port->port_type, cc);
 	return ret == 0;
 }
 
@@ -1418,6 +1485,21 @@ static int tcpm_src_attach(struct udevice *dev)
 			goto out_disable_pd;
 	}
 
+	/*
+	 * Attached.SRC requires VBUS at vSafe0V before the source drives it.
+	 * Something already on VBUS is a second source -- a DRP partner that
+	 * attached as source too -- and closing the board's switch onto it
+	 * ties two supplies together: on ROC-RK3399-PC Type-C1 that is the
+	 * SY6280 (U14) output, which limits forward current only, back-driven
+	 * from the partner into VCC_SYS. Refuse, and let the port re-attach.
+	 */
+	if (drvops->get_vbus(dev)) {
+		printf("%s: TCPM: VBUS already present at source attach -- not driving it\n",
+		       dev->name);
+		ret = -EBUSY;
+		goto out_disable_vconn;
+	}
+
 	ret = tcpm_set_vbus(dev, true);
 	if (ret < 0)
 		goto out_disable_vconn;
@@ -1456,6 +1538,7 @@ static void tcpm_reset_port(struct udevice *dev)
 	tcpm_timer_uninit(dev);
 	tcpm_typec_disconnect(port);
 	tcpm_reset_event_cnt(dev);
+	port->inlet_soft_reset_done = false;
 	port->wait_dr_swap_message = false;
 	port->attached = false;
 	port->pd_capable = false;
@@ -1822,6 +1905,34 @@ static void run_state_machine(struct udevice *dev)
 			tcpm_set_state(dev, SRC_UNATTACHED, PD_T_DRP_SRC);
 		break;
 	case SNK_ATTACH_WAIT:
+		/*
+		 * Every CC edge re-enters this state and cancels whichever
+		 * debounce was pending, so a DRP partner whose Rp blinks
+		 * faster than PD_T_CC_DEBOUNCE holds the port here for good:
+		 * measured on ROC-RK3399-PC's front Type-C1, Rp on/off every
+		 * ~0.15 s, no VBUS, SNK_ATTACH_WAIT for minutes. Bound it, and
+		 * on a dual-role port retry from the source side, which meets
+		 * such a partner in its Rd phase.
+		 */
+		if (port->prev_state != SNK_ATTACH_WAIT)
+			port->attach_wait_start = get_timer(0);
+		else if (get_timer(port->attach_wait_start) > PD_T_ATTACH_WAIT_MAX) {
+			printf("%s: TCPM: no attach debounce in %u ms (cc1 %d cc2 %d), retrying as %s\n",
+			       dev->name, PD_T_ATTACH_WAIT_MAX, port->cc1,
+			       port->cc2, port->port_type == TYPEC_PORT_DRP ?
+			       "source" : "sink");
+			/*
+			 * A dual-role toggle stops at the first pull-up it
+			 * sees, and such a partner always shows one: the
+			 * retry toggles source-only, for one bounded round.
+			 */
+			if (port->port_type == TYPEC_PORT_DRP)
+				port->src_toggle_until = get_timer(0) +
+							 PD_T_ATTACH_WAIT_MAX;
+			tcpm_set_state(dev, port->port_type == TYPEC_PORT_DRP ?
+				       SRC_UNATTACHED : SNK_UNATTACHED, 0);
+			break;
+		}
 		if ((port->cc1 == TYPEC_CC_OPEN &&
 		     port->cc2 != TYPEC_CC_OPEN) ||
 		    (port->cc1 != TYPEC_CC_OPEN &&
@@ -1892,8 +2003,20 @@ static void run_state_machine(struct udevice *dev)
 		 * were already in a stable contract before this boot.
 		 * Do this only once.
 		 */
-		if (port->vbus_never_low) {
+		if (port->vbus_never_low ||
+		    (port->port_type == TYPEC_PORT_SNK && !port->self_powered &&
+		     !port->inlet_soft_reset_done)) {
+			/*
+			 * The power inlet cannot Hard Reset (HARD_RESET_SEND
+			 * refuses), so a Soft Reset is the only way it can ask
+			 * the source to send its capabilities again -- once
+			 * per attach. Measured on ROC-RK3399-PC Type-C0: after
+			 * a re-attach with VBUS up the port settled with no
+			 * contract; a warm reset, which takes this branch via
+			 * vbus_never_low, got 15 V / 3 A.
+			 */
 			port->vbus_never_low = false;
+			port->inlet_soft_reset_done = true;
 			tcpm_set_state(dev, SOFT_RESET_SEND,
 				       PD_T_SINK_WAIT_CAP);
 		} else {
@@ -1933,6 +2056,21 @@ static void run_state_machine(struct udevice *dev)
 
 	/* Hard_Reset states */
 	case HARD_RESET_SEND:
+		/*
+		 * The board's power inlet: a sink-only port that is not
+		 * self-powered. A Hard Reset makes the source take VBUS through
+		 * vSafe0V, and on ROC-RK3399-PC Type-C0 nothing else holds the
+		 * rails up (VBUS_TYPEC0 -> SC8903 -> SYS_12V), so it is a power-on
+		 * reset. hard_reset_state() already avoids it before a contract;
+		 * this is the one place every path to it passes through.
+		 */
+		if (port->port_type == TYPEC_PORT_SNK && !port->self_powered) {
+			printf("%s: TCPM: Hard Reset suppressed -- this port powers the board\n",
+			       dev->name);
+			port->wait_dr_swap_message = false;
+			tcpm_set_state(dev, SNK_READY, 0);
+			break;
+		}
 		tcpm_pd_transmit(dev, TCPC_TX_HARD_RESET, NULL);
 		tcpm_set_state(dev, HARD_RESET_START, 0);
 		port->wait_dr_swap_message = false;
@@ -1955,7 +2093,8 @@ static void run_state_machine(struct udevice *dev)
 			tcpm_set_state(dev, SNK_HARD_RESET_SINK_OFF, 0);
 		break;
 	case SRC_HARD_RESET_VBUS_OFF:
-		tcpm_set_vconn(dev, true);
+		/* PD 7.1.5: the source stops driving VCONN (Linux: false) */
+		tcpm_set_vconn(dev, false);
 		tcpm_set_vbus(dev, false);
 		tcpm_set_roles(dev, port->self_powered, TYPEC_SOURCE,
 			       TYPEC_HOST);
@@ -2024,6 +2163,23 @@ static void run_state_machine(struct udevice *dev)
 			tcpm_set_state(dev, SNK_WAIT_CAPABILITIES, 0);
 		break;
 	case SOFT_RESET_SEND:
+		/*
+		 * Warm start inside a session where this sink had taken the
+		 * data host role: the partner is the device, and a Soft_Reset
+		 * from "a device" is a data role mismatch it answers with
+		 * error recovery -- VBUS off, which on ROC-RK3399-PC's inlet
+		 * was a power-on reset after every warm `reset` with the
+		 * monitor in DisplayPort mode. Speak as the host it expects.
+		 */
+		if (port->prior_data_host) {
+			port->prior_data_host = false;
+			if (port->pwr_role == TYPEC_SINK &&
+			    port->data_role == TYPEC_DEVICE) {
+				printf("%s: TCPM: warm start in a session as data host; keeping it\n",
+				       dev->name);
+				tcpm_set_roles(dev, true, TYPEC_SINK, TYPEC_HOST);
+			}
+		}
 		port->message_id = 0;
 		port->rx_msgid = -1;
 		if (tcpm_pd_send_control(dev, PD_CTRL_SOFT_RESET))
@@ -2037,6 +2193,22 @@ static void run_state_machine(struct udevice *dev)
 	case DR_SWAP_ACCEPT:
 		tcpm_pd_send_control(dev, PD_CTRL_ACCEPT);
 		tcpm_set_state_cond(dev, DR_SWAP_CHANGE_DR, 0);
+		break;
+	case DR_SWAP_SEND:
+		/*
+		 * Our own request, the half Linux has and this port lacked. The
+		 * answer arrives through tcpm_pd_ctrl_request(): Accept goes to
+		 * DR_SWAP_CHANGE_DR, Reject / Wait / Not_Supported back to
+		 * ready. Silence is the timeout below.
+		 */
+		if (tcpm_pd_send_control(dev, PD_CTRL_DR_SWAP))
+			tcpm_set_state(dev, ready_state(port), 0);
+		else
+			tcpm_set_state_cond(dev, DR_SWAP_SEND_TIMEOUT,
+					    PD_T_SENDER_RESPONSE);
+		break;
+	case DR_SWAP_SEND_TIMEOUT:
+		tcpm_set_state(dev, ready_state(port), 0);
 		break;
 	case DR_SWAP_CHANGE_DR:
 		if (port->data_role == TYPEC_HOST) {
@@ -2280,6 +2452,7 @@ static void _tcpm_pd_vbus_off(struct udevice *dev)
 	dev_dbg(dev, "TCPM: VBUS off event\n");
 	port->vbus_present = false;
 	port->vbus_never_low = false;
+	port->prior_data_host = false;
 	switch (port->state) {
 	case SNK_HARD_RESET_SINK_OFF:
 		tcpm_set_state(dev, SNK_HARD_RESET_WAIT_VBUS, 0);
@@ -2375,6 +2548,17 @@ static void tcpm_init(struct udevice *dev)
 	port->vbus_present = drvops->get_vbus(dev);
 	if (port->vbus_present)
 		port->vbus_never_low = true;
+
+	port->prior_data_host = false;
+	if (port->vbus_present && drvops->get_prior_roles &&
+	    port->typec_data != TYPEC_PORT_DATA_UFP) {
+		enum typec_data_role data;
+		enum typec_role role;
+
+		if (!drvops->get_prior_roles(dev, &role, &data) &&
+		    role == TYPEC_SINK && data == TYPEC_HOST)
+			port->prior_data_host = true;
+	}
 
 	/*
 	 * 1. When vbus_present is true, voltage on VBUS is already at VSAFE5V.
@@ -2667,6 +2851,52 @@ static int tcpm_vdm_ack(struct udevice *dev, const u32 *vdo, unsigned int cnt,
 	return 0;
 }
 
+/*
+ * tcpm_request_host_role() - documented in include/usb/tcpm.h
+ *
+ * Not called from tcpm_wait_ready(), although that is where the role is
+ * known to be missing, because every VDM exchange calls tcpm_wait_ready()
+ * and a successful swap runs DR_SWAP_CHANGE_DR, which clears port->dp. Done
+ * from inside typec_dp_discover() that erased the port VDO discovery had
+ * just read: measured, 9 of 10 boots then failed with "no pin assignment
+ * in common (port 00000000, ...)" and none entered DisplayPort.
+ */
+void tcpm_request_host_role(struct udevice *dev)
+{
+	const struct dm_tcpm_ops *drvops = dev_get_driver_ops(dev);
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+	ulong start;
+
+	if (port->typec_data == TYPEC_PORT_DATA_UFP ||
+	    port->data_role == TYPEC_HOST ||
+	    port->pwr_role != TYPEC_SINK ||
+	    !port->attached || port->state != SNK_READY ||
+	    !port->explicit_contract || !port->nr_source_caps ||
+	    pdo_type(port->source_caps[0]) != PDO_TYPE_FIXED ||
+	    !(port->source_caps[0] & PDO_FIXED_DATA_SWAP))
+		return;
+
+	tcpm_set_state(dev, DR_SWAP_SEND, 0);
+
+	/*
+	 * Three times tSenderResponse: the state machine owns the real timeout
+	 * (DR_SWAP_SEND_TIMEOUT), this only bounds the pump if the port goes
+	 * somewhere the exchange does not return from (a hard reset, a detach).
+	 */
+	start = get_timer(0);
+	do {
+		drvops->poll_event(dev);
+		udelay(500);
+		tcpm_check_and_run_delayed_work(dev);
+	} while ((port->state == DR_SWAP_SEND ||
+		  port->state == DR_SWAP_CHANGE_DR) &&
+		 get_timer(start) < PD_T_SENDER_RESPONSE * 3);
+
+	if (port->data_role != TYPEC_HOST)
+		dev_warn(dev, "TCPM: requested DR_Swap, still UFP (state %s)\n",
+			 tcpm_states[port->state]);
+}
+
 /**
  * tcpm_wait_ready() - run the port until it can carry a message
  *
@@ -2828,6 +3058,85 @@ ready:
 			port->wait_dr_swap_message ?
 			"advertised a data swap but did not send one" :
 			"cannot swap the data role");
+
+	return 0;
+}
+
+/*
+ * tcpm_force_attach() - documented in include/usb/tcpm.h
+ */
+int tcpm_force_attach(struct udevice *dev, enum tcpm_attach_role role,
+		      unsigned int timeout_ms)
+{
+	const struct dm_tcpm_ops *drvops = dev_get_driver_ops(dev);
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+	enum typec_port_type saved_type = port->port_type;
+	bool inlet = port->typec_type == TYPEC_PORT_SNK && !port->self_powered;
+	ulong start;
+	int ret;
+
+	if (role == TCPM_ATTACH_SOURCE && port->typec_type == TYPEC_PORT_SNK)
+		return -EOPNOTSUPP;
+	if (role == TCPM_ATTACH_SINK && port->typec_type == TYPEC_PORT_SRC)
+		return -EOPNOTSUPP;
+
+	/* The probe-time pump, if it is still pending, finishes first. */
+	tcpm_settle(dev);
+	ret = tcpm_wake(dev);
+	if (ret < 0)
+		return ret;
+
+	port->trace_t0 = get_timer(0);
+	port->attach_trace = true;
+	printf("[%5lu] %s: attach as %s from %s (%s)\n", 0UL, dev->name,
+	       role == TCPM_ATTACH_SOURCE ? "source" :
+	       role == TCPM_ATTACH_SINK ? "sink" : "dual-role",
+	       tcpm_states[port->state],
+	       inlet ? "power inlet: no detach" : "detach first");
+
+	if (role == TCPM_ATTACH_SOURCE)
+		port->port_type = TYPEC_PORT_SRC;
+	else if (role == TCPM_ATTACH_SINK)
+		port->port_type = TYPEC_PORT_SNK;
+
+	/*
+	 * A port that does not power the board leaves through Type-C
+	 * ErrorRecovery: CC open for PD_T_ERROR_RECOVERY, so the partner sees a
+	 * detach and starts its own attach from scratch, then the default
+	 * unattached state for the role asked. The power inlet cannot open CC
+	 * (that is the supply going away): it restarts its sink attach with Rd
+	 * held, and the HARD_RESET_SEND guard keeps it from resetting the
+	 * source.
+	 */
+	if (inlet)
+		tcpm_set_state(dev, SNK_UNATTACHED, 0);
+	else
+		tcpm_set_state(dev, ERROR_RECOVERY, 0);
+
+	start = get_timer(0);
+	do {
+		drvops->poll_event(dev);
+		udelay(500);
+		tcpm_check_and_run_delayed_work(dev);
+		if (port->attached &&
+		    (port->state == SNK_READY || port->state == SRC_READY) &&
+		    (port->data_role == TYPEC_HOST || !port->wait_dr_swap_message))
+			break;
+	} while (get_timer(start) < timeout_ms);
+
+	port->port_type = saved_type;
+	port->attach_trace = false;
+
+	printf("[%5lu] %s: %s, %s/%s, VBUS %s, %u ms\n",
+	       get_timer(port->trace_t0), dev->name, tcpm_states[port->state],
+	       port->pwr_role == TYPEC_SOURCE ? "source" : "sink",
+	       port->data_role == TYPEC_HOST ? "host" : "device",
+	       drvops->get_vbus(dev) ? "present" : "absent",
+	       (unsigned int)get_timer(start));
+
+	if (!port->attached ||
+	    (port->state != SNK_READY && port->state != SRC_READY))
+		return -ETIMEDOUT;
 
 	return 0;
 }
@@ -3184,6 +3493,8 @@ static int tcpm_port_init(struct udevice *dev)
  *
  * Return: as documented in include/usb/tcpm.h.
  */
+static void tcpm_start_service(struct udevice *dev);
+
 int tcpm_enter_dp_altmode(struct udevice *dev)
 {
 	struct tcpm_port *port = dev_get_uclass_plat(dev);
@@ -3192,15 +3503,15 @@ int tcpm_enter_dp_altmode(struct udevice *dev)
 	/*
 	 * Enter Mode is the DFP's to send, so a port that can never hold the host
 	 * data role can never carry DisplayPort, whatever its connector declares.
-	 * A sink-only port is one: it attaches as the device, and this stack
-	 * rejects a DR_Swap on any port that is not dual-power-role (the
-	 * PD_CTRL_DR_SWAP case above). Asking anyway is not harmless: it starts
-	 * PD traffic and alt-mode discovery on the link, and on ROC-RK3399-PC
-	 * that link is the board's power inlet -- Type-C0, the same port its
-	 * USB gadget talks to the host on.
+	 * The data role is not the power role: a sink-only port whose connector
+	 * says data-role "dual" asks for the host role with its own DR_Swap
+	 * (typec_dp_discover()), which is how ROC-RK3399-PC's power inlet,
+	 * Type-C0, drives a monitor that also powers the board. A port declared
+	 * device-only cannot.
 	 */
-	if (port->port_type == TYPEC_PORT_SNK && port->data_role != TYPEC_HOST) {
-		dev_dbg(dev, "TCPM: sink-only port, never the host: no DisplayPort\n");
+	if (port->typec_data == TYPEC_PORT_DATA_UFP &&
+	    port->data_role != TYPEC_HOST) {
+		dev_dbg(dev, "TCPM: device-only port, never the host: no DisplayPort\n");
 		return -ENOENT;
 	}
 
@@ -3261,6 +3572,10 @@ int tcpm_enter_dp_altmode(struct udevice *dev)
 	if (ret == -ENOENT)
 		return ret;
 
+	/* A partner in alt mode talks to us unprompted: keep answering it. */
+	if (!ret || ret == -EALREADY)
+		tcpm_start_service(dev);
+
 	/* Already in the mode before we asked. Success, but nothing happened. */
 	if (ret == -EALREADY)
 		return 0;
@@ -3283,11 +3598,24 @@ int tcpm_enter_dp_altmode(struct udevice *dev)
 /* Has the pump reached the state the synchronous loop stopped at? */
 static bool tcpm_poll_event_settled(struct tcpm_port *port)
 {
+	u64 now = timer_get_us();
+
 	if (!port->wait_dr_swap_message &&
 	    (port->state == SNK_READY || port->state == SRC_READY))
 		return true;
 
-	return time_after_eq64((u64)timer_get_us(), port->poll_event_deadline);
+	/*
+	 * The quiet-time deadline moves with every event, so a partner that
+	 * keeps talking -- or a DR_Swap that never comes while messages still
+	 * flow -- never reaches it. Measured on ROC-RK3399-PC with a PD monitor
+	 * powering the board through the rear Type-C0: `tcpm info` settled this
+	 * pump inline and never returned, with udelay() feeding the watchdog.
+	 */
+	if (port->poll_event_hard_deadline &&
+	    time_after_eq64(now, port->poll_event_hard_deadline))
+		return true;
+
+	return time_after_eq64(now, port->poll_event_deadline);
 }
 
 /* One turn of the pump: read the chip's events, run any timer that expired */
@@ -3308,6 +3636,20 @@ static void tcpm_poll_event_finish(struct udevice *dev)
 	if (port->state != SNK_READY && port->state != SRC_READY)
 		dev_warn(dev, "TCPM: exit in state %s\n",
 			 tcpm_states[port->state]);
+
+	/* Say so when the hard bound, not the port, ended the pump. */
+	if (port->poll_event_hard_deadline &&
+	    time_after_eq64((u64)timer_get_us(),
+			    port->poll_event_hard_deadline) &&
+	    !(!port->wait_dr_swap_message &&
+	      (port->state == SNK_READY || port->state == SRC_READY)))
+		printf("%s: TCPM: pump capped at %u ms: state %s, %s, DR_Swap %s, %u events\n",
+		       dev->name, TCPM_POLL_EVENT_HARD_MAX,
+		       tcpm_states[port->state],
+		       port->data_role == TYPEC_HOST ? "host" : "device",
+		       port->wait_dr_swap_message ? "still awaited" : "not awaited",
+		       port->poll_event_count);
+	port->poll_event_hard_deadline = 0;
 
 	/*
 	 * Alt-mode entry deliberately does NOT happen here.
@@ -3379,6 +3721,70 @@ static void tcpm_poll_event(struct udevice *dev)
  */
 #define TCPM_PROBE_PUMP_PERIOD_US	4000
 
+/*
+ * How often an attached port is serviced once the pump has finished: inside
+ * tReceiverResponse (15 ms) for a request the partner sends us.
+ */
+#define TCPM_SERVICE_PERIOD_US		10000
+
+/*
+ * The port keeps being serviced after the pump while it has a partner.
+ *
+ * Without this, nothing reads the transceiver once the boot moves on. The
+ * chip acknowledges what it receives until its RX FIFO is full and then
+ * stops, and a partner whose messages go unacknowledged soft- and then hard-
+ * resets the link. A DisplayPort monitor in alt mode sends Attention VDMs
+ * unprompted. On a power inlet the hard reset is a power cut: measured on
+ * ROC-RK3399-PC Type-C0 with a monitor powering the board, a board left at
+ * the prompt with the link trained power-cycled by itself, twice.
+ */
+static void tcpm_service_tick(struct cyclic_info *c)
+{
+	struct tcpm_port *port = container_of(c, struct tcpm_port, cyclic);
+	struct udevice *dev = port->dev;
+	const struct dm_tcpm_ops *drvops = dev_get_driver_ops(dev);
+
+	/* Something is already pumping this port inline; leave it be. */
+	if (port->vdm_waiting || port->state_machine_running)
+		return;
+
+	/* Same rule as the probe pump: never inside another I2C transfer. */
+	if (device_get_uclass_id(dev->parent) == UCLASS_I2C &&
+	    dm_i2c_xfer_in_progress(dev->parent))
+		return;
+
+	if (port->low_power && tcpm_wake(dev))
+		return;
+
+	/*
+	 * A poll is several I2C transfers, milliseconds on this bus, and the
+	 * tick runs every 10 ms from wherever the console is waiting --
+	 * including inside a serial download, where a stall of half a
+	 * millisecond overruns the UART at 1.5 Mbaud. Run only the state
+	 * machine's timers when the chip says nothing happened.
+	 */
+	if (drvops->event_pending && !drvops->event_pending(dev)) {
+		tcpm_check_and_run_delayed_work(dev);
+		return;
+	}
+
+	tcpm_poll_event_step(dev);
+}
+
+static void tcpm_start_service(struct udevice *dev)
+{
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+
+	/* ->cyclic is the probe pump's until it finishes; it starts us then. */
+	if (!CONFIG_IS_ENABLED(CYCLIC) || !port->attached || port->service_on ||
+	    port->probe_pump_pending)
+		return;
+
+	port->service_on = true;
+	cyclic_register(&port->cyclic, tcpm_service_tick,
+			TCPM_SERVICE_PERIOD_US, dev->name);
+}
+
 static void tcpm_probe_pump_tick(struct cyclic_info *c)
 {
 	struct tcpm_port *port = container_of(c, struct tcpm_port, cyclic);
@@ -3406,6 +3812,7 @@ static void tcpm_probe_pump_tick(struct cyclic_info *c)
 	cyclic_unregister(c);
 	port->probe_pump_pending = false;
 	tcpm_poll_event_finish(dev);
+	tcpm_start_service(dev);
 }
 
 void tcpm_settle(struct udevice *dev)
@@ -3418,15 +3825,17 @@ void tcpm_settle(struct udevice *dev)
 	cyclic_unregister(&port->cyclic);
 	port->probe_pump_pending = false;
 	tcpm_poll_event(dev);
+	tcpm_start_service(dev);
 }
 
 int tcpm_pre_remove(struct udevice *dev)
 {
 	struct tcpm_port *port = dev_get_uclass_plat(dev);
 
-	if (port->probe_pump_pending) {
+	if (port->probe_pump_pending || port->service_on) {
 		cyclic_unregister(&port->cyclic);
 		port->probe_pump_pending = false;
+		port->service_on = false;
 	}
 
 	return 0;
@@ -3454,6 +3863,9 @@ int tcpm_post_probe(struct udevice *dev)
 	if (!drvops->get_vbus(dev))
 		return 0;
 
+	port->poll_event_count = 0;
+	port->poll_event_hard_deadline = timer_get_us() +
+					 TCPM_POLL_EVENT_HARD_MAX * 1000ULL;
 	tcpm_reset_event_cnt(dev);
 
 	/*

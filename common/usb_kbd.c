@@ -377,7 +377,18 @@ static inline void usb_kbd_poll_for_event(struct usb_device *dev)
 
 	/* Submit an interrupt transfer request */
 	if (usb_int_msg(dev, data->intpipe, &data->new[0],
-			data->intpktsize, data->intinterval, true) >= 0)
+			data->intpktsize, data->intinterval, true) < 0)
+		return;
+
+	/*
+	 * A stalled endpoint is halted on the device as well as on the
+	 * host: the host controller resets its side before the next
+	 * transfer, the device's side needs CLEAR_FEATURE(ENDPOINT_HALT).
+	 * A report from a failed transfer is not a report.
+	 */
+	if (dev->status & USB_ST_STALLED)
+		usb_clear_halt(dev, data->intpipe);
+	else if (!dev->status)
 		usb_kbd_irq_worker(dev);
 #elif defined(CONFIG_SYS_USB_EVENT_POLL_VIA_CONTROL_EP) || \
       defined(CONFIG_SYS_USB_EVENT_POLL_VIA_INT_QUEUE)

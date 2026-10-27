@@ -404,23 +404,64 @@ static phys_addr_t parse_address(struct udevice *dev, ofnode node,
 					  "reg", index, na, ns, &sz, true);
 }
 
-int meson_pinctrl_probe(struct udevice *dev)
+static ofnode meson_pinctrl_gpio_node(struct udevice *dev)
 {
-	struct meson_pinctrl *priv = dev_get_priv(dev);
-	ofnode node, gpio = ofnode_null();
-	struct uclass_driver *drv;
-	struct udevice *gpio_dev;
-	phys_addr_t addr;
-	char *name;
+	ofnode node;
 	int len;
 
 	dev_for_each_subnode(node, dev) {
-		if (ofnode_read_prop(node, "gpio-controller", &len)) {
-			gpio = node;
-			break;
-		}
+		if (ofnode_read_prop(node, "gpio-controller", &len))
+			return node;
 	}
 
+	return ofnode_null();
+}
+
+/*
+ * The GPIO bank is bound here, not in probe, so that it exists from the
+ * start: a consumer probed before anything has probed this controller -- a
+ * gpio-leds LED with a default-state, which led_post_bind() marks for
+ * probe-after-bind -- then finds the bank, and probing the bank probes this
+ * controller first. Bound in probe, the bank did not exist at that point and
+ * such an LED failed its probe silently.
+ */
+int meson_pinctrl_bind(struct udevice *dev)
+{
+	const struct meson_pinctrl_data *data;
+	struct udevice *gpio_dev;
+	ofnode gpio;
+	char *name;
+
+	gpio = meson_pinctrl_gpio_node(dev);
+	if (!ofnode_valid(gpio)) {
+		debug("gpio node not found\n");
+		return -EINVAL;
+	}
+
+	if (!lists_uclass_lookup(UCLASS_GPIO)) {
+		puts("Cannot find GPIO driver\n");
+		return -ENOENT;
+	}
+
+	data = (const struct meson_pinctrl_data *)dev_get_driver_data(dev);
+
+	name = calloc(1, 32);
+	if (!name)
+		return -ENOMEM;
+	sprintf(name, "meson-gpio");
+
+	/* Create child device UCLASS_GPIO and bind it */
+	return device_bind_with_driver_data(dev, data->gpio_driver, name, 0,
+					    gpio, &gpio_dev);
+}
+
+int meson_pinctrl_probe(struct udevice *dev)
+{
+	struct meson_pinctrl *priv = dev_get_priv(dev);
+	ofnode gpio;
+	phys_addr_t addr;
+
+	gpio = meson_pinctrl_gpio_node(dev);
 	if (!ofnode_valid(gpio)) {
 		debug("gpio node not found\n");
 		return -EINVAL;
@@ -462,20 +503,6 @@ int meson_pinctrl_probe(struct udevice *dev)
 		priv->reg_ds = (void __iomem *)addr;
 
 	priv->data = (struct meson_pinctrl_data *)dev_get_driver_data(dev);
-
-	/* Lookup GPIO driver */
-	drv = lists_uclass_lookup(UCLASS_GPIO);
-	if (!drv) {
-		puts("Cannot find GPIO driver\n");
-		return -ENOENT;
-	}
-
-	name = calloc(1, 32);
-	sprintf(name, "meson-gpio");
-
-	/* Create child device UCLASS_GPIO and bind it */
-	device_bind_with_driver_data(dev, priv->data->gpio_driver, name, 0,
-				     gpio, &gpio_dev);
 
 	return 0;
 }

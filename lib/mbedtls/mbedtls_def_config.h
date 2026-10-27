@@ -110,6 +110,18 @@
 #define MBEDTLS_SSL_PROTO_TLS1_2
 #if CONFIG_IS_ENABLED(X509_CERTIFICATE_PARSER)
 #define MBEDTLS_SSL_SERVER_NAME_INDICATION
+/*
+ * Check certificate validity dates, against lib/mbedtls/time.c's clock,
+ * which never reads earlier than this build's UTC time (U_BOOT_EPOCH).
+ * Without MBEDTLS_HAVE_TIME_DATE mbedTLS checks no dates at all.
+ */
+#include <linux/time.h>
+#define MBEDTLS_HAVE_TIME
+#define MBEDTLS_HAVE_TIME_DATE
+#define MBEDTLS_PLATFORM_TIME_MACRO	u_boot_mbedtls_time
+#define MBEDTLS_PLATFORM_GMTIME_R_ALT
+#define MBEDTLS_PLATFORM_MS_TIME_ALT
+time_t u_boot_mbedtls_time(time_t *t);
 #endif
 #define MBEDTLS_KEY_EXCHANGE_PSK_ENABLED
 

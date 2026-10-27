@@ -51,17 +51,22 @@
 	leds {
 		compatible = "gpio-leds";
 
+		/* load: activity */
 		led-blue {
+			label = "libre-computer:blue";
 			color = <LED_COLOR_ID_BLUE>;
 			function = LED_FUNCTION_ACTIVITY;
 			gpios = <&gpio GPIODV_24 GPIO_ACTIVE_HIGH>;
 			linux,default-trigger = "activity";
 		};
 
+		/* ready: on once the bootloader has loaded; the OS heartbeat */
 		led-green {
+			label = "libre-computer:green";
 			color = <LED_COLOR_ID_GREEN>;
 			function = LED_FUNCTION_STATUS;
 			gpios = <&gpio_ao GPIOAO_2 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "heartbeat";
 			default-state = "on";
 			panic-indicator;
 		};
@@ -339,4 +344,9 @@
 			size = <0x0 0x1C000000>;
 		};
 	};
+};
+
+/* PUB VT reads verified on Linux, open chain: enable the monitor. */
+&ddr_pub {
+	status = "okay";
 };

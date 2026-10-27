@@ -11,6 +11,7 @@
 
 #include <circbuf.h>
 #include <console.h>
+#include <dfu.h>
 #include <errno.h>
 #include <g_dnl.h>
 #include <malloc.h>
@@ -20,6 +21,7 @@
 #include <version.h>
 #include <watchdog.h>
 
+#include <linux/string.h>
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
 #include <linux/usb/composite.h>
@@ -1092,16 +1094,131 @@ static int drv_dnlacm_init(void)
 static struct stdio_dev *acm_console;
 static bool acm_console_suspended;
 
+#if IS_ENABLED(CONFIG_USB_FUNCTION_ACM_DFU)
+/*
+ * USB_FUNCTION_ACM_DFU: one composite gadget from the console's start, the
+ * ACM console and a resident DFU function (f_dfu.c) in one configuration, so
+ * a host reads and writes the board's flash at the prompt without the board
+ * leaving the bus: no `dfu` command, no re-enumeration, and the console stays
+ * open through the transfer. DFU requests are served while the console polls
+ * the UDC, i.e. while U-Boot waits at its prompt.
+ *
+ * The DFU core has one entity list. The console builds it from
+ * USB_FUNCTION_ACM_DFU_ALT ("<interface> <devstr>", through the board's
+ * set_dfu_alt_info() like `dfu <interface> <devstr>`) before it registers,
+ * and frees it when its gadget goes. Anyone else building a list first takes
+ * it from the console (dfu_console_release(), from dfu_init_env_entities()),
+ * and every gadget that suspends the console frees it too. The console then
+ * comes back lazily, at its next input poll once no download gadget runs and
+ * the list is free -- not at g_dnl_unregister(), where the `dfu` command
+ * still holds its list.
+ */
+static bool acm_console_dfu;		/* its gadget carries DFU, and holds the list */
+static bool acm_console_resume_pending;	/* to come back at the next free poll */
+static bool acm_console_starting;
+
+static void acm_console_dfu_build(void)
+{
+	char alt[] = CONFIG_USB_FUNCTION_ACM_DFU_ALT;
+	char *dev;
+
+	acm_console_dfu = false;
+	if (dfu_entities_in_use())
+		return;
+	dev = strchr(alt, ' ');
+	if (dev) {
+		*dev++ = '\0';
+		dev = skip_spaces(dev);
+	}
+	if (dfu_init_env_entities(alt, dev)) {
+		dfu_free_entities();
+		printf("USB console: no DFU beside it (%s)\n",
+		       CONFIG_USB_FUNCTION_ACM_DFU_ALT);
+		return;
+	}
+	acm_console_dfu = true;
+}
+
+/* After the console's gadget is unregistered: its DFU function is unbound */
+static void acm_console_dfu_free(void)
+{
+	if (!acm_console_dfu)
+		return;
+	acm_console_dfu = false;
+	dfu_free_entities();
+}
+
+bool acm_console_has_dfu(void)
+{
+	return acm_console_dfu;
+}
+
+void dfu_console_release(void)
+{
+	if (!acm_console_dfu || !acm_console || !acm_console->priv)
+		return;
+	acm_console_suspend();
+	acm_console_resume_pending = true;
+}
+
+static int acm_stdio_start(struct stdio_dev *dev);
+
+/* The console's lazy return (above): from its own input poll */
+static void acm_console_resume_lazy(void)
+{
+	int ret;
+
+	if (!acm_console_resume_pending || acm_console_starting ||
+	    g_dnl_download_active() || dfu_entities_in_use())
+		return;
+	acm_console_resume_pending = false;
+	acm_console_suspended = false;
+	clear_ctrlc();
+	acm_console_starting = true;
+	ret = acm_stdio_start(acm_console);
+	acm_console_starting = false;
+	if (ret)
+		printf("USB console: not back after the download gadget (%d)\n",
+		       ret);
+}
+#else
+static void acm_console_dfu_build(void)
+{
+}
+
+static void acm_console_dfu_free(void)
+{
+}
+
+bool acm_console_has_dfu(void)
+{
+	return false;
+}
+#endif
+
 /* STDIO */
 static int acm_stdio_tstc(struct stdio_dev *dev)
 {
 	struct f_acm *f_acm;
 
+#if IS_ENABLED(CONFIG_USB_FUNCTION_ACM_DFU)
+	if (!dev->priv && dev == acm_console)
+		acm_console_resume_lazy();
+#endif
 	if (!dev->priv)
 		return 0;
 	f_acm = stdio_to_acm(dev);
 
 	dm_usb_gadget_handle_interrupts(f_acm->udc);
+
+	/*
+	 * Bytes left in tx_buf by a stalled write go out only on the next write,
+	 * so the tail of a command's output (its last line and the prompt) sat
+	 * there until the host typed again. The prompt's input loop polls here:
+	 * send them once the host has taken the previous packet.
+	 */
+	if (f_acm->connected && f_acm->tx_on && f_acm->tx_buf.size > 0)
+		__acm_tx(f_acm);
 
 	return (f_acm->rx_buf.size > 0);
 }
@@ -1179,14 +1296,22 @@ static int acm_stdio_start(struct stdio_dev *dev)
 
 	g_dnl_clear_detach();
 
-	ret = g_dnl_register("usb_serial_acm");
-	if (ret)
-		return ret;
+	/* USB_FUNCTION_ACM_DFU: the list the gadget's DFU function serves */
+	acm_console_dfu_build();
 
-	if (default_acm_function)
+	ret = g_dnl_register("usb_serial_acm");
+	if (ret) {
+		acm_console_dfu_free();
+		return ret;
+	}
+
+	if (default_acm_function) {
 		dev->priv = default_acm_function;
-	else
+	} else {
+		g_dnl_unregister();
+		acm_console_dfu_free();
 		return -ENODEV;
+	}
 
 	start = get_timer(0);
 	while (!acm_connected(dev)) {
@@ -1206,6 +1331,7 @@ static int acm_stdio_start(struct stdio_dev *dev)
 		if (ret) {
 			g_dnl_unregister();
 			g_dnl_clear_detach();
+			acm_console_dfu_free();
 			dev->priv = NULL;
 			return ret;
 		}
@@ -1222,9 +1348,13 @@ static int acm_stdio_stop(struct stdio_dev *dev)
 {
 	g_dnl_unregister();
 	g_dnl_clear_detach();
+	acm_console_dfu_free();
 	dev->priv = NULL;
 	acm_console = NULL;
 	acm_console_suspended = false;
+#if IS_ENABLED(CONFIG_USB_FUNCTION_ACM_DFU)
+	acm_console_resume_pending = false;
+#endif
 
 	return 0;
 }
@@ -1235,6 +1365,7 @@ void acm_console_suspend(void)
 		return;
 	g_dnl_unregister();
 	g_dnl_clear_detach();
+	acm_console_dfu_free();
 	acm_console->priv = NULL;
 	acm_console_suspended = true;
 }
@@ -1245,6 +1376,11 @@ void acm_console_resume(void)
 
 	if (!acm_console || !acm_console_suspended)
 		return;
+#if IS_ENABLED(CONFIG_USB_FUNCTION_ACM_DFU)
+	/* Lazily, from the console's next input poll (above) */
+	acm_console_resume_pending = true;
+	return;
+#endif
 	acm_console_suspended = false;
 	/*
 	 * A Ctrl-C that ended the download gadget (`dfu`, `fastboot`, `ums`) is

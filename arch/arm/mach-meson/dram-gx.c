@@ -146,7 +146,9 @@ static int meson_dram_pll_init(void)
 			0xa005 /* unknown */, DDR_CLK_CNTL);
 	}
 
-	printf("DRAM clock: %d MHz\n", meson_dram_clk);
+	/* The "DDR:" result line carries the clock; this one is a diagnostic. */
+	if (IS_ENABLED(CONFIG_MESON_GX_XPL_VERBOSE))
+		printf("DRAM clock: %d MHz\n", meson_dram_clk);
 	return 0;
 }
 
@@ -989,7 +991,8 @@ uint meson_dram_phy_finalise_init(void)
 		uint ret;
 
 		ret = meson_dram_ddr4_stepped_training();
-		printf("FIN %d %x\n", ret, readl(DDR0_PUB_PGSR0));
+		if (ret || IS_ENABLED(CONFIG_MESON_GX_XPL_VERBOSE))
+			printf("FIN %d %x\n", ret, readl(DDR0_PUB_PGSR0));
 		if (ret == 0)
 			writel(0x5f97, DDR0_PUB_PGCR2);
 		return ret;
@@ -2443,7 +2446,8 @@ static int meson_dram_attempt(int attempt, u32 *size_mb)
 	 * boot/gxl/audit/2026-10-19-gxl-ddr3-boot-chain-failure-modes.md).
 	 * No colon: "DDR: <n> MB" lines are what scorers grep.
 	 */
-	puts("DDR detect\n");
+	if (IS_ENABLED(CONFIG_MESON_GX_XPL_VERBOSE))
+		puts("DDR detect\n");
 	detected_size = meson_dram_detect_size();
 	if (!detected_size) {
 		/*
@@ -2666,8 +2670,10 @@ static int meson_dram_attempt(int attempt, u32 *size_mb)
 		 * the line below prints on either type, and a lane that reads
 		 * back zero in `lanevar` is a lane the test never varied.
 		 */
-		printf("DDR: lanevar %08x lanerr %u %u %u %u\n", lanevar,
-		       lanerr[0], lanerr[1], lanerr[2], lanerr[3]);
+		/* A diagnostic on a pass (MESON_GX_XPL_VERBOSE); with a failure, always. */
+		if (errors || IS_ENABLED(CONFIG_MESON_GX_XPL_VERBOSE))
+			printf("DDR: lanevar %08x lanerr %u %u %u %u\n", lanevar,
+			       lanerr[0], lanerr[1], lanerr[2], lanerr[3]);
 		if (errors) {
 			printf("DDR: %u MB, MEMTEST FAIL (%u errors)\n",
 			       detected_size, errors);

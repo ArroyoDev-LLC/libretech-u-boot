@@ -142,6 +142,7 @@ const char *meson_pinctrl_get_pin_name(struct udevice *dev,
 int meson_pinmux_get_functions_count(struct udevice *dev);
 const char *meson_pinmux_get_function_name(struct udevice *dev,
 					   unsigned int selector);
+int meson_pinctrl_bind(struct udevice *dev);
 int meson_pinctrl_probe(struct udevice *dev);
 
 int meson_gpio_get(struct udevice *dev, unsigned int offset);

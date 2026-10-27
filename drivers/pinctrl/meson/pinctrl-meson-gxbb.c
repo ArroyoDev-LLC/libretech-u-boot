@@ -470,6 +470,7 @@ U_BOOT_DRIVER(meson_gxbb_pinctrl) = {
 	.name = "meson-gxbb-pinctrl",
 	.id = UCLASS_PINCTRL,
 	.of_match = of_match_ptr(meson_gxbb_pinctrl_match),
+	.bind = meson_pinctrl_bind,
 	.probe = meson_pinctrl_probe,
 	.priv_auto	= sizeof(struct meson_pinctrl),
 	.ops = &meson_gx_pinctrl_ops,

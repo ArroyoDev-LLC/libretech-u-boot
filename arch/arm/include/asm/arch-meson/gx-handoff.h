@@ -129,19 +129,15 @@
  */
 #define GX_TPL_LOAD_NO_SRC	0x90	/* boot device has no loader at all */
 #define GX_TPL_LOAD_NO_MMC	0x91	/* booted SD/eMMC, TPL_MESON_GX_LOAD_MMC off */
-/*
- * 0x92: booted SPI NOR.  Not a link failure -- meson_spifc DOES build in TPL
- * (measured 2026-08-07, 38475 B).  The blocker is meson_spifc_set_speed()
- * needing clk_get_rate(), which has no meaning without the CLK uclass.  See
- * TPL_MESON_GX_LOAD_MMC in arch/arm/mach-meson/Kconfig.
- */
-#define GX_TPL_LOAD_NO_NOR	0x92	/* booted SPI NOR, no loader for it */
+#define GX_TPL_LOAD_NO_NOR	0x92	/* booted SPI NOR, MESON_GX_LOAD_NOR off */
 #define GX_TPL_LOAD_NO_DEV	0x93	/* the block device did not appear */
 #define GX_TPL_LOAD_INIT	0x94	/* mmc_init() failed */
 #define GX_TPL_LOAD_HWPART	0x95	/* boot0/boot1 switch refused */
 #define GX_TPL_LOAD_ALIGN	0x96	/* offset or length not a whole sector */
 #define GX_TPL_LOAD_READ	0x97	/* short read */
 #define GX_TPL_LOAD_USB_NONE	0x98	/* USB session delivered nothing to SPL_ENTRY */
+#define GX_TPL_LOAD_NOR_BUS	0x99	/* SPIFC gate off, or reset did not clear */
+#define GX_TPL_LOAD_NOR_XFER	0x9a	/* a NOR read chunk timed out */
 
 /* Sticky DDR breadcrumbs the block forwards (written by dram-gx.c). */
 #define GX_DDR_STICKY_STEP_ADDR	0xd900c128UL

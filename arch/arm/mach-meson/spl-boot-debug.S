@@ -26,6 +26,12 @@ save_boot_params:
 	ldr	x2, =0xc81004cc	/* AO UART STATUS */
 #endif
 
+	/*
+	 * The first-instruction "TPL" / "SPL" mark: on GX a bring-up
+	 * diagnostic (MESON_GX_XPL_VERBOSE), since the stage's banner follows
+	 * in C; G12 keeps it.
+	 */
+#if defined(CONFIG_MESON_G12A) || defined(CONFIG_MESON_GX_XPL_VERBOSE)
 	mov	w1, #0x0d
 	bl	spl_uart_putc_asm
 	mov	w1, #0x0a
@@ -49,6 +55,7 @@ save_boot_params:
 	bl	spl_uart_putc_asm
 	mov	w1, #0x0a
 	bl	spl_uart_putc_asm
+#endif
 
 #if defined(CONFIG_MESON_GX)
 	/*

@@ -249,6 +249,21 @@ config MTK_TZ_MOVABLE
 	select OF_SYSTEM_SETUP
 	bool
 
+config MTK_BL32_DT_OVERLAY
+	bool "Apply the DT overlay BL32 (OP-TEE) wrote to the OS DT"
+	depends on ARM64 && !MTK_TZ_MOVABLE
+	default y if TARGET_MT8183
+	select EVENT
+	select OF_LIBFDT_OVERLAY
+	select OF_SYSTEM_SETUP
+	help
+	  When BL2 hands a BL32, it tags BL33 x1 with the non-secure buffer
+	  OP-TEE wrote its DT overlay into (/firmware/optee and OP-TEE's own
+	  memory as a no-map reservation). Copy that overlay early, reserve
+	  its ranges in LMB, and apply it to the OS DT at boot, so the OS
+	  learns about OP-TEE exactly when it runs. Does nothing when BL2
+	  hands no BL32.
+
 config MTK_USB_BOOT_ACM_CONSOLE
 	bool "On a USB boot, also put the console on a USB ACM serial port"
 	depends on BOOTSOURCE && USB_FUNCTION_ACM && CONSOLE_MUX

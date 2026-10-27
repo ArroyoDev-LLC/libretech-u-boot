@@ -45,6 +45,9 @@
  * (board/libre-computer/common/meson-spifc-nor.c), id[0] in bits 23:16.
  */
 u32 board_nor_jedec_id(void);
+
+/* The bare SPIFC reader's clock divider: clk81 / (@n + 1). */
+void board_nor_set_div(u32 n);
 #endif
 
 #endif /* __MESON_USBFLASH_ALTS_H__ */

@@ -47,6 +47,10 @@ void g_dnl_release(struct udevice *udc);
  */
 void acm_console_suspend(void);
 void acm_console_resume(void);
+/* USB_FUNCTION_ACM_DFU: the console's gadget carries its resident DFU function */
+bool acm_console_has_dfu(void);
+/* A download gadget, not the usbacm console's, holds the UDC */
+bool g_dnl_download_active(void);
 void g_dnl_set_serialnumber(char *);
 void g_dnl_set_product(const char *s);
 

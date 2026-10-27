@@ -6,6 +6,7 @@
 #include <charset.h>
 #include <cli.h>
 #include <command.h>
+#include <console.h>
 #include <ansi.h>
 #include <efi_config.h>
 #include <efi_variable.h>
@@ -693,6 +694,8 @@ int do_bootmenu(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
 	if (delay_str)
 		delay = (int)simple_strtol(delay_str, NULL, 10);
 
+	/* Every entry is a single key: none typed before the menu is shown selects one. */
+	console_discard_input();
 	bootmenu_show(uefi, delay);
 	return 0;
 }

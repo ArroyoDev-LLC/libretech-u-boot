@@ -4,6 +4,10 @@
 
 obj-y += board-common.o sm.o board-info.o capsule.o chip-serial.o
 obj-y += wdt-reset.o usb-host-present.o
+# The bootsettings command's decode: U-Boot proper only (TPL/SPL have no command line).
+ifeq ($(CONFIG_XPL_BUILD),)
+obj-$(CONFIG_CMD_BOOTSETTINGS) += bootsettings.o
+endif
 obj-$(CONFIG_MESON_GX) += board-gx.o
 ifneq ($(filter y,$(CONFIG_SPL_BUILD) $(CONFIG_TPL_BUILD)),)
 obj-$(CONFIG_MESON_GXBB) += dram-gxbb.o
@@ -56,6 +60,9 @@ obj-$(CONFIG_MESON_GX_XPL_CHAIN) += spl-gxl-scp.o
 obj-$(CONFIG_$(PHASE_)MESON_GX_BOOTLOG) += gx-bootlog.o
 # TPL fetches the DRAM stage off SD/eMMC.  Build-only: never run.
 obj-$(CONFIG_TPL_MESON_GX_LOAD_MMC) += tpl-load-mmc.o
+# Boot from SPI NOR: TPL reads the DRAM stage, the DRAM stage reads the FIT,
+# both through the bare SPIFC reader.  Each file is C-gated on its phase.
+obj-$(CONFIG_MESON_GX_LOAD_NOR) += tpl-load-nor.o spl-load-nor.o
 # TPL SPI NOR read probe (JEDEC ID + one block).  Read-only.
 obj-$(CONFIG_TPL_MESON_GX_NOR_PROBE) += tpl-nor-probe.o
 # TPL SD/eMMC read probe (bind + sector 0).  Read-only.

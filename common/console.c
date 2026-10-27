@@ -643,7 +643,82 @@ int fprintf(int file, const char *fmt, ...)
 	return i;
 }
 
+/*
+ * Keys the autoboot countdown read but did not act on (console_keep_key()).
+ * They are for the command line only: getchar() and tstc() return them, before
+ * the device, once cli_loop() opens them (console_kept_keys_to_cli()). Until
+ * then they are not visible, and pause / bootmenu drop them with the rest of
+ * the input typed before their prompt (console_discard_input()). In BSS, so
+ * only used after relocation.
+ */
+static struct {
+	char key[32];
+	int head, len;
+	bool open;
+} console_kept;
+
+void console_kept_keys_to_cli(void)
+{
+	if (gd->flags & GD_FLG_RELOC)
+		console_kept.open = true;
+}
+
+void console_discard_input(void)
+{
+	console_drop_kept_keys();
+	console_flush_stdin();
+}
+
+static bool console_kept_usable(void)
+{
+	return gd->flags & GD_FLG_RELOC;
+}
+
+void console_keep_key(int c)
+{
+	if (!console_kept_usable() || console_kept.len == sizeof(console_kept.key))
+		return;
+	console_kept.key[(console_kept.head + console_kept.len++) % sizeof(console_kept.key)] = c;
+}
+
+void console_drop_kept_keys(void)
+{
+	if (console_kept_usable())
+		console_kept.len = 0;
+}
+
+static int console_kept_getc(void)
+{
+	int c;
+
+	if (!console_kept_usable() || !console_kept.open || !console_kept.len)
+		return -1;
+	c = (unsigned char)console_kept.key[console_kept.head];
+	console_kept.head = (console_kept.head + 1) % sizeof(console_kept.key);
+	console_kept.len--;
+	return c;
+}
+
+static bool console_kept_tstc(void)
+{
+	return console_kept_usable() && console_kept.open && console_kept.len;
+}
+
 /** U-Boot INITIAL CONSOLE-COMPATIBLE FUNCTION *****************************/
+
+/* The input device's next key, or -1 when none is waiting; kept keys are not read. */
+int console_poll_key(void)
+{
+	if (IS_ENABLED(CONFIG_DISABLE_CONSOLE) && (gd->flags & GD_FLG_DISABLE_CONSOLE))
+		return -1;
+	if (!(gd->flags & GD_FLG_HAVE_CONSOLE))
+		return -1;
+	if (console_record_tstc())
+		return console_record_getc();
+	if (gd->flags & GD_FLG_DEVINIT)
+		return ftstc(stdin) ? fgetc(stdin) : -1;
+	return serial_tstc() ? serial_getc() : -1;
+}
 
 int getchar(void)
 {
@@ -654,6 +729,10 @@ int getchar(void)
 
 	if (!(gd->flags & GD_FLG_HAVE_CONSOLE))
 		return 0;
+
+	ch = console_kept_getc();
+	if (ch != -1)
+		return ch;
 
 	ch = console_record_getc();
 	if (ch != -1)
@@ -675,6 +754,9 @@ int tstc(void)
 
 	if (!(gd->flags & GD_FLG_HAVE_CONSOLE))
 		return 0;
+
+	if (console_kept_tstc())
+		return 1;
 
 	if (console_record_tstc())
 		return 1;

@@ -4,6 +4,7 @@ obj-$(CONFIG_ARM64) += armv8-mem-map.o
 obj-$(CONFIG_ARM64) += lowlevel_init.o
 obj-y	+= cpu.o
 obj-$(CONFIG_BOOTSOURCE)	+= bootsource.o
+obj-$(CONFIG_MTK_BL32_DT_OVERLAY)	+= bl32_dt.o
 obj-$(CONFIG_MTK_TZ_MOVABLE)	+= tzcfg.o
 obj-$(CONFIG_XPL_BUILD)	+= spl.o
 

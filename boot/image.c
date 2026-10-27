@@ -418,6 +418,9 @@ static void print_decomp_msg(int comp_type, int type, bool is_xip,
 {
 	const char *name = genimg_get_type_name(type);
 
+	/* SPL_FIT_QUIET: a good SPL load says nothing per image. */
+	if (CONFIG_IS_ENABLED(FIT_QUIET))
+		return;
 	/* Shows "Loading Kernel Image" for example */
 	if (comp_type == IH_COMP_NONE)
 		printf("   %s %s", is_xip ? "XIP" : "Loading", name);

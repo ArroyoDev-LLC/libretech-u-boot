@@ -134,6 +134,17 @@ static bool g_dnl_with_acm(const char *name)
 	       !strcmp(name, "usb_dnl_dfu");
 }
 
+/*
+ * USB_FUNCTION_ACM_DFU: the usbacm console's gadget with a resident DFU
+ * function beside it, when the console built its entity list (f_acm.c).
+ */
+static bool g_dnl_console_with_dfu(const char *name)
+{
+	return IS_ENABLED(CONFIG_USB_FUNCTION_ACM_DFU) &&
+	       !IS_ENABLED(CONFIG_XPL_BUILD) &&
+	       !strcmp(name, "usb_serial_acm") && acm_console_has_dfu();
+}
+
 static int g_dnl_do_config(struct usb_configuration *c)
 {
 	const char *s = c->cdev->driver->name;
@@ -148,6 +159,14 @@ static int g_dnl_do_config(struct usb_configuration *c)
 			continue;
 
 		ret = callback->fptr(c);
+		if (!ret && g_dnl_console_with_dfu(s)) {
+			/* The console stays up whether or not DFU could join it */
+			ret = dfu_add_resident(c);
+			if (ret)
+				printf("%s: no DFU beside the console: %d\n",
+				       __func__, ret);
+			return 0;
+		}
 		if (ret || !g_dnl_with_acm(s))
 			return ret;
 
@@ -269,7 +288,8 @@ static int g_dnl_bind(struct usb_composite_dev *cdev)
 	 * the IAD class triple (USB IAD ECN); every other gadget keeps the
 	 * per-interface class. device_desc is static, so set it each bind.
 	 */
-	if (g_dnl_with_acm(cdev->driver->name)) {
+	if (g_dnl_with_acm(cdev->driver->name) ||
+	    g_dnl_console_with_dfu(cdev->driver->name)) {
 		device_desc.bDeviceClass = USB_CLASS_MISC;
 		device_desc.bDeviceSubClass = 0x02;
 		device_desc.bDeviceProtocol = 0x01;
@@ -373,6 +393,14 @@ static bool g_dnl_is_acm_console(const char *name)
 	return name && !strcmp(name, G_DNL_ACM_CONSOLE);
 }
 
+/* A download gadget (not the usbacm console's) holds the UDC */
+static bool g_dnl_download_up;
+
+bool g_dnl_download_active(void)
+{
+	return g_dnl_download_up;
+}
+
 int g_dnl_register(const char *name)
 {
 	int ret;
@@ -392,6 +420,7 @@ int g_dnl_register(const char *name)
 		printf("%s: failed!, error: %d\n", __func__, ret);
 		return ret;
 	}
+	g_dnl_download_up = !g_dnl_is_acm_console(name);
 	return 0;
 }
 
@@ -400,6 +429,7 @@ void g_dnl_unregister(void)
 	bool resume = !g_dnl_is_acm_console(g_dnl_driver.name);
 
 	usb_composite_unregister(&g_dnl_driver);
+	g_dnl_download_up = false;
 	if (IS_ENABLED(CONFIG_USB_FUNCTION_ACM) && !IS_ENABLED(CONFIG_XPL_BUILD) &&
 	    resume)
 		acm_console_resume();
@@ -421,6 +451,7 @@ void g_dnl_release(struct udevice *udc)
 	bool resume = !g_dnl_is_acm_console(g_dnl_driver.name);
 
 	usb_composite_unregister(&g_dnl_driver);
+	g_dnl_download_up = false;
 	udc_device_put(udc);
 	if (IS_ENABLED(CONFIG_USB_FUNCTION_ACM) && !IS_ENABLED(CONFIG_XPL_BUILD) &&
 	    resume)

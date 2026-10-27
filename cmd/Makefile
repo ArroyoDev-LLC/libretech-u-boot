@@ -187,6 +187,7 @@ obj-$(CONFIG_CMD_TCPM) += tcpm.o
 obj-$(CONFIG_CMD_TEMPERATURE) += temperature.o
 obj-$(CONFIG_CMD_TERMINAL) += terminal.o
 obj-$(CONFIG_CMD_TIME) += time.o
+obj-$(CONFIG_CMD_BOOTSETTINGS) += bootsettings.o
 obj-$(CONFIG_CMD_TIMER) += timer.o
 obj-$(CONFIG_CMD_TRACE) += trace.o
 obj-$(CONFIG_HUSH_PARSER) += test.o

@@ -63,6 +63,17 @@ u32 board_nor_size(void);
  */
 bool board_config_nor_skip(void);
 
+/**
+ * board_config_begin() - the board's first chance in U-Boot proper
+ *
+ * Called first by fdtdec_board_setup(), which runs inside fdtdec_setup() at
+ * initcall #2 -- before any board hook (board_early_init_f/_r) -- and reads
+ * the config block and overlay FIT before relocation. A board whose BootROM
+ * hands over a running watchdog pets it here, so that work is not cut short.
+ * __weak default: nothing.
+ */
+void board_config_begin(void);
+
 #if IS_ENABLED(CONFIG_BOARD_CONFIG_NOR)
 /**
  * board_config_nor_offset() - where the config block sits on the NOR transport

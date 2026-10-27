@@ -259,6 +259,39 @@ void dfu_show_entities(void);
 int dfu_get_alt_number(void);
 
 /**
+ * dfu_entities_in_use() - whether an entity list is built
+ *
+ * dfu_get_alt_number() keeps the last list's count after dfu_free_entities();
+ * this answers whether a list is there now, i.e. whether its owner (a DFU
+ * session, or the usbacm console's resident function) still holds it.
+ *
+ * Return:	true while the list has entities
+ */
+bool dfu_entities_in_use(void);
+
+/**
+ * dfu_console_release() - the usbacm console gives up its entity list
+ *
+ * Called before a list is built (dfu_init_env_entities()): with
+ * USB_FUNCTION_ACM_DFU the console's gadget holds the one list while it is
+ * up, so it is suspended first and comes back once the list is free again.
+ * A no-op otherwise.
+ */
+void dfu_console_release(void);
+
+/**
+ * dfu_set_progress() - whether transfers print their progress
+ *
+ * The '#' per buffer and the lines that close an upload or download.  On by
+ * default.  f_dfu turns it off while the usbacm console's resident function
+ * is the one transferring: stdout is then the user's terminal on the same
+ * gadget, and every mark would land in it.  Errors print either way.
+ *
+ * @on:		print progress
+ */
+void dfu_set_progress(bool on);
+
+/**
  * dfu_get_dev_type() - get string representation for dfu device type
  *
  * @type:	device type
@@ -704,4 +737,6 @@ static inline int dfu_write_by_alt(int dfu_alt_num, void *addr,
 #endif
 
 int dfu_add(struct usb_configuration *c);
+/* USB_FUNCTION_ACM_DFU: the DFU function the usbacm console's gadget carries */
+int dfu_add_resident(struct usb_configuration *c);
 #endif /* __DFU_ENTITY_H_ */

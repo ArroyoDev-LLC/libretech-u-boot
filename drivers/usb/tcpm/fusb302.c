@@ -6,6 +6,7 @@
  */
 
 #include <dm.h>
+#include <env.h>
 #include <i2c.h>
 #include <asm/gpio.h>
 #include <linux/delay.h>
@@ -56,9 +57,22 @@ struct fusb302_chip {
 	 * turns this off for the duration of the reset window.
 	 */
 	bool intr_pd;
+	/* set_pd_rx() has run once, so intr_pd is the chip's real PD RX state */
+	bool pd_rx_on_known;
+	/* a BC_LVL read was deferred because PD traffic was on the line */
+	bool bc_lvl_pending;
+	/* COMP read high as a source: a detach waiting for confirmation */
+	bool comp_pending;
+	ulong comp_since;
 
 	/* The port's VBUS rail, from vbus-supply. NULL if the board has none */
 	struct udevice *vbus;
+
+	/* INT_N as a GPIO input, from the DT interrupt; invalid if unrouted */
+	struct gpio_desc int_n;
+
+	/* SWITCHES1 as the previous session left it, read before the reset */
+	u8 prior_switches1;
 
 	/* port status */
 	bool vconn_on;
@@ -217,6 +231,72 @@ static int fusb302_init_interrupt(struct udevice *dev)
 	return ret;
 }
 
+/*
+ * INT_N goes low while any unmasked interrupt is pending and high once the
+ * handler has read them all, so its level says whether a poll has anything
+ * to find. The DT routes it as an interrupt on a GPIO bank (interrupt-parent
+ * + interrupts = <pin type>); read that pin as an input. Without DM_GPIO or
+ * such a route the port is polled on every tick, as before.
+ */
+static void fusb302_get_int_n(struct udevice *dev)
+{
+	struct fusb302_chip *chip = dev_get_priv(dev);
+	ofnode bank;
+	u32 pin, type;
+
+	if (!CONFIG_IS_ENABLED(DM_GPIO) || dm_gpio_is_valid(&chip->int_n))
+		return;
+
+	bank = ofnode_parse_phandle(dev_ofnode(dev), "interrupt-parent", 0);
+	if (!ofnode_valid(bank) ||
+	    dev_read_u32_index(dev, "interrupts", 0, &pin) ||
+	    dev_read_u32_index(dev, "interrupts", 1, &type) ||
+	    uclass_get_device_by_ofnode(UCLASS_GPIO, bank, &chip->int_n.dev))
+		goto none;
+
+	chip->int_n.offset = pin;
+	chip->int_n.flags = 0;
+	if (dm_gpio_request(&chip->int_n, "fusb302-int-n"))
+		goto none;
+	/* IRQ_TYPE_LEVEL_LOW / EDGE_FALLING: the pin is low when asserted */
+	if (dm_gpio_set_dir_flags(&chip->int_n, GPIOD_IS_IN |
+				  ((type & 0xa) ? GPIOD_ACTIVE_LOW : 0))) {
+		dm_gpio_free(dev, &chip->int_n);
+		goto none;
+	}
+	return;
+
+none:
+	chip->int_n.dev = NULL;
+	dev_dbg(dev, "INT_N not readable; polling every tick\n");
+}
+
+static int fusb302_get_prior_roles(struct udevice *dev, enum typec_role *role,
+				   enum typec_data_role *data)
+{
+	struct fusb302_chip *chip = dev_get_priv(dev);
+	u8 sw1 = chip->prior_switches1;
+
+	if (!(sw1 & FUSB_REG_SWITCHES1_AUTO_GCRC))
+		return -ENOENT;
+
+	*role = sw1 & FUSB_REG_SWITCHES1_POWERROLE ? TYPEC_SOURCE : TYPEC_SINK;
+	*data = sw1 & FUSB_REG_SWITCHES1_DATAROLE ? TYPEC_HOST : TYPEC_DEVICE;
+
+	return 0;
+}
+
+static bool fusb302_event_pending(struct udevice *dev)
+{
+	struct fusb302_chip *chip = dev_get_priv(dev);
+
+	if (!CONFIG_IS_ENABLED(DM_GPIO) || !dm_gpio_is_valid(&chip->int_n) ||
+	    chip->bc_lvl_pending || chip->comp_pending)
+		return true;
+
+	return dm_gpio_get_value(&chip->int_n) != 0;
+}
+
 static int fusb302_set_power_mode(struct udevice *dev, u8 power_mode)
 {
 	int ret;
@@ -247,6 +327,14 @@ static int fusb302_init(struct udevice *dev)
 		}
 	}
 
+	/*
+	 * The chip is not reset with the SoC. SWITCHES1 still holds the roles
+	 * the last session put in its GoodCRC headers, and AUTO_GCRC says
+	 * whether that session spoke PD at all; the reset below clears both.
+	 */
+	if (fusb302_i2c_read(dev, FUSB_REG_SWITCHES1, &chip->prior_switches1))
+		chip->prior_switches1 = 0;
+
 	ret = fusb302_sw_reset(dev);
 	if (ret)
 		return ret;
@@ -256,6 +344,7 @@ static int fusb302_init(struct udevice *dev)
 	ret = fusb302_init_interrupt(dev);
 	if (ret)
 		return ret;
+	fusb302_get_int_n(dev);
 	ret = fusb302_set_power_mode(dev, FUSB_REG_POWER_PWR_ALL);
 	if (ret)
 		return ret;
@@ -314,6 +403,8 @@ static int fusb302_set_toggling(struct udevice *dev,
 {
 	struct fusb302_chip *chip = dev_get_priv(dev);
 	int ret;
+
+	chip->comp_pending = false;
 
 	/* first disable toggling */
 	ret = fusb302_i2c_clear_bits(dev, FUSB_REG_CONTROL2,
@@ -406,6 +497,9 @@ static int fusb302_set_cc(struct udevice *dev, enum typec_cc_status cc)
 				  FUSB_REG_SWITCHES0_CC2_PD_EN;
 	u8 rd_mda, switches0_data = 0x00;
 	int ret;
+
+	/* a pending COMP detach belongs to the configuration being replaced */
+	chip->comp_pending = false;
 
 	switch (cc) {
 	case TYPEC_CC_OPEN:
@@ -526,6 +620,12 @@ static int fusb302_set_vconn(struct udevice *dev, bool on)
 				     switches0_mask, switches0_data);
 	if (ret)
 		goto done;
+	/*
+	 * The shadow every caller tests. It was never written, so every
+	 * set_vconn(false) returned "already off" and VCONN, once on, stayed
+	 * on through detach and the next toggle (Linux sets it here).
+	 */
+	chip->vconn_on = on;
 	dev_dbg(dev, "set vconn = %s\n", on ? "on" : "off");
 done:
 	return ret;
@@ -618,6 +718,16 @@ static int fusb302_set_pd_rx(struct udevice *dev, bool on)
 	struct fusb302_chip *chip = dev_get_priv(dev);
 	int ret;
 
+	/*
+	 * Already in the state asked for: do nothing. Flushing here dropped a
+	 * message the chip had already GoodCRC'd -- SNK_WAIT_CAPABILITIES is
+	 * re-entered after a Soft Reset or a failed Request, and a
+	 * Source_Capabilities sitting in the FIFO was thrown away while the
+	 * partner believed it delivered. Linux returns early the same way.
+	 */
+	if (chip->intr_pd == on && chip->pd_rx_on_known)
+		return 0;
+
 	ret = fusb302_pd_rx_flush(dev);
 	if (ret) {
 		dev_err(dev, "cannot flush pd rx buffer: %d\n", ret);
@@ -641,6 +751,7 @@ static int fusb302_set_pd_rx(struct udevice *dev, bool on)
 		goto done;
 	}
 	chip->intr_pd = on;
+	chip->pd_rx_on_known = true;
 	dev_dbg(dev, "set pd RX %s\n", on ? "on" : "off");
 done:
 	return ret;
@@ -826,8 +937,17 @@ static void fusb302_bc_lvl_handler(struct udevice *dev)
 		goto done;
 
 	dev_dbg(dev, "BC_LVL handler, status0 = 0x%02x\n", status0);
-	if (status0 & FUSB_REG_STATUS0_ACTIVITY)
-		dev_info(dev, "CC activities detected, delay handling\n");
+	/*
+	 * A BC_LVL read during PD traffic can read Open mid-message, which
+	 * the port manager takes for a detach (tcpm_reset_port(), PD RX and
+	 * auto GoodCRC off). Linux re-schedules the read; this driver is
+	 * polled, so the next poll reads again.
+	 */
+	chip->bc_lvl_pending = false;
+	if (status0 & FUSB_REG_STATUS0_ACTIVITY) {
+		chip->bc_lvl_pending = true;
+		goto done;
+	}
 	bc_lvl = status0 & FUSB_REG_STATUS0_BC_LVL_MASK;
 	cc_status = fusb302_bc_lvl_to_cc(bc_lvl);
 	if (chip->cc_polarity == TYPEC_POLARITY_CC1) {
@@ -861,12 +981,26 @@ static int fusb302_enter_low_power_mode(struct udevice *dev,
 	ret = fusb302_mask_interrupt(dev);
 	if (ret)
 		return ret;
-	if (attached && pd_capable)
-		reg = FUSB_REG_POWER_PWR_MEDIUM;
-	else if (attached)
-		reg = FUSB_REG_POWER_PWR_LOW;
-	else
-		reg = 0;
+
+	/*
+	 * An attached port stays fully powered. PWR_MEDIUM clears PWR3, the
+	 * internal oscillator, which unclocks the BMC transmitter -- so the
+	 * chip's automatic GoodCRC stops -- and PWR_LOW also drops the receiver
+	 * and the measure block. Either way the partner's next PD message goes
+	 * unacknowledged from here until an OS driver re-initialises the chip:
+	 * it retries, Soft Resets, then Hard Resets, and its VBUS goes through
+	 * vSafe0V. On ROC-RK3399-PC's power inlet (Type-C0) that is a power-on
+	 * reset a few seconds into GRUB; on Type-C1 a monitor sees VBUS cycle
+	 * and PD fail on every boot. Linux's fusb302 never leaves PWR_ALL.
+	 * Masking the interrupts is harmless: this stack polls, and GoodCRC is
+	 * the chip's own.
+	 *
+	 * Not before attach either: POWER = 0 also took the bandgap, receiver
+	 * and measure block from a port still in TOGGLING or SNK_ATTACH_WAIT,
+	 * so a partner arriving afterwards saw a chip that could not detect it
+	 * until a consumer woke it. Nothing here needs the few mW back.
+	 */
+	reg = FUSB_REG_POWER_PWR_ALL;
 
 	return fusb302_set_power_mode(dev, reg);
 }
@@ -1493,6 +1627,11 @@ static void fusb302_interrupt_handle(struct udevice *dev)
 	if (interrupt != 0 || interrupta != 0 || interruptb != 0)
 		dev_dbg(dev, "IRQ: 0x%02x, a: 0x%02x, b: 0x%02x, status0: 0x%02x\n",
 			interrupt, interrupta, interruptb, status0);
+	/* TEST/diagnostic (B175): `setenv fusb302_trace 1` prints the same */
+	if ((interrupt | interrupta | interruptb) &&
+	    env_get_yesno("fusb302_trace") == 1)
+		printf("%s: IRQ %02x a %02x b %02x status0 %02x\n", dev->name,
+		       interrupt, interrupta, interruptb, status0);
 
 	if (interrupt & FUSB_REG_INTERRUPT_VBUSOK) {
 		vbus_present = !!(status0 & FUSB_REG_STATUS0_VBUSOK);
@@ -1522,11 +1661,17 @@ static void fusb302_interrupt_handle(struct udevice *dev)
 		comp_result = !!(status0 & FUSB_REG_STATUS0_COMP);
 		dev_dbg(dev, "IRQ: COMP_CHNG, comp=%s\n",
 			comp_result ? "true" : "false");
-		if (comp_result) {
-			/* cc level > Rd_threshold, detach */
-			chip->cc1 = TYPEC_CC_OPEN;
-			chip->cc2 = TYPEC_CC_OPEN;
-			tcpm_cc_change(dev);
+		/*
+		 * cc level > Rd threshold: a detach, if it lasts. One edge is not
+		 * enough -- our own BMC transmit, or the partner's, moves the
+		 * line, and a source that detaches on it switches VBUS off at
+		 * the partner (measured on ROC-RK3399-PC Type-C1: unattached 11
+		 * ms after each Source_Capabilities). Confirm after tPDDebounce,
+		 * on the poll path.
+		 */
+		if (comp_result && !chip->comp_pending) {
+			chip->comp_pending = true;
+			chip->comp_since = get_timer(0);
 		}
 	}
 
@@ -1581,6 +1726,26 @@ static void fusb302_interrupt_handle(struct udevice *dev)
 
 static void fusb302_poll_event(struct udevice *dev)
 {
+	struct fusb302_chip *chip = dev_get_priv(dev);
+
+	if (chip->bc_lvl_pending)
+		fusb302_bc_lvl_handler(dev);
+
+	/* A source detach seen on COMP, confirmed after tPDDebounce */
+	if (chip->comp_pending && get_timer(chip->comp_since) >= 15) {
+		u8 status0;
+
+		if (!fusb302_i2c_read(dev, FUSB_REG_STATUS0, &status0) &&
+		    !(status0 & FUSB_REG_STATUS0_ACTIVITY)) {
+			chip->comp_pending = false;
+			if (status0 & FUSB_REG_STATUS0_COMP) {
+				chip->cc1 = TYPEC_CC_OPEN;
+				chip->cc2 = TYPEC_CC_OPEN;
+				tcpm_cc_change(dev);
+			}
+		}
+	}
+
 	fusb302_interrupt_handle(dev);
 }
 
@@ -1610,6 +1775,8 @@ static struct dm_tcpm_ops fusb302_ops = {
 	.poll_event = fusb302_poll_event,
 	.enter_low_power_mode = fusb302_enter_low_power_mode,
 	.exit_low_power_mode = fusb302_exit_low_power_mode,
+	.event_pending = fusb302_event_pending,
+	.get_prior_roles = fusb302_get_prior_roles,
 };
 
 static const struct udevice_id fusb302_ids[] = {

@@ -214,10 +214,15 @@ void meson_spl_selfcheck(void)
 {
 	u32 secaxi = readl(DMC_SEC_AXI_PORT_CTRL);
 	u32 mpll10 = readl(GX_HIU_BASE + HHI_MPLL_CNTL10);
+	bool bad = secaxi != 0xffffffff || mpll10 != 0x1003;
 
-	/* Expected: SECAXI ffffffff (all ports secure+non-secure),
-	 * MPLL10 00001003 (fclk_div3 enabled).
+	/*
+	 * Expected: SECAXI ffffffff (all ports secure+non-secure),
+	 * MPLL10 00001003 (fclk_div3 enabled). On a good boot the words are a
+	 * bring-up diagnostic (MESON_GX_XPL_VERBOSE); a BAD one always prints.
 	 */
+	if (!bad && !IS_ENABLED(CONFIG_MESON_GX_XPL_VERBOSE))
+		return;
 	printf("SELFCHK: SECAXI %08x%s MPLL10 %08x%s\n",
 	       secaxi, secaxi == 0xffffffff ? "" : " BAD",
 	       mpll10, mpll10 == 0x1003 ? "" : " BAD");
@@ -279,9 +284,11 @@ void meson_gx_dos_publish_caps(void)
 	writel(before | GX_DOS_SCRATCH31_VP9_CAP, GX_DOS_SCRATCH31);
 	after = readl(GX_DOS_SCRATCH31);
 
-	printf("DOSCAP: gclk0 %08x SCRATCH31 %08x -> %08x%s\n",
-	       gclk, before, after,
-	       (after & GX_DOS_SCRATCH31_VP9_CAP) ? "" : " BAD");
+	/* A diagnostic when it took (MESON_GX_XPL_VERBOSE); BAD always prints. */
+	if (!(after & GX_DOS_SCRATCH31_VP9_CAP) || IS_ENABLED(CONFIG_MESON_GX_XPL_VERBOSE))
+		printf("DOSCAP: gclk0 %08x SCRATCH31 %08x -> %08x%s\n",
+		       gclk, before, after,
+		       (after & GX_DOS_SCRATCH31_VP9_CAP) ? "" : " BAD");
 }
 
 int meson_pll_init(void)

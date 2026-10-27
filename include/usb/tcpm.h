@@ -79,6 +79,28 @@ struct dm_tcpm_ops {
 	 * the probe-time poll loop the low-power call was written for.
 	 */
 	int (*exit_low_power_mode)(struct udevice *dev);
+	/**
+	 * @event_pending: optional; whether poll_event() has anything to do
+	 *
+	 * The port manager keeps polling an attached port from a cyclic
+	 * function, and a poll is several bus transfers. A TCPC that can tell
+	 * cheaply that nothing happened -- its interrupt line is idle and no
+	 * deferred work is due -- returns false here and the poll is skipped.
+	 * Without this op every tick polls.
+	 */
+	bool (*event_pending)(struct udevice *dev);
+	/**
+	 * @get_prior_roles: optional; the roles a previous session left in the
+	 * TCPC, read before init() reset it
+	 *
+	 * A warm reset of the SoC does not reset the TCPC or the partner. A PD
+	 * contract and any data-role swap survive it, and the partner then
+	 * answers a message carrying the default data role with Type-C error
+	 * recovery: VBUS goes away, which on a power inlet is a power-on
+	 * reset. Return -ENOENT when the TCPC held no PD session.
+	 */
+	int (*get_prior_roles)(struct udevice *dev, enum typec_role *role,
+			       enum typec_data_role *data);
 };
 
 /* API for drivers */
@@ -103,6 +125,16 @@ int tcpm_get_voltage(struct udevice *dev);
 enum typec_orientation tcpm_get_orientation(struct udevice *dev);
 enum typec_role tcpm_get_pwr_role(struct udevice *dev);
 enum typec_data_role tcpm_get_data_role(struct udevice *dev);
+/**
+ * tcpm_get_source_caps() - the partner's last Source_Capabilities
+ * @dev: TCPM device
+ * @caps: set to the PDOs; valid until the next message on the port
+ * @explicit_contract: set to whether a PD contract is in force
+ *
+ * Return: the number of PDOs, 0 when the partner sent none.
+ */
+unsigned int tcpm_get_source_caps(struct udevice *dev, const u32 **caps,
+				  bool *explicit_contract);
 bool tcpm_is_connected(struct udevice *dev);
 const char *tcpm_get_state(struct udevice *dev);
 
@@ -146,6 +178,53 @@ int fusb302_cc_orientation(struct udevice *chip);
  * error recovery mid-wait must not be reported as success.
  */
 int tcpm_wait_ready(struct udevice *dev, unsigned int timeout_ms);
+
+enum tcpm_attach_role {
+	TCPM_ATTACH_DRP,	/* whatever the port's connector allows */
+	TCPM_ATTACH_SINK,
+	TCPM_ATTACH_SOURCE,
+};
+
+/**
+ * tcpm_force_attach() - run a fresh Type-C attach and pump it to the end
+ *
+ * Wakes the TCPC, then restarts the port's attach: through ErrorRecovery (CC
+ * open, so the partner sees a detach) on a port that does not power the
+ * board, or by restarting the sink attach with Rd held on the power inlet
+ * (sink-only, not self-powered), which must never drop CC. The state machine
+ * is then stepped continuously -- not left to the probe-time pump or to
+ * interrupts that may be masked -- until the port is ready and, as a sink of a
+ * swap-capable partner, holds or has stopped waiting for the host role. Every
+ * state change is printed with a timestamp.
+ *
+ * @role forces the attach role for this attempt only (the connector's
+ * capability is restored afterwards); it must be one the connector allows.
+ *
+ * Return: 0 attached and ready, -ETIMEDOUT not within @timeout_ms,
+ * -EOPNOTSUPP a role the connector cannot take, or tcpm_wake()'s error.
+ */
+int tcpm_force_attach(struct udevice *dev, enum tcpm_attach_role role,
+		      unsigned int timeout_ms);
+
+/**
+ * tcpm_request_host_role() - send DR_Swap when still the UFP
+ *
+ * Either end may ask for a data-role swap (USB PD 6.3.9). A port that waits
+ * for the partner to offer it stays the UFP for the whole boot when that
+ * offer is lost -- a sink hard reset or port reset clears the wait, and a
+ * partner need not offer again -- and a UFP cannot start the structured VDMs
+ * alt-mode discovery needs.
+ *
+ * Asks only from SNK_READY with an explicit contract, on a connector that may
+ * be the host, to a partner whose Source_Capabilities advertise DATA_SWAP;
+ * otherwise nothing goes on the wire. Runs the state machine until Accept,
+ * Reject, Wait, Not_Supported or tSenderResponse ends the exchange.
+ *
+ * A successful swap clears the port's DisplayPort state, so call this BEFORE
+ * discovery reads anything into it, never from inside an exchange.
+ * A failure is only reported; the caller proceeds as UFP.
+ */
+void tcpm_request_host_role(struct udevice *dev);
 
 /**
  * tcpm_discover_svids() - run generic alt-mode discovery on the partner

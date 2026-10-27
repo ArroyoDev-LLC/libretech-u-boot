@@ -6,7 +6,6 @@
  * Author: Neil Armstrong <narmstrong@baylibre.com>
  */
 
-#define DEBUG
 #include <dm.h>
 #include <dm/device-internal.h>
 #include <dm/lists.h>

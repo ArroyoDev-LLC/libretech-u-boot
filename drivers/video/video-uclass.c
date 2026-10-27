@@ -166,13 +166,37 @@ ulong video_get_fb(void)
 	return 0;
 }
 
+/*
+ * video_clip_rect() - Clip a rectangle to the display
+ *
+ * Callers compute boxes from text extents plus insets and can reach past the
+ * display's edge; an unclipped row then overruns into the next one, and the
+ * last row past the end of the frame buffer.
+ *
+ * Return: true if anything of the rectangle is left to draw
+ */
+static bool video_clip_rect(struct video_priv *priv, int *x0, int *y0, int *x1,
+			    int *y1)
+{
+	*x0 = max(*x0, 0);
+	*y0 = max(*y0, 0);
+	*x1 = min(*x1, (int)priv->xsize);
+	*y1 = min(*y1, (int)priv->ysize);
+
+	return *x0 < *x1 && *y0 < *y1;
+}
+
 int video_fill_part(struct udevice *dev, int xstart, int ystart, int xend,
 		    int yend, u32 colour)
 {
 	struct video_priv *priv = dev_get_uclass_priv(dev);
 	void *start, *line;
-	int pixels = xend - xstart;
+	int pixels;
 	int row, i;
+
+	if (!video_clip_rect(priv, &xstart, &ystart, &xend, &yend))
+		return 0;
+	pixels = xend - xstart;
 
 	start = priv->fb + ystart * priv->line_length;
 	start += xstart * VNBYTES(priv->bpix);
@@ -223,8 +247,13 @@ int video_draw_box(struct udevice *dev, int x0, int y0, int x1, int y1,
 	struct video_priv *priv = dev_get_uclass_priv(dev);
 	int pbytes = VNBYTES(priv->bpix);
 	void *start, *line;
-	int pixels = x1 - x0;
+	int pixels;
 	int row;
+
+	if (!video_clip_rect(priv, &x0, &y0, &x1, &y1))
+		return 0;
+	pixels = x1 - x0;
+	width = min(width, min(pixels, y1 - y0) / 2);
 
 	start = priv->fb + y0 * priv->line_length;
 	start += x0 * pbytes;

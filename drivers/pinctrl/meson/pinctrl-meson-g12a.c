@@ -1363,6 +1363,7 @@ U_BOOT_DRIVER(meson_g12a_pinctrl) = {
 	.name = "meson-g12a-pinctrl",
 	.id = UCLASS_PINCTRL,
 	.of_match = of_match_ptr(meson_g12a_pinctrl_match),
+	.bind = meson_pinctrl_bind,
 	.probe = meson_pinctrl_probe,
 	.priv_auto	= sizeof(struct meson_pinctrl),
 	.ops = &meson_axg_pinctrl_ops,

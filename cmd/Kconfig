@@ -2514,6 +2514,16 @@ config CMD_TIME
 	help
 	  Run commands and summarize execution time.
 
+config CMD_BOOTSETTINGS
+	bool "bootsettings - print the board's boot settings, decoded"
+	help
+	  Print what decides where this board boots from, decoded on the board:
+	  source= (the bootsource token), order= (the BootROM's medium order),
+	  straps=, efuse= (the boot-relevant fuse state) and raw.<register>=
+	  for each register read, one key=value per line; unknown for a key the
+	  SoC cannot read. The decode is the SoC family's (bootsettings_soc());
+	  read only. Libre Computer platform policy.
+
 config CMD_GETTIME
 	bool "gettime - read elapsed time"
 	help

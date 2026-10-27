@@ -192,6 +192,17 @@ config SPL_FIT_PRINT
 	help
 	  Support printing the content of the fitImage in a verbose manner in SPL.
 
+config SPL_FIT_QUIET
+	bool "Print SPL FIT hash checks and decompression only when they fail"
+	depends on SPL_FIT
+	help
+	  The SPL's FIT loader prints a "## Checking hash(es) for ..." line for
+	  the configuration and every image, and an "Uncompressing <type> to
+	  <addr>" line for every compressed one. With this option a good load
+	  prints none of them; a hash that does not verify still names the
+	  image or configuration, and decompression errors print as before.
+	  U-Boot proper (bootm) is unaffected.
+
 config SPL_FIT_FULL_CHECK
 	bool "Do a full check of the FIT within SPL before using it"
 	depends on SPL_FIT

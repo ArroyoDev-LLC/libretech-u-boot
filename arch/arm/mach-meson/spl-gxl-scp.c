@@ -39,6 +39,7 @@
  * different board BEFORE the first mailbox send. See that function.
  */
 
+#include <cpu_func.h>
 #include <image.h>
 #include <spl.h>
 #include <asm/io.h>
@@ -61,6 +62,18 @@
  * 0xE000).  Never raise one without the other: an image the ROM copies past
  * the SC's link region is erased by the SC's own .bss zeroing and stack.
  */
+/*
+ * The upload's detail -- budgets, fetches, digests, mailbox words -- is a
+ * bring-up diagnostic (MESON_GX_XPL_VERBOSE; board+bootloader policy "Boot
+ * console output"). A good boot says "SCP: started"; a refusal or a stall
+ * always prints in full.
+ */
+#define scp_vprintf(...)						\
+	do {								\
+		if (IS_ENABLED(CONFIG_MESON_GX_XPL_VERBOSE))		\
+			printf(__VA_ARGS__);				\
+	} while (0)
+
 #define GXL_SCP_CODE_SIZE		0x0000C000UL
 /* LAYOUT FIT "scp" staging (AML_SEC_SCP_STAGE_BASE). Not 0x013C0000. */
 #define GXL_SCP_STAGE_BASE		0x001C0000UL
@@ -238,6 +251,8 @@ static void scp_print_sha(const char *tag, uintptr_t addr, size_t size,
 {
 	int i;
 
+	if (!IS_ENABLED(CONFIG_MESON_GX_XPL_VERBOSE))
+		return;
 	printf("SCP: sha256 %s 0x%x 0x%x ", tag, (u32)addr, (u32)size);
 	for (i = 0; i < SHA256_SUM_LEN; i++)
 		printf("%02x", digest[i]);
@@ -265,7 +280,7 @@ static int scp_send_hash(const void *data, size_t size, const char *tag,
 /* send=0: DRAM pointer, SC-ROM DMA of one open image. */
 static int scp_fetch_window(uintptr_t addr, size_t size, const char *tag)
 {
-	printf("SCP: fetch %s 0x%x B from 0x%x src0=0x%x\n",
+	scp_vprintf("SCP: fetch %s 0x%x B from 0x%x src0=0x%x\n",
 	       tag, (u32)size, (u32)addr, readl((void *)addr));
 
 	scp_mhu_clear();
@@ -367,11 +382,14 @@ static void scp_wait_ready(size_t size, u32 stat_found)
 	/* The iteration count stays as a backstop for an unarmed watchdog. */
 	for (t = 30000000; t > 0; t--) {
 		if (scp_running()) {
-			printf("SCP: started, 0x%x B (stat 0x%x) after %u cnt, at %u ms of %u\n",
-			       (u32)size,
-			       readl((void *)GXL_AO_RTI_SCP_STAT),
-			       (u32)(arch_cnt() - c0),
-			       ao_wdt_elapsed_ms(), period);
+			if (IS_ENABLED(CONFIG_MESON_GX_XPL_VERBOSE))
+				printf("SCP: started, 0x%x B (stat 0x%x) after %u cnt, at %u ms of %u\n",
+				       (u32)size,
+				       readl((void *)GXL_AO_RTI_SCP_STAT),
+				       (u32)(arch_cnt() - c0),
+				       ao_wdt_elapsed_ms(), period);
+			else
+				printf("SCP: started\n");
 			return;
 		}
 		if (limit && ao_wdt_elapsed_since(t0, limit))
@@ -504,16 +522,16 @@ static void scp_probe_mailboxes(void)
 		psci[i] = readl((void *)(GXL_MHU_AP_TO_SCP_PAYLOAD + (i * 4)));
 	}
 
-	printf("SCP: mbox waited %u ms (%u cnt, spins %d)\n", ms,
-	       (u32)(arch_cnt() - c0), spins);
-	printf("SCP: ospm %08x %08x %08x %08x\n",
-	       ospm[0], ospm[1], ospm[2], ospm[3]);
-	printf("SCP: ospm+ %08x %08x %08x %08x\n",
-	       ospm[4], ospm[5], ospm[6], ospm[7]);
-	printf("SCP: psci %08x %08x %08x %08x\n",
-	       psci[0], psci[1], psci[2], psci[3]);
-	printf("SCP: psci+ %08x %08x %08x %08x\n",
-	       psci[4], psci[5], psci[6], psci[7]);
+	scp_vprintf("SCP: mbox waited %u ms (%u cnt, spins %d)\n", ms,
+		    (u32)(arch_cnt() - c0), spins);
+	scp_vprintf("SCP: ospm %08x %08x %08x %08x\n",
+		    ospm[0], ospm[1], ospm[2], ospm[3]);
+	scp_vprintf("SCP: ospm+ %08x %08x %08x %08x\n",
+		    ospm[4], ospm[5], ospm[6], ospm[7]);
+	scp_vprintf("SCP: psci %08x %08x %08x %08x\n",
+		    psci[0], psci[1], psci[2], psci[3]);
+	scp_vprintf("SCP: psci+ %08x %08x %08x %08x\n",
+		    psci[4], psci[5], psci[6], psci[7]);
 }
 
 /*
@@ -658,6 +676,9 @@ static void scp_report_sram_security(void)
 	u32 r[GXL_SRAMSEC_RESULT_WORDS];
 	int i;
 
+	/* A probe readback: bring-up only. */
+	if (!IS_ENABLED(CONFIG_MESON_GX_XPL_VERBOSE))
+		return;
 	for (i = 0; i < GXL_SRAMSEC_RESULT_WORDS; i++)
 		r[i] = readl((void *)(GXL_SRAMSEC_RESULT_BASE + (i * 4)));
 
@@ -738,7 +759,7 @@ static int scp_board_pairing_check(uintptr_t addr, size_t size)
 	size_t off;
 
 	if (!expect) {
-		printf("SCP: board-id unset (CONFIG_MESON_GXL_SCP_BOARD_ID=0), skipping pairing check\n");
+		scp_vprintf("SCP: board-id unset (CONFIG_MESON_GXL_SCP_BOARD_ID=0), skipping pairing check\n");
 		return 0;
 	}
 
@@ -770,7 +791,7 @@ static int scp_board_pairing_check(uintptr_t addr, size_t size)
 		return -EXDEV;
 	}
 
-	printf("SCP: board id %u paired (trailer 0x%08x)\n", expect, trailer);
+	scp_vprintf("SCP: board id %u paired (trailer 0x%08x)\n", expect, trailer);
 	return 0;
 }
 
@@ -794,9 +815,9 @@ static void meson_gxl_scp_upload(const void *fw, size_t size)
 	 * bound in this file is chosen against, and the one that would silently
 	 * rot if the stages before us got slower.
 	 */
-	printf("SCP: enter at %u ms of %u (AO wdt ctrl 0x%x)\n",
-	       ao_wdt_elapsed_ms(), ao_wdt_period_ms(),
-	       readl((void *)GXL_AO_WDT_CTRL));
+	scp_vprintf("SCP: enter at %u ms of %u (AO wdt ctrl 0x%x)\n",
+		    ao_wdt_elapsed_ms(), ao_wdt_period_ms(),
+		    readl((void *)GXL_AO_WDT_CTRL));
 
 	if (scp_running()) {
 		printf("SCP: already running (stat 0x%x)\n", stat_found);
@@ -807,6 +828,18 @@ static void meson_gxl_scp_upload(const void *fw, size_t size)
 		printf("SCP: size 0x%x out of range (max 0x%x)\n",
 		       (u32)size, (u32)GXL_SCP_CODE_SIZE);
 		return;
+	}
+
+	/*
+	 * The SC-ROM reads the image from DRAM itself, past the AP's caches:
+	 * with the DRAM stage's D-cache on (spl-dram-stage-gx.c), what the FIT
+	 * loader just wrote is still in it.  Clean it to DRAM first, or the ROM
+	 * hashes stale memory and refuses the image.
+	 */
+	if (dcache_status()) {
+		uintptr_t start = addr & ~(uintptr_t)(CONFIG_SYS_CACHELINE_SIZE - 1);
+
+		flush_dcache_range(start, ALIGN(addr + size, CONFIG_SYS_CACHELINE_SIZE));
 	}
 
 	if (addr != GXL_SCP_STAGE_BASE) {
@@ -863,9 +896,9 @@ static void meson_gxl_scp_upload(const void *fw, size_t size)
 	 * across two windows of one boot (~599 MHz vs ~617 MHz), which is the
 	 * evidence that no bound may be built on it.
 	 */
-	printf("SCP: leave at %u ms of %u (%u cnt for the stage)\n",
-	       ao_wdt_elapsed_ms(), ao_wdt_period_ms(),
-	       (u32)(arch_cnt() - c0));
+	scp_vprintf("SCP: leave at %u ms of %u (%u cnt for the stage)\n",
+		    ao_wdt_elapsed_ms(), ao_wdt_period_ms(),
+		    (u32)(arch_cnt() - c0));
 }
 
 void board_fit_image_post_process(const void *fit, int node, void **p_image,

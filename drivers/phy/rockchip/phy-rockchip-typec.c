@@ -23,6 +23,7 @@
 #include <asm/io.h>
 #include <linux/iopoll.h>
 #include <asm/arch-rockchip/clock.h>
+#include <env.h>
 #include <phy/rockchip-typec.h>
 #if CONFIG_IS_ENABLED(TYPEC_TCPM)
 #include <usb/tcpm.h>
@@ -358,6 +359,14 @@ struct rockchip_tcphy {
 	u8 mode;
 	bool flip;
 	/*
+	 * "libretech,typec-orientation-inverted": this receptacle's lanes sit
+	 * the other way round from what its CC pins report, so the lane mux
+	 * (typec_conn_dir, the lane set, the DP firmware's lane map) takes the
+	 * opposite of the CC orientation, while the AUX polarity bit keeps the
+	 * value the CC orientation selects. @flip is the LANE orientation.
+	 */
+	bool orient_inverted;
+	/*
 	 * The USB role the controller on this port runs as, from its set_mode
 	 * (dwc3 sets it before power-on): MODE_UFP_USB for a gadget,
 	 * MODE_DFP_USB for a host. What rockchip_tcphy_get_mode() answers when
@@ -645,6 +654,28 @@ static int rockchip_tcphy_cc_orientation(struct udevice *dev)
 }
 #endif
 
+/*
+ * Bench overrides, one bit per PHY (bit 0 = tcphy0 / Type-C0, bit 1 = tcphy1 /
+ * Type-C1), read from the environment each time the PHY is muxed:
+ *   tcphy_invert  - invert the WHOLE orientation the port manager reports
+ *                   (typec_conn_dir, the lane set, AUX polarity and the lane
+ *                   map handed to the DP firmware)
+ *   tcphy_auxinv  - invert the AUX polarity alone
+ * They exist to tell apart, on a live connector, a receptacle whose CC lines
+ * disagree with its SuperSpeed/SBU lines from one whose SBU pair alone is
+ * crossed. Unset, nothing changes.
+ */
+static bool rockchip_tcphy_env_bit(struct rockchip_tcphy *priv,
+				   const char *name)
+{
+	int idx = priv->port_cfgs->reg == 0xff800000 ? 1 : 0;
+
+	if (IS_ENABLED(CONFIG_XPL_BUILD))
+		return false;
+
+	return env_get_hex(name, 0) & BIT(idx);
+}
+
 static void rockchip_tcphy_get_orientation(struct udevice *dev,
 					   struct rockchip_tcphy *priv)
 {
@@ -678,6 +709,9 @@ static void rockchip_tcphy_get_orientation(struct udevice *dev,
 	if (tcpm_get_orientation(tcpm) == TYPEC_ORIENTATION_REVERSE)
 		priv->flip = true;
 #endif
+	priv->flip ^= priv->orient_inverted;
+	if (rockchip_tcphy_env_bit(priv, "tcphy_invert"))
+		priv->flip = !priv->flip;
 }
 
 /**
@@ -897,8 +931,10 @@ int rockchip_typec_phy_get_dp_state(struct phy *phy,
 	 * live answer is the only one there is.
 	 */
 	if (priv->mode == MODE_DISCONNECT)
-		state->flip = tcpm_get_orientation(tcpm) ==
-			      TYPEC_ORIENTATION_REVERSE;
+		state->flip = (tcpm_get_orientation(tcpm) ==
+			       TYPEC_ORIENTATION_REVERSE) ^
+			      priv->orient_inverted ^
+			      rockchip_tcphy_env_bit(priv, "tcphy_invert");
 	else
 		state->flip = priv->flip;
 
@@ -947,17 +983,28 @@ static void rockchip_tcphy_dp_cfg_lane(struct rockchip_tcphy *priv, u32 lane)
 	writel(rdata, priv->reg_base + XCVR_DIAG_PLLDRC_CTRL(lane));
 }
 
-/* AUX polarity follows the plug, same as Linux's tcphy_dp_aux_set_flip(). */
+/*
+ * AUX polarity follows the CC orientation, same as Linux's
+ * tcphy_dp_aux_set_flip() -- which on an orientation-inverted receptacle is
+ * the opposite of @flip, the lane orientation.
+ */
 static void rockchip_tcphy_dp_aux_set_flip(struct rockchip_tcphy *priv)
 {
+	bool flip = priv->flip ^ priv->orient_inverted ^
+		    rockchip_tcphy_env_bit(priv, "tcphy_auxinv");
 	u16 tx_ana_ctrl_reg_1;
 
 	tx_ana_ctrl_reg_1 = readl(priv->reg_base + TX_ANA_CTRL_REG_1);
-	if (!priv->flip)
+	if (!flip)
 		tx_ana_ctrl_reg_1 |= AUXDA_POLARITY;
 	else
 		tx_ana_ctrl_reg_1 &= ~AUXDA_POLARITY;
 	writel(tx_ana_ctrl_reg_1, priv->reg_base + TX_ANA_CTRL_REG_1);
+	if (rockchip_tcphy_env_bit(priv, "tcphy_invert") ||
+	    rockchip_tcphy_env_bit(priv, "tcphy_auxinv"))
+		printf("tcphy@%lx: flip %d, AUX polarity %s (env override)\n",
+		       priv->port_cfgs->reg, priv->flip,
+		       flip ? "reversed" : "normal");
 }
 
 /*
@@ -1251,7 +1298,7 @@ static int rockchip_tcphy_init(struct phy *phy, struct rockchip_tcphy *priv,
 				       val, val & CMN_READY, 10,
 				       PHY_MODE_SET_TIMEOUT);
 	if (ret < 0) {
-		dev_err(phy->dev, "PMA Timeout!\n");
+		dev_err(phy->dev, "PMA Timeout! (PMA_CMN_CTRL1 %08x)\n", val);
 		ret = -ETIMEDOUT;
 		goto err_uphy_rst;
 	}
@@ -1384,6 +1431,21 @@ static int rockchip_tcphy_set_mode(struct phy *phy,
 		priv->flip ? "reverse" : "normal");
 
 	ret = rockchip_tcphy_init(phy, priv, new_mode);
+	if (ret == -ETIMEDOUT) {
+		/*
+		 * The common block did not report ready. Seen intermittently
+		 * on ROC-RK3399-PC's tcphy0 starting the USB3 gadget (1 of 6
+		 * boots; Linux B139, 1 of 56), with resets and clocks in the
+		 * same order Linux uses and no cause found. With the whole PHY
+		 * back in reset, try once more; the log line above says
+		 * how often this path runs.
+		 */
+		/* init's error path already reset tcphy/uphy, clocks off */
+		reset_assert(&priv->pipe_rst);
+		udelay(100);
+		dev_warn(phy->dev, "PMA not ready; retrying after a full PHY reset\n");
+		ret = rockchip_tcphy_init(phy, priv, new_mode);
+	}
 	if (ret) {
 		dev_err(phy->dev, "failed to init tcphy (ret=%d)\n", ret);
 		return ret;
@@ -1787,6 +1849,9 @@ static int rockchip_tcphy_probe(struct udevice *dev)
 		dev_err(dev, "failed find proper phy-cfg\n");
 		return -EINVAL;
 	}
+
+	priv->orient_inverted =
+		dev_read_bool(dev, "libretech,typec-orientation-inverted");
 
 	ret = rockchip_tcphy_parse_dt(dev);
 	if (ret)

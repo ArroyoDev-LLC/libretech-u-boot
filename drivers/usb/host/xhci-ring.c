@@ -675,8 +675,18 @@ int xhci_bulk_tx(struct usb_device *udev, unsigned long pipe,
 	 * the next transfer. It is the responsibility of the upper layer to
 	 * have dealt with whatever caused the error.
 	 */
-	if ((le32_to_cpu(ep_ctx->ep_info) & EP_STATE_MASK) == EP_STATE_HALTED)
+	if ((le32_to_cpu(ep_ctx->ep_info) & EP_STATE_MASK) == EP_STATE_HALTED) {
 		reset_ep(udev, ep_index);
+		/*
+		 * The context read above still says Halted; prepare_ring()
+		 * below would refuse the transfer on it, and the next call
+		 * would reset the endpoint again -- a keyboard polled from the
+		 * console did exactly that on every poll. Read the state the
+		 * reset left.
+		 */
+		xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes,
+				 virt_dev->out_ctx->size);
+	}
 
 	ring = virt_dev->eps[ep_index].ring;
 	if (!ring)

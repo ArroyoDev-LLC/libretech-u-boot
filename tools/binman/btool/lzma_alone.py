@@ -69,7 +69,13 @@ class Bintoollzma_alone(bintool.Bintool):
             tools.write_file(inf.name, indata)
             with tempfile.NamedTemporaryFile(prefix='compo.otmp',
                                              dir=tools.get_output_dir()) as outf:
-                args = ['e', inf.name, outf.name, '-lc1', '-lp0', '-pb0', '-d8']
+                # lc and lp size the decoder's probability tables, which an
+                # SPL takes from its fixed malloc pool (lib/lzma/LzmaTools.c),
+                # so they stay at 1 and 0. The dictionary costs the decoder
+                # nothing (it decodes into the output buffer): -d8, a 256-byte
+                # window, left U-Boot proper 29% larger than -d23 -fb273 -pb2.
+                args = ['e', inf.name, outf.name, '-lc1', '-lp0', '-pb2', '-d23',
+                        '-fb273']
                 self.run_cmd(*args, binary=True)
                 return tools.read_file(outf.name)
 

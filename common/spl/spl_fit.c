@@ -478,12 +478,18 @@ static int load_simple_fit(struct spl_load_info *info, ulong fit_offset,
 	}
 
 	if (CONFIG_IS_ENABLED(FIT_SIGNATURE)) {
-		printf("## Checking hash(es) for Image %s ... ",
-		       fit_get_name(fit, node, NULL));
+		const char *name = fit_get_name(fit, node, NULL);
+
+		if (!CONFIG_IS_ENABLED(FIT_QUIET))
+			printf("## Checking hash(es) for Image %s ... ", name);
 		if (!fit_image_verify_with_data(fit, node, gd_fdt_blob(), src,
-						length))
+						length)) {
+			if (CONFIG_IS_ENABLED(FIT_QUIET))
+				printf("\n## Image %s: hash check FAILED\n", name);
 			return -EPERM;
-		puts("OK\n");
+		}
+		if (!CONFIG_IS_ENABLED(FIT_QUIET))
+			puts("OK\n");
 	}
 
 	if (CONFIG_IS_ENABLED(FIT_IMAGE_POST_PROCESS))
@@ -1016,11 +1022,17 @@ static int spl_simple_fit_parse(struct spl_fit_info *ctx)
 		return -EINVAL;
 
 	if (IS_ENABLED(CONFIG_SPL_FIT_SIGNATURE)) {
-		printf("## Checking hash(es) for config %s ... ",
-		       fit_get_name(ctx->fit, ctx->conf_node, NULL));
-		if (fit_config_verify(ctx->fit, ctx->conf_node))
+		const char *name = fit_get_name(ctx->fit, ctx->conf_node, NULL);
+
+		if (!CONFIG_IS_ENABLED(FIT_QUIET))
+			printf("## Checking hash(es) for config %s ... ", name);
+		if (fit_config_verify(ctx->fit, ctx->conf_node)) {
+			if (CONFIG_IS_ENABLED(FIT_QUIET))
+				printf("\n## Config %s: hash check FAILED\n", name);
 			return -EPERM;
-		puts("OK\n");
+		}
+		if (!CONFIG_IS_ENABLED(FIT_QUIET))
+			puts("OK\n");
 	}
 
 	/* find the node holding the images information */

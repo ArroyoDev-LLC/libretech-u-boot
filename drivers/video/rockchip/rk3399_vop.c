@@ -135,5 +135,8 @@ U_BOOT_DRIVER(rk3399_vop) = {
 	.ops	= &rk3399_vop_ops,
 	.bind	= rk_vop_bind,
 	.probe	= rk3399_vop_probe,
+	.remove	= rk_vop_remove,
 	.priv_auto	= sizeof(struct rk_vop_priv),
+	/* removed before the OS runs: a scanning VOP blocks its PD idle */
+	.flags	= DM_FLAG_OS_PREPARE,
 };

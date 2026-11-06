@@ -122,6 +122,18 @@ struct xhci_ctrl *xhci_get_ctrl(struct usb_device *udev)
 	return dev_get_priv(dev);
 }
 
+void xhci_set_event_wait_ms(struct usb_device *udev, unsigned int ms)
+{
+	struct xhci_ctrl *ctrl = xhci_get_ctrl(udev);
+
+	/*
+	 * Same ctrl the transfer path waits on. An ops-pointer compare
+	 * against &xhci_usb_ops missed this controller and left the
+	 * ceiling at 0, so the wait stayed XHCI_TIMEOUT.
+	 */
+	ctrl->event_wait_ms = ms;
+}
+
 /**
  * Waits for as per specified amount of time
  * for the "result" to match with "done"
@@ -1468,7 +1480,7 @@ int xhci_deregister(struct udevice *dev)
 {
 	struct xhci_ctrl *ctrl = dev_get_priv(dev);
 
-	xhci_lowlevel_stop(ctrl);
+	XHCI_ASYNC_FORGET(ctrl); xhci_lowlevel_stop(ctrl);
 	xhci_cleanup(ctrl);
 
 	return 0;

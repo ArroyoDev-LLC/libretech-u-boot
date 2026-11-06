@@ -4,5 +4,5 @@ S:	Maintained
 L:	u-boot-amlogic@groups.io
 F:	board/amlogic/aml-s805x-ac/
 F:	include/configs/libretech-ac.h
-F:	configs/libretech-ac_defconfig
+F:	configs/libretech-ac_vendor_defconfig
 F:	doc/board/amlogic/libretech-ac.rst

@@ -132,6 +132,15 @@ int do_reset(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
 	printf("resetting ...\n");
 	mdelay(100);
 
+	/*
+	 * Quiesce the devices as bootm does before an OS: what survives the
+	 * reset (an SD card in 1.8 V signalling, its IO rail on a GPIO the
+	 * reset does not clear) is handed back to the BootROM in its
+	 * power-on state.  Here and not in sysreset_walk_halt(), which
+	 * panic() reaches too.
+	 */
+	dm_remove_devices_active();
+
 	sysreset_walk_halt(reset_type);
 
 	return 0;

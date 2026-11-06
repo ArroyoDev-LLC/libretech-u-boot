@@ -10,6 +10,10 @@
  *                under hiubus/sysctrl) and the OTG reset (cbus)
  *   storage:     sd_emmc_c (eMMC, alias mmc0) and sd_emmc_b (SD, alias mmc1)
  *                with their pin groups (pinctrl_periphs under periphs)
+ *
+ * The SD slot's UHS rails are board nodes the AC boards (no SD slot) do not
+ * have, so they are in meson-gxl-libretech-cc-spl-sd-uhs-u-boot.dtsi, which only
+ * the CC boards include.
  */
 
 &xtal {

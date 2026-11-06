@@ -527,8 +527,17 @@ static int dwmci_data_transfer(struct dwmci_host *host, struct mmc_data *data,
 		 * as it is.
 		 */
 		if (get_timer(start) > timeout) {
-			printf("%s: no data completion in %u ms (RINTSTS 0x%08x)\n",
-			       host->name, timeout, mask);
+			/*
+			 * A tuning block at a failing phase is the sweep's
+			 * expected result, counted as a bad phase: not news
+			 * on the console.
+			 */
+			if (tuning)
+				debug("%s: no data completion in %u ms (RINTSTS 0x%08x)\n",
+				      host->name, timeout, mask);
+			else
+				printf("%s: no data completion in %u ms (RINTSTS 0x%08x)\n",
+				       host->name, timeout, mask);
 			host->err_rintsts = mask;
 			dwmci_abort_data(host);
 			dwmci_recover(host);
@@ -655,6 +664,35 @@ static u32 dwmci_wait_cmd_done(struct dwmci_host *host, ulong *elapsed_us)
 	return mask;
 }
 
+/*
+ * Card read threshold, as Linux's dw_mci_ctrl_thld(): in SDR104 / HS200 /
+ * HS400 a read starts only once the FIFO has room for a whole block, so the
+ * controller never stops the card clock inside a block when the FIFO fills.
+ * Without it the ROC-RK3328-CC read its SD in SDR104 at 200 MHz with data
+ * CRC errors (RINTSTS 0xa4) and stepped down to 150 MHz; with it, clean.
+ * Every other transfer clears it.
+ */
+static void dwmci_set_card_threshold(struct dwmci_host *host,
+				     struct mmc_data *data)
+{
+	struct mmc *mmc = host->mmc;
+	u32 verid = dwmci_readl(host, DWMCI_VERID) & 0xffff;
+	bool tuned = mmc && (mmc->selected_mode == UHS_SDR104 ||
+			     mmc->selected_mode == MMC_HS_200 ||
+			     mmc->selected_mode == MMC_HS_400);
+
+	if (verid < DWMCI_VERID_240A)
+		return;	/* no CDTHRCTL: the offset is in the FIFO region */
+
+	if (tuned && data->flags == MMC_DATA_READ &&
+	    data->blocksize / 4 <= host->fifo_depth)
+		dwmci_writel(host, DWMCI_CDTHRCTL,
+			     DWMCI_SET_THLD(data->blocksize,
+					    DWMCI_CARD_RD_THR_EN));
+	else
+		dwmci_writel(host, DWMCI_CDTHRCTL, 0);
+}
+
 static int dwmci_send_cmd_common(struct dwmci_host *host, struct mmc_cmd *cmd,
 				 struct mmc_data *data, void *cur_idmac)
 {
@@ -672,6 +710,7 @@ static int dwmci_send_cmd_common(struct dwmci_host *host, struct mmc_cmd *cmd,
 				       DWMCI_DATA_TIMEOUT_MS);
 
 	if (data) {
+		dwmci_set_card_threshold(host, data);
 		if (host->fifo_mode) {
 			dwmci_writel(host, DWMCI_BLKSIZ, data->blocksize);
 			dwmci_writel(host, DWMCI_BYTCNT,
@@ -917,6 +956,9 @@ static int dwmci_send_cmd(struct mmc *mmc, struct mmc_cmd *cmd,
 	struct dwmci_host *host = mmc->priv;
 	const size_t buf_size = data ? DIV_ROUND_UP(data->blocks, 8) : 0;
 
+	if (host->absent)
+		return -ENOMEDIUM;
+
 	if (host->dma_64bit_address) {
 		ALLOC_CACHE_ALIGN_BUFFER(struct dwmci_idmac64, idmac, buf_size);
 		return dwmci_send_cmd_retry(host, cmd, data, idmac);
@@ -932,6 +974,9 @@ static int dwmci_control_clken(struct dwmci_host *host, bool on)
 	const u32 cmd_only_clk = DWMCI_CMD_PRV_DAT_WAIT | DWMCI_CMD_UPD_CLK;
 	ulong start = get_timer(0);
 	u32 flags, mask;
+
+	if (host->absent)
+		return -ENOMEDIUM;
 
 	dwmci_writel(host, DWMCI_CLKENA, val);
 
@@ -956,6 +1001,27 @@ static int dwmci_control_clken(struct dwmci_host *host, bool on)
 		if (!(mask & DWMCI_CMD_START))
 			break;
 		if (get_timer(start) > DWMCI_BUSY_TIMEOUT_MS) {
+			u32 status = dwmci_readl(host, DWMCI_STATUS);
+
+			/*
+			 * An empty slot (an unfitted eMMC module) reads DAT0
+			 * busy and DAT3 low, so the update waits out the whole
+			 * busy budget -- and the core retries it, and every
+			 * later probe of the slot pays it again (RK3328: 1.537 s
+			 * a probe). Before the card's first init no transfer can
+			 * be holding DAT0, and a fitted card pulls DAT3 high:
+			 * record the slot as absent for this boot, quietly (an
+			 * absent optional device is a state, not an error). A
+			 * fitted card never reaches this timeout, so its path
+			 * is unchanged.
+			 */
+			if ((status & DWMCI_BUSY) && !(status & DWMCI_DATA3_STATUS) &&
+			    !(host->mmc && host->mmc->has_init)) {
+				debug("%s: no card (STATUS %08x)\n", host->name,
+				      status);
+				host->absent = true;
+				return -ENOMEDIUM;
+			}
 			printf("%s: clock update (CLKENA %s) did not complete\n",
 			       host->name, on ? "on" : "off");
 			return -ETIMEDOUT;
@@ -1166,6 +1232,9 @@ static int dwmci_set_ios(struct mmc *mmc)
 
 	debug("Bus width = %d, clock: %d%s\n", mmc->bus_width, mmc->clock,
 	      mmc->clk_disable ? " (gated)" : "");
+
+	if (host->absent)
+		return -ENOMEDIUM;
 
 	/*
 	 * The core gates the card clock around a signal-voltage switch (SD

@@ -2333,9 +2333,15 @@ static void rkclk_init(struct rockchip_cru *cru)
 	assert((hclk_div + 1) * PERILP1_HCLK_HZ ==
 	       GPLL_HZ && (hclk_div < 0x1f));
 
-	pclk_div = PERILP1_HCLK_HZ / PERILP1_HCLK_HZ - 1;
-	assert((pclk_div + 1) * PERILP1_HCLK_HZ ==
-	       PERILP1_HCLK_HZ && (hclk_div < 0x7));
+	/*
+	 * pclk_perilp1 = hclk / 2 = 49.5 MHz (PERILP1_PCLK_HZ), as the kernel
+	 * DT assigns (50 MHz). This divided hclk by itself, so pclk ran at
+	 * 99 MHz, and the TSADC (on pclk_perilp1) then failed to start
+	 * converting on about one arm in ten (rockchip B184).
+	 */
+	pclk_div = PERILP1_HCLK_HZ / PERILP1_PCLK_HZ - 1;
+	assert((pclk_div + 1) * PERILP1_PCLK_HZ ==
+	       PERILP1_HCLK_HZ && (pclk_div < 0x7));
 
 	rk_clrsetreg(&cru->clksel_con[25],
 		     PCLK_PERILP1_DIV_CON_MASK | HCLK_PERILP1_DIV_CON_MASK |

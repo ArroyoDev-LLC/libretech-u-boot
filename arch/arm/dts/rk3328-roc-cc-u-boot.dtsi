@@ -12,18 +12,18 @@
 
 		smbios {
 			system {
-				manufacturer = "Libre Computer";
-				product = "ROC-RK3328-CC";
+				manufacturer = "libre-computer";
+				product = "roc-rk3328-cc";
 			};
 
 			baseboard {
-				manufacturer = "Libre Computer";
-				product = "ROC-RK3328-CC";
+				manufacturer = "libre-computer";
+				product = "roc-rk3328-cc";
 			};
 
 			chassis {
-				manufacturer = "Libre Computer";
-				product = "ROC-RK3328-CC";
+				manufacturer = "libre-computer";
+				product = "roc-rk3328-cc";
 			};
 		};
 	};
@@ -33,6 +33,93 @@
 	hnp-srp-disable;
 };
 
-&vcc_sd {
+#ifdef CONFIG_SPL_USBFLASH
+/*
+ * The SPL USB flash session runs its gadget on the OTG port: the controller,
+ * its Innosilicon USB2 PHY port and the GRF syscon the PHY lives in are in
+ * the SPL tree. The port's role there: spl-usbflash.c.
+ */
+&usb20_otg {
 	bootph-pre-ram;
 };
+
+&usb2phy_grf {
+	bootph-pre-ram;
+};
+
+&u2phy {
+	bootph-pre-ram;
+};
+
+&u2phy_otg {
+	bootph-pre-ram;
+};
+#endif
+
+&vcc_sd {
+	bootph-pre-ram;
+	/*
+	 * VCC_SD is VCC_IO through a P-MOSFET switch (Q2100), with 10.1 uF on
+	 * the card side (C2101, C2102) and a 10k bleed (R2101): about 100 ms of
+	 * RC, less with the card's own load. Switched off for the 2 ms of
+	 * mmc_power_cycle(), a card the BootROM had probed is not reset, and
+	 * then answers ACMD41 without CCS (an SDHC card read as ~30 MiB SDSC).
+	 * Measured on one 29.7 GiB card: 5 ms off fails, 20 ms and 100 ms read
+	 * it as SDHC. The gate's pull-down (R2103) keeps VCC_SD on through a
+	 * SoC reset: a reset alone does not power the card down.
+	 */
+	off-on-delay-us = <100000>;
+};
+
+#ifdef CONFIG_SPL_MMC_UHS_SUPPORT
+/*
+ * SD UHS-I in SPL: the card's IO rail (vcc_sdio, a regulator-gpio on the
+ * GRF's GPIO_MUTE line) and the IO domain that has to follow it.
+ */
+&vcc_sdio {
+	bootph-pre-ram;
+};
+
+&grf_gpio {
+	bootph-pre-ram;
+};
+
+&io_domains {
+	bootph-pre-ram;
+};
+#endif
+
+/*
+ * BL31, as LZMA FIT nodes, as rk3399-roc-pc-u-boot.dtsi does.
+ *
+ * Bootloader policy (design/rules/bootloader/policy.md, "BL33 compression"):
+ * every payload SPL loads out of the FIT ships compressed with the algorithm
+ * SPL decompresses -- FIT_UBOOT_COMP, so LZMA where CONFIG_SPL_LZMA is set and
+ * "none" otherwise. The generic @atf-SEQ template emits each BL31 ELF segment
+ * with `compression = "none"`; `fit,compress` compresses the bytes and labels
+ * the node from one directive.
+ *
+ * Board-scoped, because it is a memory-map claim: SPL reads a compressed node
+ * into the staging window first. roc-cc-rk3328_defconfig names that window,
+ * CONFIG_SPL_FIT_COMP_STAGING_ADDR 0x00500000 with
+ * CONFIG_SPL_FIT_COMP_STAGING_MAX 0x00100000 above it, and the build asserts
+ * it ends below CONFIG_TEXT_BASE (0x00800000) and starts above the FIT
+ * buffer's ceiling (CONFIG_SPL_LOAD_FIT_ADDRESS 0x60000 +
+ * CONFIG_SPL_FIT_BUF_MAX 0x1f0000). Unset, the window is
+ * CONFIG_SYS_LOAD_ADDR (0x800800), inside U-Boot proper.
+ *
+ * The other things it has to clear, read from `readelf -l bl31.elf` and the
+ * built .config: BL31 0x00040000+0x18000 (.text) and 0x00058000+0x6e000
+ * (.data + .bss) in DRAM, 0xff090000+0x40 in SRAM; SPL's text below 0x3c000,
+ * its heap 0x01e00000-0x03e00000, stack 0x03f00000 and BSS 0x03f80000; the
+ * SPL USB session's RAM slots from 0x04000000 (rk3328_common.h).
+ */
+#ifdef HAS_FIT
+&fit_template {
+	images {
+		@atf-SEQ {
+			fit,compress = FIT_UBOOT_COMP;
+		};
+	};
+};
+#endif /* HAS_FIT */

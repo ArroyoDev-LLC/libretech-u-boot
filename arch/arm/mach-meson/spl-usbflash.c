@@ -397,6 +397,36 @@ static void usbflash_reset(void)
 		;
 }
 
+#if defined(CONFIG_MESON_G12A)
+/*
+ * `usbflash bootrom` on G12A/SM1: this stage runs secure before BL31, so the
+ * BootROM override word is a plain store (AO_RTI_STATUS_REG2 = 0x4f5244b1,
+ * cmd/bootrom.c, arch/arm/mach-meson/bootrom-g12a.c).  Only G12A/SM1 boards
+ * run this open SPL (G12B boots the vendor chain); no socinfo check, because
+ * AO_SEC_SD_CFG8 (0xff800220) reads 0 in these stages (measured on the
+ * S905D3-CC in the TPL).
+ */
+#define USBFLASH_AO_RTI_STATUS_REG2	0xFF800008UL
+#define USBFLASH_OVD_USB_FOREVER	0x4f5244b1u
+
+static int usbflash_bootrom_check(void)
+{
+	return 0;
+}
+
+static int usbflash_bootrom_arm(void)
+{
+	writel(USBFLASH_OVD_USB_FOREVER,
+	       (void __iomem *)USBFLASH_AO_RTI_STATUS_REG2);
+	if (readl((void __iomem *)USBFLASH_AO_RTI_STATUS_REG2) !=
+	    USBFLASH_OVD_USB_FOREVER) {
+		writel(0, (void __iomem *)USBFLASH_AO_RTI_STATUS_REG2);
+		return -EIO;
+	}
+	return 0;
+}
+#endif
+
 static const struct spl_usbflash_family usbflash_meson = {
 	.emmc_alts	= MESON_DFU_MMC_EMMC_ALTS,
 	.sd_alts	= MESON_DFU_MMC_SD_ALTS,
@@ -410,6 +440,10 @@ static const struct spl_usbflash_family usbflash_meson = {
 	/* GX chain: the TPL's and this stage's UART output (gx-bootlog.h) */
 	.replay		= gx_bootlog_replay,
 	.reset		= usbflash_reset,
+#if defined(CONFIG_MESON_G12A)
+	.bootrom_check	= usbflash_bootrom_check,
+	.bootrom_arm	= usbflash_bootrom_arm,
+#endif
 };
 
 /*

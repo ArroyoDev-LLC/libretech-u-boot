@@ -22,7 +22,7 @@
  * board's DDR3 (Nanya NT5CB256M16DP) across its whole Tc 0..95 C range.  The
  * open chain -- the product default -- writes this value in its SPL
  * (GXL_DDR3_REFI_T100NS in dram-timings-gx.h, operator decision D14), so this
- * is a no-op there.  The opt-in vendor chain (libretech-cc_defconfig) trains
+ * is a no-op there.  The opt-in vendor chain (libretech-cc_vendor_defconfig) trains
  * with the vendor BL2, which leaves 76 (7.6 us), legal only to 85 C, and
  * nothing can read the DRAM's temperature on this board.  So U-Boot proper,
  * the first stage of ours in that chain, lowers the field.

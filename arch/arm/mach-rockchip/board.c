@@ -9,6 +9,8 @@
  *      (C) Copyright 2017 Theobroma Systems Design und Consulting GmbH
  */
 #include <config.h>
+#include <board-config.h>
+#include <bootsource.h>
 #include <chip_serial.h>
 #include <clk.h>
 #include <cpu_func.h>
@@ -29,6 +31,7 @@
 #include <part.h>
 #include <ram.h>
 #include <syscon.h>
+#include <sysreset.h>
 #include <u-boot/uuid.h>
 #include <u-boot/crc.h>
 #include <u-boot/sha256.h>
@@ -37,7 +40,10 @@
 #include <asm/arch-rockchip/boot_mode.h>
 #include <asm/arch-rockchip/clock.h>
 #include <asm/arch-rockchip/periph.h>
+#include <asm/arch-rockchip/cru.h>
+#include <linux/delay.h>
 #include <power/regulator.h>
+#include <power/rk8xx_pmic.h>
 
 #if IS_ENABLED(CONFIG_EFI_HAVE_CAPSULE_SUPPORT) && IS_ENABLED(CONFIG_EFI_PARTITION)
 
@@ -108,7 +114,8 @@ static int get_mmc_desc(struct blk_desc **desc)
 	return 0;
 }
 
-void set_dfu_alt_info(char *interface, char *devstr)
+/* Weak: a board that lists its own DFU alternates defines its own */
+__weak void set_dfu_alt_info(char *interface, char *devstr)
 {
 	const char *name;
 	bool first = true;
@@ -193,9 +200,41 @@ __weak int rk_board_late_init(void)
 	return 0;
 }
 
+#if IS_ENABLED(CONFIG_ROCKCHIP_THERMAL_RESET_POWER_OFF)
+/*
+ * Over-temperature ends in power-off (rockchip B186 F22): a boot whose reset
+ * cause is THERMAL powers the board off instead of booting on. If the PMIC
+ * does not cut the power, the boot goes on, as before.
+ */
+static void rockchip_thermal_reset_power_off(void)
+{
+	const char *cause = get_reset_cause();
+
+	if (!cause || strcmp(cause, "THERMAL"))
+		return;
+	/* A MaskROM USB boot is the recovery path: never refuse it */
+	if (IS_ENABLED(CONFIG_BOOTSOURCE) && bootsource_get() == BOOTSOURCE_USB) {
+		printf("Thermal reset: USB boot, booting on\n");
+		return;
+	}
+	printf("Thermal reset: powering off; off until powered on again\n");
+	if (sysreset_walk(SYSRESET_POWER_OFF) == -EINPROGRESS)
+		mdelay(1000);
+	printf("Thermal reset: power-off failed, booting on\n");
+}
+#endif
+
 int board_late_init(void)
 {
 	setup_boot_mode();
+
+#if IS_ENABLED(CONFIG_ROCKCHIP_THERMAL_RESET_POWER_OFF)
+	rockchip_thermal_reset_power_off();
+#endif
+
+	/* After every environment layer, the board config block included */
+	if (IS_ENABLED(CONFIG_ROCKCHIP_RK8XX_POWER_ON_ATTACH))
+		rk8xx_power_on_attach();
 
 #if IS_ENABLED(CONFIG_EFI_HAVE_CAPSULE_SUPPORT) && IS_ENABLED(CONFIG_EFI_PARTITION)
 	gpt_capsule_update_setup();
@@ -406,6 +445,14 @@ __weak int misc_init_r(void)
 	ret = rockchip_early_misc_init_r();
 	if (ret)
 		return ret;
+
+	/*
+	 * The board config block is the layer over the FAT environment
+	 * (claude design/rules/bootloader/board-config.md). First, so a
+	 * cpuid failure below cannot skip it.
+	 */
+	if (IS_ENABLED(CONFIG_BOARD_CONFIG))
+		board_config_env_import();
 
 	ret = rockchip_cpuid_from_efuse(cpuid_offset, cpuid_length, cpuid);
 	if (ret) {

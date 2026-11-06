@@ -20,6 +20,8 @@
 #include <asm/arch-rockchip/sdram_rk3328.h>
 #include <asm/arch-rockchip/uart.h>
 #include <linux/delay.h>
+#include <linux/kernel.h>
+#include <linux/sizes.h>
 
 struct dram_info {
 #ifdef CONFIG_TPL_BUILD
@@ -37,6 +39,22 @@ struct dram_info {
 #ifdef CONFIG_TPL_BUILD
 
 struct rk3328_sdram_channel sdram_ch;
+
+#if IS_ENABLED(CONFIG_RAM_ROCKCHIP_RK3328_FALLBACK)
+#include <asm/arch-rockchip/sdram_rk3328_ddr4_666.h>
+
+/*
+ * The step-down rung, from the same cells rk3328-sdram-ddr4-666.dtsi uses.
+ * Writable: a rung's geometry pass rewrites its own pctl/cap fields.
+ */
+#define RK3328_SDRAM_C_CELL(c) c,
+static u32 rk3328_sdram_fallback_cells[] = {
+	RK3328_SDRAM_DDR4_666(RK3328_SDRAM_C_CELL)
+};
+_Static_assert(sizeof(rk3328_sdram_fallback_cells) ==
+	       sizeof(struct rk3328_sdram_params),
+	       "the DDR4-666 cells are not a whole struct rk3328_sdram_params");
+#endif
 
 struct rockchip_dmc_plat {
 #if CONFIG_IS_ENABLED(OF_PLATDATA)
@@ -468,19 +486,28 @@ cap_err:
 	return -1;
 }
 
-static int sdram_init_detect(struct dram_info *dram,
-			     struct rk3328_sdram_params *sdram_params)
+/*
+ * One rung: train the parameter set, detect the geometry, retrain with it.
+ * A training failure in either pass is returned, not ignored (the passes'
+ * results used to be dropped, so a failed training went on to detect and
+ * boot on an untrained controller).
+ */
+static int sdram_try(struct dram_info *dram,
+		     struct rk3328_sdram_params *sdram_params)
 {
 	u32 sys_reg = 0;
 	u32 sys_reg3 = 0;
 	struct sdram_cap_info *cap_info = &sdram_params->ch.cap_info;
+	int ret;
 
 	debug("Starting SDRAM initialization...\n");
 
 	memcpy(&sdram_ch, &sdram_params->ch,
 	       sizeof(struct rk3328_sdram_channel));
 
-	sdram_init(dram, sdram_params, 0);
+	ret = sdram_init(dram, sdram_params, 0);
+	if (ret)
+		return ret;
 	dram_detect_cap(dram, sdram_params, 0);
 
 	/* modify bw, cs related timing */
@@ -493,7 +520,9 @@ static int sdram_init_detect(struct dram_info *dram,
 		sdram_ch.noc_timings.ddrtiming.b.bwratio = 1;
 
 	/* reinit sdram by real dram cap */
-	sdram_init(dram, sdram_params, 1);
+	ret = sdram_init(dram, sdram_params, 1);
+	if (ret)
+		return ret;
 
 	/* redetect cs1 row */
 	sdram_detect_cs1_row(cap_info, sdram_params->base.dramtype);
@@ -506,7 +535,159 @@ static int sdram_init_detect(struct dram_info *dram,
 		writel(sys_reg3, &dram->grf->os_reg[3]);
 	}
 
+	return 0;
+}
+
+/* A bijection on u32: consecutive keys differ in every byte lane. */
+static inline u32 rk3328_dram_pat(u32 k)
+{
+	return (k * 0x9e3779b9u) ^ 0xa5a5a5a5u;
+}
+
+#define RK3328_MEMTEST_DENSE	256
+/* Block keys start here; stride keys (megabyte indices) stay below 0x1000. */
+#define RK3328_MEMTEST_BLOCK_KEY	0x40000000u
+
+/*
+ * Write the dense block and the address-line walk of one megabyte, or check
+ * and clear them. Keys are RK3328_MEMTEST_BLOCK_KEY plus the word index, so
+ * no word of the test holds the same value as another and an alias always
+ * reads back wrong.
+ */
+static u32 rk3328_dram_block(ulong off, bool check, u32 *lanes)
+{
+	volatile u32 *p = (volatile u32 *)(CFG_SYS_SDRAM_BASE + off);
+	const u32 k = RK3328_MEMTEST_BLOCK_KEY + (u32)(off >> 2);
+	u32 i, b, d, errors = 0;
+	volatile u32 *w;
+
+	for (i = 0; i < RK3328_MEMTEST_DENSE + 10; i++) {
+		b = i - RK3328_MEMTEST_DENSE + 10;
+		w = i < RK3328_MEMTEST_DENSE ? &p[i] : &p[(1u << b) >> 2];
+		if (!check) {
+			*w = rk3328_dram_pat(k + i);
+			continue;
+		}
+		d = *w ^ rk3328_dram_pat(k + i);
+		*w = 0;
+		if (d) {
+			errors++;
+			*lanes |= d;
+		}
+	}
+
+	return errors;
+}
+
+/*
+ * The memtest a rung must pass before it is accepted (P16 M2; bootloader
+ * policy "DRAM capacity & geometry are detected at runtime": a rung is
+ * accepted when it trains, detects its full size and memtests clean). The
+ * shape is the Amlogic TPL's (arch/arm/mach-meson/dram-gx.c):
+ *
+ *  - one hashed word per megabyte over the whole usable window, all written
+ *    before any is read, so an aliased map, a wrong rank size or a dead CS1
+ *    reads back another megabyte's word (AXI bits 20 and up);
+ *  - in the lowest and the highest megabyte, a dense block of 256 words
+ *    (bits 2..9, every byte lane through all 256 values) and one word at
+ *    1 << b for b = 10..19, the bits the stride never varies (bank, column
+ *    and low row bits).
+ *
+ * Every checked word is then cleared to 0, so nothing of the test is left
+ * where the BootROM loads the SPL (SPL_TEXT_BASE 0). The window stops at
+ * SDRAM_MAX_SIZE, where the peripherals start. Returns the error count;
+ * *lanes is the OR of every mismatch, so a failure names its byte lanes.
+ */
+static u32 rk3328_dram_memtest(struct rk3328_sdram_params *sdram_params,
+			       u32 *lanes)
+{
+	struct sdram_cap_info *cap_info = &sdram_params->ch.cap_info;
+	u64 cap = sdram_get_cs_cap(cap_info, 3, sdram_params->base.dramtype);
+	ulong end, off;
+	u32 errors = 0, d;
+
+	if (cap_info->row_3_4)
+		cap = cap * 3 / 4;
+	end = min_t(u64, cap, SDRAM_MAX_SIZE) & ~(ulong)(SZ_1M - 1);
+	*lanes = 0;
+	if (end < 2 * SZ_1M)
+		return 1;
+
+	for (off = 0; off < end; off += SZ_1M)
+		writel(rk3328_dram_pat(off >> 20), CFG_SYS_SDRAM_BASE + off);
+	rk3328_dram_block(0, false, NULL);
+	rk3328_dram_block(end - SZ_1M, false, NULL);
+
+	errors += rk3328_dram_block(0, true, lanes);
+	errors += rk3328_dram_block(end - SZ_1M, true, lanes);
+	for (off = 0; off < end; off += SZ_1M) {
+		/* The two blocks' first words sit on these; already checked. */
+		if (off == 0 || off == end - SZ_1M)
+			continue;
+		d = readl(CFG_SYS_SDRAM_BASE + off) ^ rk3328_dram_pat(off >> 20);
+		writel(0, CFG_SYS_SDRAM_BASE + off);
+		if (d) {
+			errors++;
+			*lanes |= d;
+		}
+	}
+
+	return errors;
+}
+
+/*
+ * One rung: train, then memtest. A memtest failure is a rung failure, so it
+ * steps down like a training failure.
+ */
+static int sdram_rung(struct dram_info *dram,
+		      struct rk3328_sdram_params *sdram_params)
+{
+	u32 errors, lanes;
+	int ret;
+
+	ret = sdram_try(dram, sdram_params);
+	if (ret) {
+		printf("DDR: training failed at %u MHz (%d)\n",
+		       sdram_params->base.ddr_freq, ret);
+		return ret;
+	}
+	errors = rk3328_dram_memtest(sdram_params, &lanes);
+	if (errors) {
+		printf("DDR: memtest FAIL at %u MHz (%u errors, lanes %08x)\n",
+		       sdram_params->base.ddr_freq, errors, lanes);
+		return -EIO;
+	}
+
+	return 0;
+}
+
+/*
+ * The DRAM step-down (bootloader policy, "DRAM capacity & geometry are
+ * detected at runtime"; boot-chain-policy §3a): train and memtest the
+ * configured set; on a failure of either, the fallback set when the board
+ * has one (RAM_ROCKCHIP_RK3328_FALLBACK), and a degraded boot says so.
+ */
+static int sdram_init_detect(struct dram_info *dram,
+			     struct rk3328_sdram_params *sdram_params,
+			     struct rk3328_sdram_params *fallback)
+{
+	bool fell = false;
+	int ret;
+
+	ret = sdram_rung(dram, sdram_params);
+	if (ret && fallback) {
+		printf("DDR: trying %u MHz\n", fallback->base.ddr_freq);
+		sdram_params = fallback;
+		ret = sdram_rung(dram, sdram_params);
+		fell = !ret;
+	}
+	if (ret)
+		return ret;
+
 	sdram_print_ddr_info(&sdram_params->ch.cap_info, &sdram_params->base, 0);
+	sdram_print_ddr_summary(&sdram_params->ch.cap_info, &sdram_params->base, 0);
+	if (fell)
+		printf("DDR: WARNING clock fallback\n");
 
 	return 0;
 }
@@ -515,8 +696,12 @@ static int rk3328_dmc_init(struct udevice *dev)
 {
 	struct dram_info *priv = dev_get_priv(dev);
 	struct rockchip_dmc_plat *plat = dev_get_plat(dev);
+	struct rk3328_sdram_params *fallback = NULL;
 	int ret;
 
+#if IS_ENABLED(CONFIG_RAM_ROCKCHIP_RK3328_FALLBACK)
+	fallback = (void *)rk3328_sdram_fallback_cells;
+#endif
 #if CONFIG_IS_ENABLED(OF_REAL)
 	struct rk3328_sdram_params *params = &plat->sdram_params;
 #else
@@ -538,7 +723,7 @@ static int rk3328_dmc_init(struct udevice *dev)
 	debug("%s phy %p pctrl %p grf %p cru %p msch %p ddr_grf %p\n",
 	      __func__, priv->phy, priv->pctl, priv->grf, priv->cru,
 	      priv->msch, priv->ddr_grf);
-	ret = sdram_init_detect(priv, params);
+	ret = sdram_init_detect(priv, params, fallback);
 	if (ret < 0) {
 		printf("%s DRAM init failed%d\n", __func__, ret);
 		return ret;

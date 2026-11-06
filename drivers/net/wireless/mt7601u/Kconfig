@@ -1,0 +1,34 @@
+config WIFI_MT7601U
+	bool "MediaTek MT7601U USB Wi-Fi background scan (EXPERIMENTAL)"
+	depends on USB_XHCI_HCD && CYCLIC
+	select USB_XHCI_ASYNC_BULK
+	select SHA1
+	select AES
+	default n
+	help
+	  EXPERIMENTAL. Port of the Linux mt7601u driver: finds an MT7601U USB
+	  dongle, uploads its MCU firmware, initialises MAC/BBP/RF for 20 MHz on
+	  2.4 GHz, and adds a 'wifi' command. 'scan start' registers a
+	  CONFIG_CYCLIC function that hops channels 1-11 while U-Boot sits at its
+	  prompt, filling a BSS table from beacons and probe responses.
+	  'join <ssid>' takes a scanned BSS through 802.11 authentication,
+	  association and, for a WPA2-PSK network, the four-way handshake
+	  (passphrase from the 'wifi_pass' environment variable), installing the
+	  pairwise and group keys so U-Boot's net stack can run over the link.
+	  It joins the operator's own network as a station.
+
+	  Both bulk-IN endpoints are driven by the xHCI non-blocking TD API
+	  (USB_XHCI_ASYNC_BULK); cancelling an in-flight bulk IN wedges this
+	  dongle's USB RX DMA, so the TDs are never cancelled per poll.
+
+	  For development and bring-up only. No board enables it by default.
+
+config WIFI_MT7601U_FIRMWARE_PATH
+	string "MT7601U firmware file to link in"
+	depends on WIFI_MT7601U
+	default "/lib/firmware/mt7601u.bin"
+	help
+	  Absolute path, on the build host, of the linux-firmware mt7601u.bin
+	  (45412 bytes). It is embedded with .incbin at build time; the build
+	  fails with "No rule to make target '<path>'" if the file is absent.
+	  No firmware binary is kept in the U-Boot tree.

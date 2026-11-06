@@ -34,3 +34,14 @@
 &spifc {
 	status = "okay";
 };
+
+#if defined(CONFIG_BINMAN)
+/* Alta is G12B: amlimage VARIANT g12b @ 0xf000 (same size as g12a/sm1) */
+&binman {
+	u-boot-amlogic {
+		mkimage {
+			args = "-n", "g12b", "-T", "amlimage";
+		};
+	};
+};
+#endif

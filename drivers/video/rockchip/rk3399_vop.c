@@ -12,6 +12,7 @@
 #include <video.h>
 #include <asm/arch-rockchip/hardware.h>
 #include <asm/global_data.h>
+#include <asm/io.h>
 #include "rk_vop.h"
 
 DECLARE_GLOBAL_DATA_PTR;
@@ -75,11 +76,38 @@ static const char * const rk3399_regulator_names[] = {
 	"vcc33_lcd"
 };
 
+/*
+ * NoC QoS PRIORITY registers of the VOP read/write ports, and the value
+ * written: P1 = P0 = 3, the top level. At the reset level (0) VOPB's post
+ * buffer underflows at 3840x2160@60 and the picture flickers. The registers
+ * sit in the VOP's power domain, which is on whenever the VOP itself is
+ * reachable here. Linux saves them before it powers the domain off and
+ * restores them at power-on, so the value also carries into a kernel that
+ * does not set it itself.
+ */
+#define RK3399_QOS_PRIORITY_TOP		0x303
+#define RK3399_QOS_VOP_BIG_R		0xffac8008
+#define RK3399_QOS_VOP_BIG_W		0xffac8088
+#define RK3399_QOS_VOP_LITTLE		0xffad0008
+
+static void rk3399_vop_set_qos(struct udevice *dev)
+{
+	if (device_is_compatible(dev, "rockchip,rk3399-vop-big")) {
+		writel(RK3399_QOS_PRIORITY_TOP, RK3399_QOS_VOP_BIG_R);
+		writel(RK3399_QOS_PRIORITY_TOP, RK3399_QOS_VOP_BIG_W);
+	} else {
+		writel(RK3399_QOS_PRIORITY_TOP, RK3399_QOS_VOP_LITTLE);
+	}
+}
+
 static int rk3399_vop_probe(struct udevice *dev)
 {
 	/* Before relocation we don't need to do anything */
 	if (!(gd->flags & GD_FLG_RELOC))
 		return 0;
+
+	/* before anything can start scanout */
+	rk3399_vop_set_qos(dev);
 
 	/* Probe regulators required for the RK3399 VOP */
 	rk_vop_probe_regulators(dev, rk3399_regulator_names,

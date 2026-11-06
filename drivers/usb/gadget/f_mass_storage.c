@@ -774,9 +774,12 @@ static int do_read(struct fsg_common *common)
 				      lldiv(file_offset, curlun->blksize),
 				      lldiv(amount, curlun->blksize),
 				      (char __user *)bh->buf);
-		if (!rc)
-			return -EIO;
-
+		/*
+		 * Nothing read is a read error like any other (below): the
+		 * sense says so and no data goes out. Returning here sent the
+		 * buffer as it was (the command block just received) with the
+		 * last transfer's length, and a CSW that said it passed.
+		 */
 		nread = rc * curlun->blksize;
 
 		VLDBG(curlun, "file read %u @ %llu -> %d\n", amount,
@@ -948,8 +951,7 @@ static int do_write(struct fsg_common *common)
 					       lldiv(file_offset, curlun->blksize),
 					       lldiv(amount, curlun->blksize),
 					       (char __user *)bh->buf);
-			if (!rc)
-				return -EIO;
+			/* Nothing written is a write error (below), not a CSW that passes */
 			nwritten = rc * curlun->blksize;
 
 			VLDBG(curlun, "file write %u @ %llu -> %d\n", amount,
@@ -1064,8 +1066,7 @@ static int do_verify(struct fsg_common *common)
 				      lldiv(file_offset, curlun->blksize),
 				      lldiv(amount, curlun->blksize),
 				      (char __user *)bh->buf);
-		if (!rc)
-			return -EIO;
+		/* Nothing read is a verify error (below), not a CSW that passes */
 		nread = rc * curlun->blksize;
 
 		VLDBG(curlun, "file read %u @ %llu -> %d\n", amount,
@@ -3002,6 +3003,18 @@ int fsg_add(struct usb_configuration *c)
 	the_fsg_common = fsg_common;
 
 	return fsg_bind_config(c->cdev, c, fsg_common);
+}
+
+/*
+ * The interface class the next bind reports (its descriptors are copied from
+ * fsg_intf_desc at bind): USB_CLASS_MASS_STORAGE by default, or
+ * USB_CLASS_VENDOR_SPEC for a host whose OS must bind no driver to the LUN
+ * (the SPL flash session's `usbflash ums mmc <n> app`).  Subclass and
+ * protocol stay SCSI / Bulk-Only, so the host speaks the same commands.
+ */
+void fsg_set_interface_class(u8 cls)
+{
+	fsg_intf_desc.bInterfaceClass = cls;
 }
 
 int fsg_init(struct ums *ums_devs, int count, struct udevice *udc)

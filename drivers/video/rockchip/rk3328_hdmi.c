@@ -108,6 +108,7 @@ static int rk3328_hdmi_probe(struct udevice *dev)
 static const struct dm_display_ops rk3328_hdmi_ops = {
 	.read_edid = rk_hdmi_read_edid,
 	.enable = rk3328_hdmi_enable,
+	.detect = rk_hdmi_detect,
 };
 
 static const struct udevice_id rk3328_hdmi_ids[] = {

@@ -41,6 +41,13 @@ enum rockchip_bootrom_cmd {
 
 void back_to_bootrom(enum rockchip_bootrom_cmd brom_cmd);
 
+/*
+ * rk3399_tsadc_arm_early() - arm the TSADC's over-temperature shutdown
+ * before the TPL hands the board to the BootROM's download mode; timer-free,
+ * for save_boot_params(). RK3399 TPL only.
+ */
+void rk3399_tsadc_arm_early(void);
+
 /**
  * Boot-device identifiers as used by the BROM
  */

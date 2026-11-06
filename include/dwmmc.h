@@ -43,6 +43,7 @@
 #define DWMCI_UHS_REG		0x074
 #define DWMCI_BMOD		0x080
 #define DWMCI_PLDMND		0x084
+#define DWMCI_CDTHRCTL		0x100
 #define DWMCI_DATA		0x200
 /* Registers to support IDMAC 32-bit address mode */
 #define DWMCI_DBADDR		0x088
@@ -121,6 +122,7 @@
 /* Status register */
 #define DWMCI_FIFO_EMPTY	BIT(2)
 #define DWMCI_FIFO_FULL		BIT(3)
+#define DWMCI_DATA3_STATUS	BIT(8)
 #define DWMCI_BUSY		BIT(9)
 #define DWMCI_FIFO_MASK		0x1fff
 #define DWMCI_FIFO_SHIFT	17
@@ -145,6 +147,11 @@
 /* UHS register */
 #define DWMCI_UHS_VOLT_18V	BIT(0)
 #define DWMCI_DDR_MODE		BIT(16)
+
+/* Card threshold control register (2.40a and later) */
+#define DWMCI_CARD_RD_THR_EN	BIT(0)
+#define DWMCI_SET_THLD(v, x)	((((v) & 0xfff) << 16) | (x))
+#define DWMCI_VERID_240A	0x240a
 
 /* Internal IDMAC interrupt defines */
 #define DWMCI_IDINTEN_RI	BIT(1)
@@ -198,6 +205,10 @@ struct dwmci_idmac_regs {
  * @fifo_mode:	Use FIFO mode (not DMA) to read and write data
  * @dma_64bit_address: Whether DMA supports 64-bit address mode or not
  * @volt_switching: Whether SD voltage switching is in process or not
+ * @absent:	No card in the slot, learned this boot: a clock update before
+ *		the card's first init timed out with DAT0 busy and DAT3 low.
+ *		Every later command, clock change and card detect answers at
+ *		once instead of waiting the busy budget again
  * @regs:	Registers that can vary for different DW MMC block versions
  */
 struct dwmci_host {
@@ -258,6 +269,7 @@ struct dwmci_host {
 	bool fifo_mode;
 	bool dma_64bit_address;
 	bool volt_switching;
+	bool absent;
 	bool in_bus_error;
 	u32 err_rintsts;
 	u32 abort_rintsts;	/* RINTSTS of the STOP that aborted the last failed data command */

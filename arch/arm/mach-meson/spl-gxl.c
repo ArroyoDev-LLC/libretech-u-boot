@@ -35,6 +35,21 @@
  */
 void meson_power_init(void)
 {
+	/*
+	 * TEST_N as an ordinary output, driven high.  Its direction lives in the
+	 * secure-only AO_SEC_REG0 bit 0, which non-secure code (U-Boot proper,
+	 * Linux) cannot reach, and our TF-A does not answer the vendor's
+	 * SM_TEST_N_DIR SMC.  As an input, a low on the pad resets the SoC; as an
+	 * output both levels are safe.  On a USB boot the BootROM already leaves
+	 * it an output: AML-S905X-CC reads AO_SEC_REG0 = 0x80000001 here, before
+	 * this write, and the latch high.  Other boot sources are unmeasured, so
+	 * the secure SPL sets both anyway, and Linux drives the level through
+	 * AO_GPIO_O_EN_N bit 31 with plain MMIO.  The level is latched high
+	 * FIRST, so the pad never drives low on the way.
+	 */
+	setbits_32(GX_AO_GPIO_O_EN_N, GX_AO_TEST_N_OUT);
+	setbits_32(GX_SEC_AO_SEC_REG0, GX_AO_SEC_REG0_TEST_N_OUT);
+
 #if CONFIG_MESON_GXL_VDDEE_PWM_B
 	/*
 	 * PWM_MISC_REG_AB (0xc1108558): clear the PWM_B pre-divider [22:16],

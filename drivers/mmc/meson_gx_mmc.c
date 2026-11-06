@@ -711,5 +711,11 @@ U_BOOT_DRIVER(meson_mmc) = {
 	.bind = meson_mmc_bind,
 	.of_to_plat = meson_mmc_of_to_plat,
 	.plat_auto	= sizeof(struct meson_mmc_plat),
+	/*
+	 * Removed before an OS or a reset (dm_remove_devices_active()), so
+	 * the uclass's mmc_deinit() hands the cards on in a state the next
+	 * reader takes: an SD card in UHS goes back to 3.3 V signalling.
+	 */
+	.flags	= DM_FLAG_OS_PREPARE,
 };
 #endif /* CONFIG_IS_ENABLED(DM_MMC) */

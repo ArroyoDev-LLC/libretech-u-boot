@@ -15,6 +15,7 @@
 #include <usb.h>
 
 #include <g_dnl.h>
+#include <lc_stage.h>
 #include <linux/string.h>
 #include <usb_mass_storage.h>
 #include <dfu.h>
@@ -143,6 +144,30 @@ static bool g_dnl_console_with_dfu(const char *name)
 	return IS_ENABLED(CONFIG_USB_FUNCTION_ACM_DFU) &&
 	       !IS_ENABLED(CONFIG_XPL_BUILD) &&
 	       !strcmp(name, "usb_serial_acm") && acm_console_has_dfu();
+}
+
+/*
+ * USB_GADGET_LC_STAGE_WORD: the stage word for the gadget being bound, from
+ * the phase this is built for and the gadget's function (include/lc_stage.h).
+ * Proper's console gadget is usb_serial_acm, a resident DFU beside it or not;
+ * the SPL flash session is usb_dnl_dfu in xPL.
+ */
+static u16 g_dnl_lc_stage(const char *name)
+{
+	int phase = IS_ENABLED(CONFIG_XPL_BUILD) ? LC_STAGE_PHASE_SPL :
+						   LC_STAGE_PHASE_PROPER;
+	int fn = LC_STAGE_FN_OTHER;
+
+	if (!strcmp(name, "usb_serial_acm"))
+		fn = LC_STAGE_FN_CONSOLE;
+	else if (!strcmp(name, "usb_dnl_dfu"))
+		fn = LC_STAGE_FN_DFU;
+	else if (!strcmp(name, "usb_dnl_ums"))
+		fn = LC_STAGE_FN_UMS;
+	else if (!strcmp(name, "usb_dnl_fastboot"))
+		fn = LC_STAGE_FN_FASTBOOT;
+
+	return LC_STAGE_WORD(phase, fn);
 }
 
 static int g_dnl_do_config(struct usb_configuration *c)
@@ -358,6 +383,10 @@ static int g_dnl_bind(struct usb_composite_dev *cdev)
 			__func__, gadget->name);
 		device_desc.bcdDevice = __constant_cpu_to_le16(0x9999);
 	}
+
+	/* The stage word replaces the version number (include/lc_stage.h) */
+	if (IS_ENABLED(CONFIG_USB_GADGET_LC_STAGE_WORD))
+		device_desc.bcdDevice = cpu_to_le16(g_dnl_lc_stage(cdev->driver->name));
 
 	debug("%s: calling usb_gadget_connect for "
 			"controller '%s'\n", __func__, gadget->name);

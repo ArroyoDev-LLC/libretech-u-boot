@@ -428,6 +428,16 @@ LDFLAGS_$(SPL_BIN) += $(call ld-option, --no-dynamic-linker)
 
 LDFLAGS_$(SPL_BIN) += --build-id=none
 
+# Cortex-A55-only Amlogic parts: no Cortex-A53 erratum 843419 to fix, and the
+# fix's 4 KiB stub padding does not fit the G12A SPL slot (MESON_XPL_A55_ONLY).
+# This ld applies the fix by default and has no option to turn it off (measured:
+# -mno-fix-cortex-a53-843419 on the LTO link left the stub in place).  Its "adr"
+# mode makes no stubs: a site ADR cannot reach is left as it is, which on an
+# A55-only part is correct, since the erratum does not exist there.
+ifdef CONFIG_MESON_XPL_A55_ONLY
+LDFLAGS_$(SPL_BIN) += --fix-cortex-a53-843419=adr
+endif
+
 # Pick the best match (e.g. SPL_TEXT_BASE for SPL, TPL_TEXT_BASE for TPL)
 ifneq ($(CONFIG_$(PHASE_)TEXT_BASE),)
 LDFLAGS_$(SPL_BIN) += -Ttext $(CONFIG_$(PHASE_)TEXT_BASE)

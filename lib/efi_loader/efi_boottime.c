@@ -8,6 +8,7 @@
 #define LOG_CATEGORY LOGC_EFI
 
 #include <bootm.h>
+#include <bootrom.h>
 #include <div64.h>
 #include <dm/device.h>
 #include <dm/root.h>
@@ -2242,6 +2243,8 @@ static efi_status_t EFIAPI efi_exit_boot_services(efi_handle_t image_handle,
 	}
 
 	if (!efi_st_keep_devices) {
+		/* A pending USB `bootrom` request runs instead of the OS (bootrom.h) */
+		bootrom_act_handoff();
 		bootm_disable_interrupts();
 		if (IS_ENABLED(CONFIG_DM_ETH))
 			eth_halt();

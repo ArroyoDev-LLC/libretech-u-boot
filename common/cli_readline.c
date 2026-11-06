@@ -9,6 +9,7 @@
  */
 
 #include <bootretry.h>
+#include <bootrom.h>
 #include <cli.h>
 #include <command.h>
 #include <hang.h>
@@ -486,6 +487,21 @@ static int cread_line(const char *const prompt, char *buf, unsigned int *len,
 					schedule();
 				}
 				first = 0;
+			}
+
+			/*
+			 * The top-level prompt is a wait for a person: a pending
+			 * USB `bootrom` request ends the line as its own result
+			 * (-3), never as an empty line (which would repeat the
+			 * last command).  The caller runs it.
+			 */
+			if (bootrom_wait_get() == BOOTROM_WAIT_PROMPT &&
+			    CONFIG_IS_ENABLED(CMD_BOOTROM)) {
+				while (!tstc()) {
+					if (bootrom_requested())
+						return -3;
+					schedule();
+				}
 			}
 
 			ichar = getcmd_getch();

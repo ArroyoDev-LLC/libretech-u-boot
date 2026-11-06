@@ -2178,6 +2178,18 @@ config BOARD_CONFIG_NOR
 	  transport on such a board, or n on a NOR-less board whose SoC family
 	  otherwise pulls the SPI stack in.
 
+config BOARD_CONFIG_NOR_DM_SF
+	bool "Read the NOR config block through the driver-model SPI flash"
+	depends on BOARD_CONFIG_NOR && DM_SPI_FLASH
+	help
+	  Supply the board_nor_*() hooks from boot/board-config-sf.c, which
+	  reads the default SPI flash (CONFIG_SF_DEFAULT_*) through the SPI
+	  flash uclass. For a board that imports the block in U-Boot proper
+	  only -- board_config_env_import() from misc_init_r() -- and has no
+	  pre-driver-model reader of its own. Not for a board that also
+	  applies overlays before driver model (BOARD_CONFIG_OVERLAYS): that
+	  phase runs before this backend can probe.
+
 config BOARD_CONFIG_NOR_OFFSET_PIN
 	bool "Pin the config block to a fixed NOR offset"
 	depends on BOARD_CONFIG_NOR
@@ -2438,7 +2450,7 @@ endmenu		# Boot source reporting
 
 config USB_OTG_ROLE
 	bool "Set the OTG port's role in the kernel FDT from env usb_otg"
-	depends on OF_LIBFDT && OF_BOARD_SETUP
+	depends on OF_LIBFDT
 	default y if SYS_VENDOR = "libre-computer" || ARCH_MESON || ROCKCHIP_RK3399
 	help
 	  The environment variable usb_otg (device, host or otg) sets dr_mode
@@ -2449,9 +2461,8 @@ config USB_OTG_ROLE
 	  tree's own dr_mode stands, so boot.ini, the NOR config sector or a
 	  saved environment change the role with a plain setenv.
 
-	  The board's ft_board_setup() calls usb_otg_fdt_fixup()
-	  (<usb_otg_role.h>): Meson in arch/arm/mach-meson/board-common.c,
-	  the ROC-RK3399-PC in its board file.
+	  image_setup_libfdt() calls usb_otg_fdt_fixup() (<usb_otg_role.h>)
+	  for every board.
 
 	  An unknown value, a board with no usb-otg alias, or a kernel FDT
 	  without that node is reported on the console and the boot goes on

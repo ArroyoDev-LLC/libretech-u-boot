@@ -278,6 +278,19 @@ config USB_FUNCTION_ACM_LINUX_GADGET_ID
 	  pass to Android or a Linux VM only if its id is on its serial
 	  allowlist, and 0525:a4a7 is.
 
+config USB_GADGET_LC_STAGE_WORD
+	bool "Name the gadget's stage in bcdDevice (the Libre Computer stage word)"
+	depends on USB_GADGET
+	default y if USB_FUNCTION_ACM_LINUX_GADGET_ID
+	help
+	  Every download gadget (g_dnl: the console, DFU, UMS, fastboot) sets
+	  its device descriptor's bcdDevice to 0x4c00 | phase << 4 | function
+	  (include/lc_stage.h) instead of U-Boot's version number, in every
+	  phase. A host then tells the SPL flash session from U-Boot proper's
+	  console, both 0525:a4a7, from what its OS cached at enumeration,
+	  without opening the device: bcdDevice is in sysfs, the IORegistry,
+	  Windows' hardware id and Android's UsbDevice.getVersion().
+
 config USB_FUNCTION_ACM_CONNECT_TIMEOUT_MS
 	int "How long starting the usbacm console waits for a host (ms)"
 	depends on USB_FUNCTION_ACM
@@ -322,7 +335,11 @@ config USB_FUNCTION_ACM_DFU
 	  prompt, with no `dfu` command: the board never leaves the bus, and
 	  the console stays open through the transfer. The DFU requests are
 	  served while the console polls the controller (at the prompt), and a
-	  DETACH changes nothing. `dfu`, `ums`, `fastboot` and the other
+	  DETACH changes nothing -- except right after selecting a virt
+	  alternate named `bootrom` (CMD_BOOTROM), which is the USB request to
+	  reset to the BootROM's USB mode, acted on at U-Boot's next wait for
+	  a person, and stalled where `bootrom` would answer unsupported.
+	  `dfu`, `ums`, `fastboot` and the other
 	  download gadgets still take the controller as before; the console
 	  comes back with its DFU function at its next input poll once they
 	  are done.
@@ -334,8 +351,10 @@ config USB_FUNCTION_ACM_DFU_ALT
 	help
 	  "<interface> <devstr>", as `dfu 0 <interface> <devstr>` takes them:
 	  the list is dfu_alt_info for that interface (a board's
-	  set_dfu_alt_info() writes it). When the list cannot be built (no
-	  such device), the console runs without DFU.
+	  set_dfu_alt_info() writes it). Several groups separated by '&'
+	  ("sf 0:0&virt 0") make one list of them all, in that order (needs
+	  SET_DFU_ALT_INFO). When the list cannot be built (no such device),
+	  the console runs without DFU.
 
 endif # USB_GADGET_DOWNLOAD
 
@@ -474,6 +493,22 @@ config SPL_DFU_MMC
 	  entities are refused. Whether the alternates can be written is
 	  decided by SPL_MMC_WRITE; without it an MMC download fails at the
 	  block layer and only uploads (reads) work.
+
+config SPL_DFU_SF
+	bool "SPI flash back end for DFU in SPL"
+	depends on SPL_DFU && SPL_SPI_FLASH_SUPPORT && SPL_DM_SPI_FLASH
+	help
+	  Build drivers/dfu/dfu_sf.c into SPL, so a DFU session run by SPL can
+	  offer raw SPI flash alternate settings. Downloads erase and write the
+	  flash, so the SPI flash stack must not be the read-only tiny one
+	  (SPL_SPI_FLASH_TINY) for them to work.
+
+config SPL_DFU_SF_BOOT_SECTOR_LAST
+	bool "Write the flash's first sector last, in SPL"
+	depends on SPL_DFU_SF
+	default y if ARCH_ROCKCHIP
+	help
+	  DFU_SF_BOOT_SECTOR_LAST for a DFU session run by SPL.
 
 config SPL_DFU_VIRT
 	bool "Virtual back end for DFU in SPL"

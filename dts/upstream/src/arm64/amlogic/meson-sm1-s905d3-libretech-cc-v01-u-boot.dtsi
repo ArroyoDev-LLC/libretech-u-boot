@@ -33,3 +33,17 @@
 &spifc {
 	status = "okay";
 };
+
+#if defined(CONFIG_BINMAN)
+&binman {
+	u-boot-amlogic {
+		mkimage {
+			args = "-n", "sm1", "-T", "amlimage";
+		};
+	};
+};
+#endif
+
+#ifdef CONFIG_SCMI_FIRMWARE
+#include "meson-sm1-scmi-u-boot.dtsi"
+#endif

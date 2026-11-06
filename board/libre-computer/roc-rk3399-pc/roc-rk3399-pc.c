@@ -3,7 +3,6 @@
  * (C) Copyright 2016 Rockchip Electronics Co., Ltd
  */
 
-#include <bootsource.h>
 #include <command.h>
 #include <dm.h>
 #include <env.h>
@@ -11,9 +10,9 @@
 #include <fdt_support.h>
 #include <log.h>
 #include <malloc.h>
+#include <scmi_lc_typec.h>
 #include <spl_gpio.h>
 #include <string.h>
-#include <usb_otg_role.h>
 #include <vsprintf.h>
 #include <asm/io.h>
 #include <linux/kernel.h>
@@ -33,38 +32,13 @@
 
 #ifdef CONFIG_XPL_BUILD
 
-/**
- * LED setup for roc-rk3399-pc
- *
- * 1. Set the low power leds (only during POR, pwr_key env is 'y')
- *    glow yellow LED, termed as low power
- *    poll for on board power key press
- *    once powe key pressed, turn off yellow
- * 2. Turn on red LED, indicating full power mode
+/*
+ * The DIY LED (GPIO0_B5) on: SPL has run. The power key is the RK808's
+ * (POWER_ON) and the OS's (gpio-keys on GPIO0_A5), not the SPL's.
  */
 void led_setup(void)
 {
 	struct rockchip_gpio_regs * const gpio0 = (void *)GPIO0_BASE;
-	struct rk3399_pmugrf_regs * const pmugrf = (void *)PMUGRF_BASE;
-	bool press_pwr_key = false;
-
-	if (IS_ENABLED(CONFIG_SPL_ENV_SUPPORT)) {
-		env_init();
-		env_load();
-		if (env_get_yesno("pwr_key") == 1)
-			press_pwr_key = true;
-	}
-
-	if (press_pwr_key && !strcmp(get_reset_cause(), "POR")) {
-		spl_gpio_output(gpio0, GPIO(BANK_A, 2), 1);
-
-		spl_gpio_set_pull(&pmugrf->gpio0_p, GPIO(BANK_A, 5),
-				  GPIO_PULL_NORMAL);
-		while (readl(&gpio0->ext_port) & 0x20)
-			;
-
-		spl_gpio_output(gpio0, GPIO(BANK_A, 2), 0);
-	}
 
 	spl_gpio_output(gpio0, GPIO(BANK_B, 5), 1);
 }
@@ -712,6 +686,591 @@ static int roc_pc_fdt_bench_clkcap(void *blob)
 static inline int roc_pc_fdt_bench_clkcap(void *blob) { return 0; }
 #endif /* CONFIG_ROC_RK3399_PC_BENCH_CLKCAP */
 
+#if CONFIG_IS_ENABLED(SCMI_LC_TYPEC)
+/*
+ * M0 mode for the rear Type-C0 port (claude:rockchip/rk3399/plan/
+ * m0-typec-pd-owner.md, "Device tree and fallback").
+ *
+ * Applied only when the bind-time decision scmi_m0_owns_typec() is set AND a
+ * fresh CONNECTOR_EXT_STATUS still reads owner == M0. An M0 that yielded since
+ * bind (a foreign writer tripped its guard) leaves Linux the legacy DT, in
+ * which fusb0 + mp8859 sit on &i2c7 and the kernel's TCPM owns the port.
+ *
+ *   1. &fusb0 and &i2c7 status = "disabled": Linux never binds the M0's bus.
+ *   2. roc_pc_fdt_disable_mp8859() for every revision: the M0 programs the
+ *      MP8859 once at start, so Linux sees DC_12V as a fixed rail.
+ *   3. connector@0 (usb-c-connector, no PD properties: UCSI reads none, the
+ *      M0's PDO table is the only source) under scmi/protocol@80, the node
+ *      the kernel's ucsi_scmi device sits on -- libfdt cannot move fusb0's
+ *      connector, so it is created. port@0 carries endpoint@0 (u2phy0, HS)
+ *      and endpoint@1 (dwc3 role switch), port@1 tcphy0's usb3 port, port@2
+ *      tcphy0's dp port. Every new endpoint gets a fresh phandle and every
+ *      remote endpoint's remote-endpoint is rewritten to it, so each link is
+ *      fixed in both directions (the dwc3 port endpoint included).
+ *   4. The scmi node becomes a two-channel mailbox transport (A2P ch0 +
+ *      P2A ch2, a second shmem page at 0x102000) for the M0's notifications;
+ *      see roc_pc_m0_scmi_p2a().
+ *
+ * The remotes are not named here: they are read off fusb0's own graph and
+ * classified by their place in fusb0's own graph (roc_pc_m0_classify), so the
+ * fixup rewires exactly what fusb0 was wired to, in U-Boot's control DT and
+ * in the kernel's DTB alike -- the two differ in node names and in where the
+ * dwc3 role-switch link sits. fusb0's own role-switch endpoint is taken over:
+ * dwc3's remote-endpoint ends up on connector@0/port@0/endpoint@1.
+ *
+ * Fail-safe: all edits run on a private copy, which replaces the blob only
+ * when every step succeeded. Any failure leaves the legacy DT untouched and
+ * says why. The M0 then sees Linux's rk3x-i2c bind I2C7 and yields, which is
+ * the consistent degraded mode (owner = YIELDED).
+ */
+enum {
+	ROC_PC_M0_EP_HS,	/* port@0 endpoint@0: u2phy0 (USB 2.0) */
+	ROC_PC_M0_EP_ROLE,	/* port@0 endpoint@1: dwc3 usb-role-switch */
+	ROC_PC_M0_EP_SS,	/* port@1: tcphy0 SuperSpeed */
+	ROC_PC_M0_EP_DP,	/* port@2: tcphy0 DP */
+	ROC_PC_M0_EP_NUM,
+};
+
+/* Room for connector@0 and its seven nodes, with margin. */
+#define ROC_PC_M0_FDT_GROW	8192
+
+/*
+ * The device node an endpoint belongs to: endpoint -> port -> (ports ->)
+ * device. Graph structure only, never node names, so the same walk reads
+ * U-Boot's control DT (u2phy0 otg-port/port) and the kernel's
+ * (usb2phy@e450/port) alike.
+ */
+static int roc_pc_m0_ep_device(const void *blob, int ep)
+{
+	const char *name;
+	int port, devn;
+
+	port = fdt_parent_offset(blob, ep);
+	if (port < 0)
+		return port;
+	devn = fdt_parent_offset(blob, port);
+	if (devn < 0)
+		return devn;
+	name = fdt_get_name(blob, devn, NULL);
+	if (name && !strcmp(name, "ports"))
+		devn = fdt_parent_offset(blob, devn);
+	return devn;
+}
+
+/* An endpoint's port number: its port's reg, a lone "port" being 0. */
+static int roc_pc_m0_ep_port_reg(const void *blob, int ep)
+{
+	int port = fdt_parent_offset(blob, ep);
+	u32 reg = 0;
+
+	if (port < 0)
+		return port;
+	roc_pc_fdt_u32(blob, port, "reg", &reg);
+	return reg;
+}
+
+/*
+ * Which of the four links one of fusb0's endpoints is, by where it sits in
+ * fusb0's OWN graph and nothing else:
+ *   - the remote device is a usb-role-switch -> the dwc3 data-role link,
+ *     wherever fusb0 carries it (U-Boot's control DT and the kernel's both
+ *     put it on fusb0's own ports, not on the connector);
+ *   - an endpoint of the usb-c-connector's port@N -> the connector binding's
+ *     port N: 0 USB 2.0 HS, 1 SuperSpeed, 2 the alt-mode (DP) lanes.
+ * Anything else is not a tree this fixup understands: fail, keep legacy.
+ */
+static int roc_pc_m0_classify(const void *blob, int ep, int remote)
+{
+	int rdev, owner, reg;
+
+	rdev = roc_pc_m0_ep_device(blob, remote);
+	if (rdev < 0)
+		return rdev;
+	if (fdt_getprop(blob, rdev, "usb-role-switch", NULL))
+		return ROC_PC_M0_EP_ROLE;
+
+	owner = roc_pc_m0_ep_device(blob, ep);
+	if (owner < 0)
+		return owner;
+	if (!fdt_node_check_compatible(blob, owner, "usb-c-connector")) {
+		reg = roc_pc_m0_ep_port_reg(blob, ep);
+		if (reg == 0)
+			return ROC_PC_M0_EP_HS;
+		if (reg == 1)
+			return ROC_PC_M0_EP_SS;
+		if (reg == 2)
+			return ROC_PC_M0_EP_DP;
+	}
+
+	printf("roc-rk3399-pc: fdt: Type-C0: fusb0 endpoint %s is linked to %s, which is no known Type-C0 link\n",
+	       fdt_get_name(blob, fdt_parent_offset(blob, ep), NULL),
+	       fdt_get_name(blob, rdev, NULL));
+	return -FDT_ERR_NOTFOUND;
+}
+
+/* Read every remote-endpoint below fusb0 into remote[class]. */
+static int roc_pc_m0_collect(const void *blob, int fusb,
+			     u32 remote[ROC_PC_M0_EP_NUM])
+{
+	const char *name;
+	int off, depth = 0, cls, r;
+	u32 ph;
+
+	memset(remote, 0, sizeof(u32) * ROC_PC_M0_EP_NUM);
+
+	for (off = fdt_next_node(blob, fusb, &depth); off >= 0 && depth > 0;
+	     off = fdt_next_node(blob, off, &depth)) {
+		name = fdt_get_name(blob, off, NULL);
+		if (!name || strncmp(name, "endpoint", strlen("endpoint")))
+			continue;
+		if (roc_pc_fdt_u32(blob, off, "remote-endpoint", &ph))
+			continue;
+		r = fdt_node_offset_by_phandle(blob, ph);
+		if (r < 0)
+			return r;
+		cls = roc_pc_m0_classify(blob, off, r);
+		if (cls < 0)
+			return cls;
+		/* Two different partners of one kind: not a tree we understand. */
+		if (remote[cls] && remote[cls] != ph)
+			return -FDT_ERR_BADSTRUCTURE;
+		remote[cls] = ph;
+	}
+
+	/* HS and SS are the port; role switch and DP ride along if wired. */
+	if (!remote[ROC_PC_M0_EP_HS] || !remote[ROC_PC_M0_EP_SS]) {
+		printf("roc-rk3399-pc: fdt: Type-C0: fusb0 graph lacks %s\n",
+		       remote[ROC_PC_M0_EP_HS] ? "the tcphy0 usb3 link" :
+						 "the u2phy0 link");
+		return -FDT_ERR_NOTFOUND;
+	}
+	return 0;
+}
+
+static int roc_pc_m0_add_port(void *blob, int conn, const char *name, u32 reg,
+			      bool cells)
+{
+	int port, ret;
+
+	port = fdt_add_subnode(blob, conn, name);
+	if (port < 0)
+		return port;
+	ret = fdt_setprop_u32(blob, port, "reg", reg);
+	if (!ret && cells)
+		ret = fdt_setprop_u32(blob, port, "#address-cells", 1);
+	if (!ret && cells)
+		ret = fdt_setprop_u32(blob, port, "#size-cells", 0);
+	return ret ? ret : port;
+}
+
+/* reg < 0: a lone "endpoint" with no unit address. */
+static int roc_pc_m0_add_ep(void *blob, int port, const char *name, int reg,
+			    u32 remote, u32 *newph)
+{
+	int ep, ret;
+
+	ret = fdt_generate_phandle(blob, newph);
+	if (ret)
+		return ret;
+	ep = fdt_add_subnode(blob, port, name);
+	if (ep < 0)
+		return ep;
+	if (reg >= 0) {
+		ret = fdt_setprop_u32(blob, ep, "reg", reg);
+		if (ret)
+			return ret;
+	}
+	ret = fdt_setprop_u32(blob, ep, "remote-endpoint", remote);
+	if (ret)
+		return ret;
+	/* Set before the next fdt_generate_phandle() so it is not reused. */
+	return fdt_setprop_u32(blob, ep, "phandle", *newph);
+}
+
+/*
+ * M3: the SCMI P2A (platform -> agent) notification channel, kernel DT only.
+ *
+ * The M0 posts lc-typec notifications into a second shmem page at 0x102000
+ * (0x100000 is the A2P page, 0x101000 the I2C0 offload page) and rings
+ * mailbox1 channel 2. Linux's mailbox transport reads that layout from
+ * `mboxes = <&mbox1 0>, <&mbox1 2>` + `shmem = <&scmi_shmem>, <&rx>`: two
+ * mboxes and two DISTINCT shmem nodes make channel 1 the p2a channel
+ * (mailbox_chan_validate, drivers/firmware/arm_scmi/transports/mailbox.c).
+ * Applied in M0 mode only and only to the kernel's blob, so the shared DTS
+ * and U-Boot's own single-channel agent are untouched.
+ *
+ * The new page copies the existing A2P page's shape: same compatible, same
+ * parent, a reg in that parent's cells, its own phandle.
+ *
+ * Reservation: the 0x100000 / 0x101000 pages carry no reserved-memory node
+ * because U-Boot's /memory starts at 2 MiB (rockchip dram_init_banksize,
+ * "Reserve 2M for ATF bl31"), and arch_fixup_fdt() has written that /memory
+ * before ft_board_setup() runs. The rx page is checked against the /memory
+ * actually in the blob; should a bank ever cover it, it gets an explicit
+ * no-map reserved-memory node instead of being handed to the kernel's
+ * allocator.
+ */
+#define ROC_PC_M0_P2A_SHMEM_BASE	0x102000
+#define ROC_PC_M0_P2A_SHMEM_SIZE	0x100
+#define ROC_PC_M0_P2A_MBOX_CHAN		2
+
+static u64 roc_pc_fdt_cells(const fdt32_t *p, int n)
+{
+	u64 v = 0;
+
+	while (n--)
+		v = (v << 32) | fdt32_to_cpu(*p++);
+	return v;
+}
+
+/* 1 if any /memory bank overlaps [base, base + size), 0 if none, < 0 err. */
+static int roc_pc_m0_in_memory(const void *blob, u64 base, u64 size)
+{
+	int ac, sc, off, len, i, stride;
+	const fdt32_t *reg;
+	const char *type;
+
+	ac = fdt_address_cells(blob, 0);
+	sc = fdt_size_cells(blob, 0);
+	if (ac < 1 || ac > 2 || sc < 1 || sc > 2)
+		return -FDT_ERR_BADNCELLS;
+	stride = ac + sc;
+
+	fdt_for_each_subnode(off, blob, 0) {
+		type = fdt_getprop(blob, off, "device_type", NULL);
+		if (!type || strcmp(type, "memory"))
+			continue;
+		reg = fdt_getprop(blob, off, "reg", &len);
+		if (!reg)
+			continue;
+		for (i = 0; i + stride <= len / 4; i += stride) {
+			u64 b = roc_pc_fdt_cells(reg + i, ac);
+			u64 s = roc_pc_fdt_cells(reg + i + ac, sc);
+
+			if (s && base < b + s && b < base + size)
+				return 1;
+		}
+	}
+	return 0;
+}
+
+static int roc_pc_m0_reserve_nomap(void *blob, u64 base, u64 size)
+{
+	char name[32];
+	fdt32_t reg[4];
+	int rsv, node, ret;
+
+	rsv = fdt_path_offset(blob, "/reserved-memory");
+	if (rsv == -FDT_ERR_NOTFOUND) {
+		rsv = fdt_add_subnode(blob, 0, "reserved-memory");
+		if (rsv < 0)
+			return rsv;
+		ret = fdt_setprop_u32(blob, rsv, "#address-cells", 2);
+		if (!ret)
+			ret = fdt_setprop_u32(blob, rsv, "#size-cells", 2);
+		if (!ret)
+			ret = fdt_setprop_empty(blob, rsv, "ranges");
+		if (ret)
+			return ret;
+	}
+	if (rsv < 0)
+		return rsv;
+	/* Only the 2/2 layout this function writes is understood. */
+	if (fdt_address_cells(blob, rsv) != 2 || fdt_size_cells(blob, rsv) != 2)
+		return -FDT_ERR_BADNCELLS;
+
+	snprintf(name, sizeof(name), "scmi-p2a@%llx", (unsigned long long)base);
+	node = fdt_add_subnode(blob, rsv, name);
+	if (node < 0)
+		return node;
+	reg[0] = cpu_to_fdt32(base >> 32);
+	reg[1] = cpu_to_fdt32(base);
+	reg[2] = cpu_to_fdt32(size >> 32);
+	reg[3] = cpu_to_fdt32(size);
+	ret = fdt_setprop(blob, node, "reg", reg, sizeof(reg));
+	if (!ret)
+		ret = fdt_setprop_empty(blob, node, "no-map");
+	if (!ret)
+		printf("roc-rk3399-pc: fdt: Type-C0: /memory covers %llx, added /reserved-memory/%s no-map\n",
+		       (unsigned long long)base, name);
+	return ret;
+}
+
+static int roc_pc_m0_scmi_p2a(void *blob)
+{
+	const fdt32_t *mb, *sh;
+	fdt32_t mboxes[4], shmem[2], reg[4];
+	int scmi, tx, parent, ac, sc, rx, len, ret, n = 0;
+	u32 mbox_ph, tx_ph, rx_ph;
+	char name[32];
+
+	scmi = fdt_node_offset_by_compatible(blob, -1, "arm,scmi");
+	if (scmi < 0)
+		return scmi;
+
+	/* Exactly today's single channel: <&mbox1 0> and one shmem. */
+	mb = fdt_getprop(blob, scmi, "mboxes", &len);
+	if (!mb || len != 2 * sizeof(*mb) || fdt32_to_cpu(mb[1]) != 0) {
+		printf("roc-rk3399-pc: fdt: Type-C0: scmi mboxes is not a single <&mbox 0>\n");
+		return -FDT_ERR_BADVALUE;
+	}
+	mbox_ph = fdt32_to_cpu(mb[0]);
+	sh = fdt_getprop(blob, scmi, "shmem", &len);
+	if (!sh || len != sizeof(*sh)) {
+		printf("roc-rk3399-pc: fdt: Type-C0: scmi shmem is not a single page\n");
+		return -FDT_ERR_BADVALUE;
+	}
+	tx_ph = fdt32_to_cpu(sh[0]);
+
+	/* The new page goes beside the A2P page, in its parent's cells. */
+	tx = fdt_node_offset_by_phandle(blob, tx_ph);
+	if (tx < 0)
+		return tx;
+	if (fdt_node_check_compatible(blob, tx, "arm,scmi-shmem"))
+		return -FDT_ERR_BADVALUE;
+	parent = fdt_parent_offset(blob, tx);
+	if (parent < 0)
+		return parent;
+	ac = fdt_address_cells(blob, parent);
+	sc = fdt_size_cells(blob, parent);
+	if (ac < 1 || ac > 2 || sc < 1 || sc > 2)
+		return -FDT_ERR_BADNCELLS;
+	if (ac == 2)
+		reg[n++] = cpu_to_fdt32(0);
+	reg[n++] = cpu_to_fdt32(ROC_PC_M0_P2A_SHMEM_BASE);
+	if (sc == 2)
+		reg[n++] = cpu_to_fdt32(0);
+	reg[n++] = cpu_to_fdt32(ROC_PC_M0_P2A_SHMEM_SIZE);
+
+	snprintf(name, sizeof(name), "shmem@%x", ROC_PC_M0_P2A_SHMEM_BASE);
+	if (fdt_subnode_offset(blob, parent, name) >= 0)
+		return -FDT_ERR_EXISTS;
+
+	ret = fdt_generate_phandle(blob, &rx_ph);
+	if (ret)
+		return ret;
+	rx = fdt_add_subnode(blob, parent, name);
+	if (rx < 0)
+		return rx;
+	ret = fdt_setprop_string(blob, rx, "compatible", "arm,scmi-shmem");
+	if (!ret)
+		ret = fdt_setprop(blob, rx, "reg", reg, n * sizeof(*reg));
+	if (!ret)
+		ret = fdt_setprop_u32(blob, rx, "phandle", rx_ph);
+	if (ret)
+		return ret;
+
+	/* Offsets moved; the scmi node is looked up again. */
+	scmi = fdt_node_offset_by_compatible(blob, -1, "arm,scmi");
+	if (scmi < 0)
+		return scmi;
+	mboxes[0] = cpu_to_fdt32(mbox_ph);
+	mboxes[1] = cpu_to_fdt32(0);
+	mboxes[2] = cpu_to_fdt32(mbox_ph);
+	mboxes[3] = cpu_to_fdt32(ROC_PC_M0_P2A_MBOX_CHAN);
+	ret = fdt_setprop(blob, scmi, "mboxes", mboxes, sizeof(mboxes));
+	if (ret)
+		return ret;
+	shmem[0] = cpu_to_fdt32(tx_ph);
+	shmem[1] = cpu_to_fdt32(rx_ph);
+	ret = fdt_setprop(blob, scmi, "shmem", shmem, sizeof(shmem));
+	if (ret)
+		return ret;
+
+	ret = roc_pc_m0_in_memory(blob, ROC_PC_M0_P2A_SHMEM_BASE,
+				  ROC_PC_M0_P2A_SHMEM_SIZE);
+	if (ret < 0)
+		return ret;
+	/* no-map is page-granular: reserve the whole 4 KiB page. */
+	if (ret)
+		return roc_pc_m0_reserve_nomap(blob, ROC_PC_M0_P2A_SHMEM_BASE,
+					       0x1000);
+	return 0;
+}
+
+static int roc_pc_m0_typec_edit(void *blob)
+{
+	u32 remote[ROC_PC_M0_EP_NUM], newph[ROC_PC_M0_EP_NUM] = { 0 };
+	int i2c, fusb, scmi, proto, conn, port, r, ret, i;
+
+	i2c = fdt_node_offset_by_compat_reg(blob, "rockchip,rk3399-i2c",
+					    SCMI_LC_TYPEC_M0_I2C_BASE);
+	if (i2c < 0)
+		return i2c;
+	fusb = fdt_subnode_offset(blob, i2c, "usb-typec@22");
+	if (fusb < 0)
+		return fusb;
+
+	ret = roc_pc_m0_collect(blob, fusb, remote);
+	if (ret)
+		return ret;
+
+	scmi = fdt_node_offset_by_compatible(blob, -1, "arm,scmi");
+	if (scmi < 0)
+		return scmi;
+	proto = fdt_subnode_offset(blob, scmi, "protocol@80");
+	if (proto == -FDT_ERR_NOTFOUND) {
+		proto = fdt_add_subnode(blob, scmi, "protocol@80");
+		if (proto < 0)
+			return proto;
+		ret = fdt_setprop_u32(blob, proto, "reg", 0x80);
+		if (ret)
+			return ret;
+	}
+	if (proto < 0)
+		return proto;
+	if (fdt_subnode_offset(blob, proto, "connector@0") >= 0)
+		return -FDT_ERR_EXISTS;
+
+	ret = fdt_setprop_u32(blob, proto, "#address-cells", 1);
+	if (!ret)
+		ret = fdt_setprop_u32(blob, proto, "#size-cells", 0);
+	if (ret)
+		return ret;
+
+	/*
+	 * Offsets: an edit moves only what lies AFTER it, and every node below
+	 * is added under an ancestor that precedes it, so conn and port stay
+	 * valid. fdt_add_subnode() inserts as the FIRST child, hence the
+	 * reverse order (port@2 .. port@0, endpoint@1 before endpoint@0).
+	 */
+	conn = fdt_add_subnode(blob, proto, "connector@0");
+	if (conn < 0)
+		return conn;
+	ret = fdt_setprop_u32(blob, conn, "reg", 0);
+	if (!ret)
+		ret = fdt_setprop_string(blob, conn, "compatible",
+					 "usb-c-connector");
+	if (ret)
+		return ret;
+
+	if (remote[ROC_PC_M0_EP_DP]) {
+		port = roc_pc_m0_add_port(blob, conn, "port@2", 2, false);
+		if (port < 0)
+			return port;
+		ret = roc_pc_m0_add_ep(blob, port, "endpoint", -1,
+				       remote[ROC_PC_M0_EP_DP],
+				       &newph[ROC_PC_M0_EP_DP]);
+		if (ret)
+			return ret;
+	}
+
+	port = roc_pc_m0_add_port(blob, conn, "port@1", 1, false);
+	if (port < 0)
+		return port;
+	ret = roc_pc_m0_add_ep(blob, port, "endpoint", -1,
+			       remote[ROC_PC_M0_EP_SS], &newph[ROC_PC_M0_EP_SS]);
+	if (ret)
+		return ret;
+
+	port = roc_pc_m0_add_port(blob, conn, "port@0", 0, true);
+	if (port < 0)
+		return port;
+	if (remote[ROC_PC_M0_EP_ROLE]) {
+		ret = roc_pc_m0_add_ep(blob, port, "endpoint@1", 1,
+				       remote[ROC_PC_M0_EP_ROLE],
+				       &newph[ROC_PC_M0_EP_ROLE]);
+		if (ret)
+			return ret;
+	}
+	ret = roc_pc_m0_add_ep(blob, port, "endpoint@0", 0,
+			       remote[ROC_PC_M0_EP_HS], &newph[ROC_PC_M0_EP_HS]);
+	if (ret)
+		return ret;
+
+	/* The other direction: each remote now points at its new endpoint. */
+	for (i = 0; i < ROC_PC_M0_EP_NUM; i++) {
+		if (!newph[i])
+			continue;
+		r = fdt_node_offset_by_phandle(blob, remote[i]);
+		if (r < 0)
+			return r;
+		/* Same size in place: no offset moves. */
+		ret = fdt_setprop_u32(blob, r, "remote-endpoint", newph[i]);
+		if (ret)
+			return ret;
+	}
+
+	/* M3: the P2A notification channel for ucsi_scmi. */
+	ret = roc_pc_m0_scmi_p2a(blob);
+	if (ret)
+		return ret;
+
+	/* Offsets moved with the additions above; look both up again. */
+	i2c = fdt_node_offset_by_compat_reg(blob, "rockchip,rk3399-i2c",
+					    SCMI_LC_TYPEC_M0_I2C_BASE);
+	if (i2c < 0)
+		return i2c;
+	fusb = fdt_subnode_offset(blob, i2c, "usb-typec@22");
+	if (fusb < 0)
+		return fusb;
+	ret = fdt_set_node_status(blob, fusb, FDT_STATUS_DISABLED);
+	if (ret)
+		return ret;
+	i2c = fdt_node_offset_by_compat_reg(blob, "rockchip,rk3399-i2c",
+					    SCMI_LC_TYPEC_M0_I2C_BASE);
+	if (i2c < 0)
+		return i2c;
+	ret = fdt_set_node_status(blob, i2c, FDT_STATUS_DISABLED);
+	if (ret)
+		return ret;
+
+	return roc_pc_fdt_disable_mp8859(blob);
+}
+
+static void roc_pc_fdt_m0_typec(void *blob)
+{
+	struct scmi_lc_typec_ext_status st;
+	void *copy;
+	int size, ret;
+
+	/* Legacy: the agent's bind line already said why. */
+	if (!scmi_m0_owns_typec())
+		return;
+
+	ret = scmi_m0_typec_query(&st);
+	if (ret) {
+		printf("roc-rk3399-pc: fdt: Type-C0: fresh CONNECTOR_EXT_STATUS failed (%d); legacy DT kept\n",
+		       ret);
+		return;
+	}
+	if (st.owner != SCMI_LC_TYPEC_OWNER_M0) {
+		printf("roc-rk3399-pc: fdt: Type-C0: M0 yielded since bind (owner=%u); legacy DT kept\n",
+		       st.owner);
+		return;
+	}
+
+	size = fdt_totalsize(blob) + ROC_PC_M0_FDT_GROW;
+	copy = malloc(size);
+	if (!copy) {
+		printf("roc-rk3399-pc: fdt: Type-C0: no memory for the M0 fixup; legacy DT kept\n");
+		return;
+	}
+
+	ret = fdt_open_into(blob, copy, size);
+	if (!ret)
+		ret = roc_pc_m0_typec_edit(copy);
+	/* Packed, so it fits back into the caller's buffer or fails cleanly. */
+	if (!ret)
+		ret = fdt_pack(copy);
+	if (!ret)
+		ret = fdt_open_into(copy, blob, fdt_totalsize(blob));
+	free(copy);
+
+	if (ret) {
+		printf("roc-rk3399-pc: fdt: Type-C0: M0 fixup failed (%s); legacy DT kept\n",
+		       fdt_strerror(ret));
+		return;
+	}
+
+	printf("roc-rk3399-pc: fdt: Type-C0 handed to the M0: fusb0 + i2c7 disabled, connector@0 under scmi/protocol@80, SCMI P2A on mbox1 ch2 + shmem@102000\n");
+}
+#else
+static inline void roc_pc_fdt_m0_typec(void *blob)
+{
+}
+#endif /* SCMI_LC_TYPEC */
+
 int ft_board_setup(void *blob, struct bd_info *bd)
 {
 	struct roc_pc_rev_info ri;
@@ -750,20 +1309,16 @@ int ft_board_setup(void *blob, struct bd_info *bd)
 	if (ret)
 		printf("roc-rk3399-pc: fdt fixup failed: %s\n", fdt_strerror(ret));
 
+	/* Every revision: hand Type-C0 to the M0 if, and only if, it owns it. */
+	roc_pc_fdt_m0_typec(blob);
+
 	/* Independent of the revision: the bench powers every unit the same way. */
 	ret = roc_pc_fdt_bench_clkcap(blob);
 	if (ret)
 		printf("roc-rk3399-pc: bench_clkcap fixup failed: %s\n",
 		       fdt_strerror(ret));
 
-	/* env usb_otg -> the Type-C OTG controller's dr_mode; reports its own failures */
-	usb_otg_fdt_fixup(blob);
-
-	/* /chosen boot source: on this live tree EVT_FT_FIXUP is not sent */
-	ret = bootsource_fdt_fixup(blob);
-	if (ret)
-		printf("roc-rk3399-pc: boot source not written to /chosen: %s\n",
-		       fdt_strerror(ret));
+	/* usb_otg and the boot source: image_setup_libfdt() writes them */
 
 	/* A failed fixup must not stop the boot; the DT is still valid. */
 	return 0;

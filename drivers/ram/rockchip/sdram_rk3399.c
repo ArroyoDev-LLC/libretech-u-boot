@@ -22,6 +22,7 @@
 #include <asm/arch-rockchip/hardware.h>
 #include <asm/arch-rockchip/sdram.h>
 #include <asm/arch-rockchip/sdram_rk3399.h>
+#include <asm/barriers.h>
 #include <linux/delay.h>
 #include <linux/err.h>
 #include <time.h>
@@ -1547,6 +1548,12 @@ static void dram_all_config(struct dram_info *dram,
 		PRESET_GPIO1_HOLD(1),
 		&dram->pmucru->pmucru_rstnhold_con[1]);
 	clrsetbits_le32(&dram->cru->glb_rst_con, 0x3, 0x3);
+	/*
+	 * Complete the write before the next CRU write: a CRU write issued
+	 * right behind it leaves glb_rst_con at 0 (measured on a ROC-RK3399-PC
+	 * in TF-A's matching write, 20/20 pairs with no barrier, 0/20 with one).
+	 */
+	dsb();
 }
 
 static void set_cap_relate_config(const struct chan_info *chan,

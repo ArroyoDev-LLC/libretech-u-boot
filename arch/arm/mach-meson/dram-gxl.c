@@ -243,7 +243,7 @@ void meson_dram_phy_setup_ranks(void)
 		 * Same block, same BL2 source, same three arithmetic
 		 * corrections as the DDR4 arm above -- they were applied
 		 * there and not here, so the shipping DDR3 board (Le Potato,
-		 * libretech-cc_libre_defconfig: CONFIG_DRAM_2T_MODE=y, no
+		 * libretech-cc_defconfig: CONFIG_DRAM_2T_MODE=y, no
 		 * CONFIG_DRAM_DDR4) still takes the wrong arithmetic:
 		 *
 		 *   - ACMDLR0 was masked `& ~0xe00`, which clears bits 9-11
@@ -385,7 +385,7 @@ int meson_dram_finalise_init(void)
 	 * path after WAIT_FOR() was bounded (N27): a hand-rolled
 	 * `while ((readl(PCTL_STAT) & 7) != ACCESS);` that no macro change
 	 * reached.  It sits in the silent span after `PGSR0=` where the plain
-	 * libretech-cc_libre_defconfig boot of c742d38c12a wedges (2 of 2,
+	 * libretech-cc_defconfig boot of c742d38c12a wedges (2 of 2,
 	 * s7-nyc, 2026-08-29), so a controller that never reaches ACCESS must
 	 * say so rather than hold the console dark.  Bounded to the same 100 ms
 	 * as the other waits; prints the raw STAT and fails the attempt.

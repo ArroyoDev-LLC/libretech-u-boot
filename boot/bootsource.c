@@ -9,17 +9,15 @@
  * decision of which MMC device the environment follows (board/...).
  *
  * Built in every phase: SPL calls bootsource_announce(); U-Boot proper calls
- * bootsource_publish() and carries the EVT_FT_FIXUP spy that writes the
- * kernel's /chosen.
+ * bootsource_publish(), and image_setup_libfdt() calls
+ * bootsource_fdt_fixup() to write the kernel's /chosen.
  */
 
 #include <bootsource.h>
 #include <env.h>
-#include <event.h>
 #include <stdio.h>
 #include <vsprintf.h>
 #include <fdt_support.h>
-#include <dm/ofnode.h>
 #include <linux/kernel.h>
 #include <linux/libfdt.h>
 #include <linux/string.h>
@@ -109,10 +107,8 @@ enum bootsource bootsource_get(void)
  * PXE, a distro), so an initramfs or flash-kernel can read where the
  * firmware came from without parsing a U-Boot environment.
  *
- * Two routes to the same write.  image_setup_libfdt() notifies EVT_FT_FIXUP
- * only when U-Boot is NOT on a live tree, so the spy below covers the
- * flat-tree boards; a board on a live tree (OF_LIVE: Meson, RK3399) calls
- * bootsource_fdt_fixup() from its ft_board_setup().  The two never both run.
+ * image_setup_libfdt() calls this for every board, on a flat tree or a live
+ * tree alike.
  */
 int bootsource_fdt_fixup(void *blob)
 {
@@ -125,28 +121,4 @@ int bootsource_fdt_fixup(void *blob)
 	return fdt_setprop_string(blob, off, BOOTSOURCE_PROP,
 				  bootsource_token(published_source));
 }
-
-#if CONFIG_IS_ENABLED(EVENT)
-static int bootsource_ft_fixup(void *ctx, struct event *event)
-{
-	oftree tree = event->data.ft_fixup.tree;
-	ofnode chosen;
-	int ret;
-
-	chosen = oftree_path(tree, "/chosen");
-	if (!ofnode_valid(chosen)) {
-		ret = ofnode_add_subnode(oftree_root(tree), "chosen", &chosen);
-		if (ret)
-			return log_msg_ret("chosen", ret);
-	}
-
-	ret = ofnode_write_string(chosen, BOOTSOURCE_PROP,
-				  bootsource_token(published_source));
-	if (ret)
-		return log_msg_ret("prop", ret);
-
-	return 0;
-}
-EVENT_SPY_FULL(EVT_FT_FIXUP, bootsource_ft_fixup);
-#endif
 #endif /* !CONFIG_XPL_BUILD */

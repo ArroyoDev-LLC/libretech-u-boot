@@ -24,7 +24,7 @@ U-Boot Compilation
 .. code-block:: bash
 
     $ export CROSS_COMPILE=aarch64-none-elf-
-    $ make aml-a311d-cc_defconfig
+    $ make aml-a311d-cc_vendor_defconfig
     $ make
 
 U-Boot Signing with Pre-Built FIP repo

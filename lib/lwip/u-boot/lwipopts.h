@@ -139,7 +139,12 @@
  * PBUF_POOL_BUFSIZE is derived from TCP_MSS even when
  * CONFIG_PROT_TCP_LWIP is not defined
  */
-#define TCP_MSS                         1460
+/* A 1480-byte segment (MSS 1460) from port 80 fails its checksum on
+ * the MT7601U. The 545-byte header segment does not. lwIP refuses
+ * DHCP when the interface MTU is under 576, so the cap is the MSS
+ * option, not the MTU.
+ */
+#define TCP_MSS                         400
 #if defined(CONFIG_PROT_TCP_LWIP)
 #define LWIP_TCP                        1
 #define TCP_WND                         CONFIG_LWIP_TCP_WND

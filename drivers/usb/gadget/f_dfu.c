@@ -14,10 +14,15 @@
  * (C) Copyright 2006 by Harald Welte <hwelte at hmw-consulting.de>
  */
 
+#include <bootrom.h>
+#include <console.h>
+#include <cyclic.h>
 #include <env.h>
 #include <errno.h>
 #include <log.h>
 #include <malloc.h>
+#include <stdio.h>
+#include <time.h>
 
 #include <vsprintf.h>
 #include <linux/ctype.h>
@@ -60,7 +65,11 @@ struct f_dfu {
 	 * Resident (USB_FUNCTION_ACM_DFU): the function lives in the usbacm
 	 * console's gadget, in DFU mode from bind to unbind. A DETACH is not a
 	 * request to leave a download session -- there is none to leave -- so
-	 * it changes nothing, and the gadget never re-enumerates for it.
+	 * it changes nothing, and the gadget never re-enumerates for it. One
+	 * exception: a DETACH within DFU_BOOTROM_SELECT_MS of SET_INTERFACE to
+	 * the `bootrom` alternate is the USB `bootrom` request (below), acted on
+	 * at U-Boot's next wait for a person; where `bootrom` would answer
+	 * unsupported it is stalled.
 	 */
 	bool				resident;
 
@@ -89,6 +98,124 @@ static inline struct f_dfu *func_to_dfu(struct usb_function *f)
 {
 	return container_of(f, struct f_dfu, usb_function);
 }
+
+/*
+ * The resident function's reset-to-USB-boot request and its storage gate
+ * (claude design/rules/bootloader/reset-to-usb-boot.md R4, R5):
+ *
+ * - the `bootrom` alternate (a virt entity of that name): SET_INTERFACE to it,
+ *   then DETACH within DFU_BOOTROM_SELECT_MS, sets bootrom_request() when the
+ *   DETACH's status stage completes without error.  Another SET_INTERFACE, a
+ *   DNLOAD, UPLOAD or ABORT, a bus reset, or the window passing cancel the
+ *   selection; GETSTATUS and GETSTATE do not.  UPLOAD from it returns 0 bytes,
+ *   DNLOAD to it stalls, and DETACH stalls where `bootrom` is unsupported.
+ * - a transfer to a storage-backed alternate STARTS only while the CLI waits
+ *   at its top-level prompt; one under way runs to its end.  dfu_resident_hold()
+ *   keeps a line read meanwhile until the transfer ends, or until the host has
+ *   been quiet for DFU_RESIDENT_IDLE_MS (the transfer is then aborted).
+ */
+/* Compile-time: an SPL has no resident function, so this code drops out there */
+#define DFU_RESIDENT_ON		CONFIG_IS_ENABLED(USB_FUNCTION_ACM_DFU)
+#define DFU_BOOTROM_SELECT_MS	5000
+#define DFU_RESIDENT_IDLE_MS	10000
+#define DFU_RESIDENT_HOLD_MAX_MS	120000
+
+static struct f_dfu *dfu_resident_fn;
+static bool dfu_bootrom_sel;
+static ulong dfu_bootrom_sel_ms;
+static ulong dfu_resident_last_ms;
+
+static bool dfu_alt_named(struct f_dfu *f_dfu, const char *name)
+{
+	struct dfu_entity *dfu = dfu_get_entity(f_dfu->altsetting);
+
+	return dfu && !strcmp(dfu->name, name);
+}
+
+static bool dfu_alt_storage(struct f_dfu *f_dfu)
+{
+	struct dfu_entity *dfu = dfu_get_entity(f_dfu->altsetting);
+
+	return dfu && dfu->dev_type != DFU_DEV_VIRT;
+}
+
+static void dfu_bootrom_detach_complete(struct usb_ep *ep,
+					struct usb_request *req)
+{
+	/* a DETACH cut by a disconnect completes with an error: nothing */
+	if (!req->status)
+		bootrom_request();
+}
+
+#if CONFIG_IS_ENABLED(USB_FUNCTION_ACM_DFU)
+static void dfu_abort_transaction(struct f_dfu *f_dfu);
+
+static bool dfu_resident_busy(struct f_dfu *f_dfu)
+{
+	switch (f_dfu->dfu_state) {
+	case DFU_STATE_dfuDNLOAD_SYNC:
+	case DFU_STATE_dfuDNBUSY:
+	case DFU_STATE_dfuDNLOAD_IDLE:
+	case DFU_STATE_dfuMANIFEST_SYNC:
+	case DFU_STATE_dfuMANIFEST:
+	case DFU_STATE_dfuUPLOAD_IDLE:
+		return true;
+	default:
+		return false;
+	}
+}
+
+int dfu_resident_hold(void)
+{
+	struct f_dfu *f_dfu = dfu_resident_fn;
+	bool said = false, dropped = false;
+	ulong start = get_timer(0);
+	/*
+	 * Keys typed meanwhile are the next lines (a host types ahead): keep each
+	 * one for the command line, which reads them after the held line.  Only
+	 * the device's keys are read here, never the kept ones.
+	 */
+	bool kept_open = console_kept_keys_hold();
+	int c;
+
+	while (f_dfu && dfu_resident_fn == f_dfu && dfu_resident_busy(f_dfu)) {
+		if (!said) {
+			printf("DFU transfer in progress (state %d)\n",
+			       f_dfu->dfu_state);
+			said = true;
+		}
+		/*
+		 * Host quiet for the idle bound, or (a ceiling, whatever the host
+		 * does) held for DFU_RESIDENT_HOLD_MAX_MS: the transfer is aborted
+		 * and the line runs, so a stuck state never takes the prompt.
+		 */
+		if (get_timer(dfu_resident_last_ms) > DFU_RESIDENT_IDLE_MS ||
+		    get_timer(start) > DFU_RESIDENT_HOLD_MAX_MS) {
+			dfu_abort_transaction(f_dfu);
+			f_dfu->dfu_state = DFU_STATE_dfuIDLE;
+			puts("DFU transfer: host quiet, aborted\n");
+			break;
+		}
+		/* tstc() services the console's controller, so the transfer runs */
+		if (tstc()) {
+			c = getchar();
+			if (c != 0x03) {
+				console_keep_key(c);
+			} else if (!dropped) {
+				/* Ctrl-C drops the held line and what was typed after it */
+				console_drop_kept_keys();
+				puts("<INTERRUPT> (the line is dropped; the transfer goes on)\n");
+				dropped = true;
+			}
+		}
+		schedule();
+	}
+	if (kept_open)
+		console_kept_keys_to_cli();
+
+	return dropped ? -EINTR : 0;
+}
+#endif
 
 static const struct dfu_function_descriptor dfu_func = {
 	.bLength =		sizeof dfu_func,
@@ -917,6 +1044,58 @@ dfu_handle(struct usb_function *f, const struct usb_ctrlrequest *ctrl)
 	 */
 	dfu_set_progress(!f_dfu->resident);
 
+	if (DFU_RESIDENT_ON && f_dfu->resident) {
+		dfu_resident_last_ms = get_timer(0);
+		if (req_type == USB_TYPE_CLASS) {
+			bool sel = dfu_bootrom_sel;
+			bool fresh = get_timer(dfu_bootrom_sel_ms) <=
+				     DFU_BOOTROM_SELECT_MS;
+
+			if (ctrl->bRequest == USB_REQ_DFU_DNLOAD ||
+			    ctrl->bRequest == USB_REQ_DFU_UPLOAD ||
+			    ctrl->bRequest == USB_REQ_DFU_ABORT ||
+			    ctrl->bRequest == USB_REQ_DFU_DETACH)
+				dfu_bootrom_sel = false;
+			if (dfu_alt_named(f_dfu, "bootrom")) {
+				switch (ctrl->bRequest) {
+				case USB_REQ_DFU_DNLOAD:
+					value = RET_STALL;
+					goto queue;
+				case USB_REQ_DFU_UPLOAD:
+					value = 0;
+					goto queue;
+				case USB_REQ_DFU_DETACH:
+					if (!sel || !fresh || bootrom_check()) {
+						value = RET_STALL;
+						goto queue;
+					}
+					req->complete = dfu_bootrom_detach_complete;
+					value = 0;
+					goto queue;
+				default:
+					break;
+				}
+			}
+			/* a storage transfer starts only at the prompt */
+			if ((ctrl->bRequest == USB_REQ_DFU_DNLOAD ||
+			     ctrl->bRequest == USB_REQ_DFU_UPLOAD) &&
+			    f_dfu->dfu_state == DFU_STATE_dfuIDLE &&
+			    dfu_alt_storage(f_dfu) &&
+			    bootrom_wait_get() != BOOTROM_WAIT_PROMPT) {
+				value = RET_STALL;
+				goto queue;
+			}
+		}
+#if CONFIG_IS_ENABLED(DFU_BULK)
+		if (req_type == USB_TYPE_VENDOR && !f_dfu->bulk_left &&
+		    dfu_alt_storage(f_dfu) &&
+		    bootrom_wait_get() != BOOTROM_WAIT_PROMPT) {
+			value = RET_STALL;
+			goto queue;
+		}
+#endif
+	}
+
 	if (req_type == USB_TYPE_STANDARD) {
 		if (ctrl->bRequest == USB_REQ_GET_DESCRIPTOR &&
 		    (w_value >> 8) == DFU_DT_FUNC) {
@@ -938,6 +1117,7 @@ dfu_handle(struct usb_function *f, const struct usb_ctrlrequest *ctrl)
 	} else /* DFU specific request */
 		value = dfu_state[f_dfu->dfu_state] (f_dfu, ctrl, gadget, req);
 
+queue:
 	if (value >= 0) {
 		req->length = value > DFU_USB_BUFSIZ ? DFU_USB_BUFSIZ : value;
 		req->zero = value < len;
@@ -1103,10 +1283,26 @@ static int dfu_bulk_bind(struct usb_configuration *c, struct f_dfu *f_dfu, int n
 	struct usb_endpoint_descriptor *ti = xpl ? &dfu_bulk_in_hs : &dfu_bulk_in_fs;
 	struct usb_endpoint_descriptor *to = xpl ? &dfu_bulk_out_hs : &dfu_bulk_out_fs;
 
+	/*
+	 * Claim each endpoint as it is picked, as f_acm does: the xPL picker
+	 * claims by itself, usb_ep_autoconfig() does not, and an unclaimed
+	 * pair was handed again to the ACM function bound after DFU (proper's
+	 * `dfu` with USB_GADGET_DNL_ACM on DWC2: both interfaces on 0x81 and
+	 * 0x02, and the host's cdc_acm refused the gadget).
+	 */
 	in = dfu_bulk_ep(g, ti);
+	if (in)
+		in->driver_data = f_dfu;
 	out = dfu_bulk_ep(g, to);
-	if (!in || !out)
+	if (out)
+		out->driver_data = f_dfu;
+	if (!in || !out) {
+		if (in)
+			in->driver_data = NULL;
+		if (out)
+			out->driver_data = NULL;
 		return 0;
+	}
 	id = usb_interface_id(c, &f_dfu->usb_function);
 	if (id < 0)
 		return id;
@@ -1261,6 +1457,10 @@ static void dfu_unbind(struct usb_configuration *c, struct usb_function *f)
 		usb_ep_free_request(f_dfu->bulk_out, f_dfu->bulk_out_req);
 #endif
 
+	if (dfu_resident_fn == f_dfu) {
+		dfu_resident_fn = NULL;
+		dfu_bootrom_sel = false;
+	}
 	free(f_dfu);
 }
 
@@ -1279,6 +1479,11 @@ static int dfu_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 	f_dfu->altsetting = alt;
 	f_dfu->dfu_state = DFU_STATE_dfuIDLE;
 	f_dfu->dfu_status = DFU_STATUS_OK;
+	if (DFU_RESIDENT_ON && f_dfu->resident) {
+		/* selecting `bootrom` opens its DETACH window; anything else closes it */
+		dfu_bootrom_sel = dfu_alt_named(f_dfu, "bootrom");
+		dfu_bootrom_sel_ms = get_timer(0);
+	}
 
 	return 0;
 }
@@ -1294,6 +1499,10 @@ static int __dfu_get_alt(struct usb_function *f, unsigned intf)
 static void dfu_disable(struct usb_function *f)
 {
 	struct f_dfu *f_dfu = func_to_dfu(f);
+
+	/* a bus reset or disconnect cancels a `bootrom` selection */
+	if (DFU_RESIDENT_ON && f_dfu->resident)
+		dfu_bootrom_sel = false;
 	if (f_dfu->config == 0)
 		return;
 
@@ -1311,6 +1520,8 @@ static int dfu_bind_config(struct usb_configuration *c, bool resident)
 	if (!f_dfu)
 		return -ENOMEM;
 	f_dfu->resident = resident;
+	if (resident)
+		dfu_resident_fn = f_dfu;
 	f_dfu->usb_function.name = "dfu";
 	f_dfu->usb_function.hs_descriptors = dfu_runtime_descs;
 	f_dfu->usb_function.ss_descriptors = dfu_runtime_descs;

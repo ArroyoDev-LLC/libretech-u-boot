@@ -275,6 +275,7 @@ config ROCKCHIP_RK3399
 	select DM_PMIC
 	select DM_REGULATOR_FIXED
 	select BOARD_LATE_INIT
+	select OF_SYSTEM_SETUP if DISPLAY_CPUINFO
 	imply ARMV8_CRYPTO
 	imply ARMV8_SET_SMPEN
 	imply BOOTSTD_FULL
@@ -661,6 +662,20 @@ config ROCKCHIP_BOOT_MODE_REG
 	  The Soc will enter to different boot mode(defined in asm/arch-rockchip/boot_mode.h)
 	  according to the value from this register.
 
+config ROCKCHIP_LC_STATUS
+	bool "The board's live status as a read-only DFU alternate"
+	depends on CYCLIC && DFU_VIRT && SET_DFU_ALT_INFO && ROCKCHIP_RK3399
+	help
+	  The status readout of board/libre-computer/common/lc-status.c on
+	  Rockchip (MESON_LC_STATUS's on Amlogic): a cyclic callback samples
+	  the board about once a second (sample number and time, the RK3399
+	  CRU's PLLs, the SD slot's card detect) into a text buffer, and the
+	  DFU virt alternate "status" (virt 0, board-rockchip.c's
+	  set_dfu_alt_info()) returns it on UPLOAD. With the usbacm console's
+	  resident DFU (USB_FUNCTION_ACM_DFU, its alternates naming "virt 0"),
+	  a host reads it at U-Boot's prompt over EP0: nothing is typed on the
+	  console and the console's endpoints carry nothing.
+
 config ROCKCHIP_RK8XX_DISABLE_BOOT_ON_POWERON
 	bool "Disable device boot on power plug-in"
 	depends on PMIC_RK8XX
@@ -669,6 +684,31 @@ config ROCKCHIP_RK8XX_DISABLE_BOOT_ON_POWERON
 	  event. When set, the device will boot briefly to determine why it was
 	  powered on, and if it was determined because of a plug-in event
 	  instead of a button press event it will shut back off.
+
+config ROCKCHIP_RK8XX_POWER_ON_ATTACH
+	bool "Honour the power_on_attach environment key"
+	depends on PMIC_RK8XX
+	help
+	  The same policy as ROCKCHIP_RK8XX_DISABLE_BOOT_ON_POWERON, chosen
+	  per unit at run time instead of per build: the board powers on when
+	  power is attached unless the environment -- normally the board
+	  config block -- sets power_on_attach=off (or 0; on and 1 boot).
+	  board_late_init() decides,
+	  after every environment layer is in; a MaskROM USB boot always boots.
+	  RK808 only (it has no power-on-reason register; the driver reads its
+	  PLUG_IN latch and mask at probe). Key definition: the Libre Computer
+	  board-config policy, design/rules/bootloader/board-config.md.
+
+config ROCKCHIP_THERMAL_RESET_POWER_OFF
+	bool "Power off after a thermal reset"
+	depends on DISPLAY_CPUINFO && SYSRESET && PMIC_RK8XX
+	help
+	  Over-temperature ends in power-off: when the boot's reset cause is
+	  THERMAL (the SoC's hardware shutdown fired), board_late_init() powers
+	  the board off through the PMIC (SYSRESET_POWER_OFF) instead of booting
+	  on, and it stays off until it is powered on again. A MaskROM USB boot,
+	  the recovery path, always boots. Needs the reset cause to survive TPL's
+	  own reset (RK3399: RK3399_RST_CAUSE_REG).
 
 config ROCKCHIP_STIMER
 	bool "Rockchip STIMER support"
@@ -803,6 +843,24 @@ config ROCKCHIP_COMMON_STACK_ADDR
 
 config NR_DRAM_BANKS
 	default 10 if ROCKCHIP_EXTERNAL_TPL
+
+config SPL_ROCKCHIP_USBFLASH_NOR
+	bool "SPI NOR alternates in the SPL USB flash session (read-write)"
+	depends on SPL_USBFLASH && SPL_DFU_SF && !SPL_SPI_FLASH_TINY
+	default n
+	help
+	  The SPL flash session (arch/arm/mach-rockchip/spl-usbflash.c) gains
+	  the SPI NOR regions under the names the Meson family uses, so a host
+	  updates either family's NOR the same way: u-boot-bin (offset 0),
+	  config (the board config block, min(size, 16 MiB) - 64 KiB) and fit
+	  (0x200000). They take DFU downloads: a download erases and writes
+	  the NOR. A Rockchip NOR image is the unified bootloader with its
+	  idblock spread for the SPI BootROM; the host makes it (the Libre
+	  Computer app's RkUnifiedToNor).
+
+	  Off by default: product loaders keep the session without NOR, and
+	  the full SPI flash stack this needs (no SPL_SPI_FLASH_TINY) costs
+	  SPL size. Only for flashing (MaskROM) targets.
 
 source "arch/arm/mach-rockchip/px30/Kconfig"
 source "arch/arm/mach-rockchip/rk3036/Kconfig"

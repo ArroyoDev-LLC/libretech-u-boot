@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
- * Amlogic G12A/SM1 TPL: register-level eMMC reader, READ ONLY.
+ * Amlogic G12A/SM1 TPL: register-level eMMC and SD reader, READ ONLY.
+ *
+ * Two ports, one at a time: the eMMC on SD_EMMC_C (described below) and the
+ * SD slot on SD_EMMC_B, which differs only in identification (CMD8 and
+ * CMD55 + ACMD41 for CMD1; the card's own RCA from CMD3) and has no boot
+ * partitions.  The SD port relies on the ROM's pad mux and clock gate for
+ * SD_EMMC_B, set when the ROM scans the SD slot (after the eMMC, before USB)
+ * -- on every boot that reaches the SD slot or USB.
  *
  * The SRAM stage has a 61440 B ceiling and the driver-model reader
  * (TPL_DM + OF_CONTROL + MMC/BLK + meson_gx_mmc) overflows it by 8208 B on
@@ -46,11 +53,14 @@
 #include <mmc.h>
 #include <stdio.h>
 #include <asm/io.h>
+#include <asm/arch/boot.h>
 #include <linux/bitops.h>
 #include <linux/types.h>
 
 /* SD_EMMC_BASE_C, v2019/arch/arm/include/asm/arch-g12a/cpu_sdio.h:11: the eMMC port the ROM scans */
-#define G12E_BASE		0xFFE07000UL
+#define G12E_BASE_C		0xFFE07000UL
+/* SD_EMMC_BASE_B, v2019/arch/arm/include/asm/arch-g12a/cpu_sdio.h:10: the SD slot the ROM scans next */
+#define G12E_BASE_B		0xFFE05000UL
 
 /* MESON_SD_EMMC_CLOCK, v2019/arch/arm/include/asm/arch-g12a/sd_emmc.h:18 */
 #define G12E_CLOCK		0x00
@@ -124,8 +134,32 @@
 /* Every wait is bounded well under the TPL's 8 s watchdog. */
 #define G12E_CMD_US		1000000u
 #define G12E_OCR_US		1000000u
+/*
+ * SD (Physical Layer Simplified Specification 3.01, 4.2.3): CMD8 argument =
+ * VHS 2.7-3.6 V (bit 8) + check pattern 0xAA; the card echoes both.  ACMD41
+ * asks for HCS (bit 30) in the 2.7-3.6 V window and NOT S18R (bit 24): the
+ * reader stays at 3.3 V signalling, as the ROM does.  The card leaves ready
+ * within 1 s of the first ACMD41 (4.2.3).
+ */
+#define G12E_SD_IF_ARG		0x1aau
+#define G12E_SD_OCR_ARG		0x40ff8000u
 
+/*
+ * The port.  Set by g12e_port() at the start of every public entry: the G12
+ * TPL never clears its BSS (it never returns from board_init_f()), so
+ * nothing here may rely on a zero-initialised static.
+ */
+static uintptr_t g12e_base;
+static u32 g12e_sd;		/* 1: the SD slot (SD_EMMC_B), 0: eMMC (SD_EMMC_C) */
+static u32 g12e_rca;		/* eMMC: the ROM's 1; SD: what CMD3 publishes */
 static u32 g12e_sector_mode;	/* OCR bit 30: LBA arguments, not bytes */
+
+static void g12e_port(u32 sd)
+{
+	g12e_sd = sd;
+	g12e_base = sd ? G12E_BASE_B : G12E_BASE_C;
+	g12e_rca = G12E_RCA;
+}
 
 static inline u32 g12e_us(void)
 {
@@ -134,7 +168,7 @@ static inline u32 g12e_us(void)
 
 static inline void __iomem *g12e_reg(u32 off)
 {
-	return (void __iomem *)(G12E_BASE + off);
+	return (void __iomem *)(g12e_base + off);
 }
 
 /*
@@ -152,7 +186,7 @@ static u32 g12e_cmd(u32 idx, u32 flags, u32 arg, u32 *rsp)
 	writel(G12E_CC_IDX(idx) | flags | G12E_CC_TIMEOUT_4S | G12E_CC_OWNER |
 	       G12E_CC_EOC, g12e_reg(G12E_CMD_CFG));
 	/* CMD_DAT: the controller's own buffer for a data command, else 0. */
-	writel((flags & G12E_CC_DATA_IO) ? G12E_BASE + G12E_BUF : 0,
+	writel((flags & G12E_CC_DATA_IO) ? g12e_base + G12E_BUF : 0,
 	       g12e_reg(G12E_CMD_DAT));
 	/* CMD_ARG: the argument; this write starts the command. */
 	writel(arg, g12e_reg(G12E_CMD_ARG));
@@ -188,6 +222,85 @@ static int g12e_fail(u32 idx, u32 st, u32 rsp)
 }
 
 /*
+ * SD identification after CMD0: CMD8 (a v2.00+ card must echo the check
+ * pattern), CMD55 + ACMD41 until the card is ready, CMD2, CMD3 (the card
+ * publishes its RCA in the R6's upper half).  Leaves the card in stand-by.
+ */
+static int g12e_ident_sd(void)
+{
+	u32 st, rsp, t0, arg = G12E_SD_OCR_ARG, n;
+	int v1 = 0;
+
+	/*
+	 * CMD8 SEND_IF_COND, R7 (CRC-checked).  No response: a Version 1.x
+	 * card (spec 4.2.2), which takes ACMD41 without HCS and is byte
+	 * addressed.  A response that does not echo the pattern: a card that
+	 * cannot work in this voltage range -- refused.
+	 */
+	st = g12e_cmd(SD_CMD_SEND_IF_COND, 0, G12E_SD_IF_ARG, &rsp);
+	if (st) {
+		v1 = 1;
+		arg &= ~OCR_HCS;
+		printf("EM: sd no cmd8 (st %08x): v1 card\n", st);
+		/* CMD0 again: a timed-out command leaves the CMD line state unknown. */
+		st = g12e_cmd(MMC_CMD_GO_IDLE_STATE, G12E_CC_NO_RESP, 0, &rsp);
+		if (st)
+			return g12e_fail(MMC_CMD_GO_IDLE_STATE, st, rsp);
+	} else if ((rsp & 0xfff) != G12E_SD_IF_ARG) {
+		return g12e_fail(SD_CMD_SEND_IF_COND, st, rsp);
+	}
+#if IS_ENABLED(CONFIG_TPL_MESON_G12A_SD_S18A_PROBE)
+	/*
+	 * TEST ONLY: ask for 1.8 V signalling (S18R, ACMD41 bit 24) so the
+	 * card's S18A answer shows whether it is fresh (1) or already in 1.8 V
+	 * signalling since its last power cycle (0).  CMD11 is never sent: the
+	 * card stays at 3.3 V signalling, as without the option.
+	 */
+	if (!v1)
+		arg |= BIT(24);
+#endif
+
+	t0 = g12e_us();
+	do {
+		/* CMD55 APP_CMD, R1, RCA 0 before identification. */
+		st = g12e_cmd(MMC_CMD_APP_CMD, 0, 0, &rsp);
+		if (st)
+			return g12e_fail(MMC_CMD_APP_CMD, st, rsp);
+		/* ACMD41 SD_SEND_OP_COND, R3: no CRC on an OCR response. */
+		st = g12e_cmd(SD_CMD_APP_SEND_OP_COND, G12E_CC_RESP_NOCRC,
+			      arg, &rsp);
+		if (st)
+			return g12e_fail(SD_CMD_APP_SEND_OP_COND, st, rsp);
+	} while (!(rsp & OCR_BUSY) && g12e_us() - t0 < G12E_OCR_US);
+	if (!(rsp & OCR_BUSY))
+		return g12e_fail(SD_CMD_APP_SEND_OP_COND, 0, rsp);
+	/* CCS: block addressing; a v1 card is always byte addressed. */
+	g12e_sector_mode = v1 ? 0 : (rsp & OCR_HCS);
+	printf("EM: sd ocr %08x\n", rsp);
+#if IS_ENABLED(CONFIG_TPL_MESON_G12A_SD_S18A_PROBE)
+	printf("EM: sd s18a %u (1 fresh, 0 still in 1.8 V signalling)\n",
+	       (rsp >> 24) & 1);
+#endif
+
+	st = g12e_cmd(MMC_CMD_ALL_SEND_CID, G12E_CC_RESP_128, 0, &rsp);
+	if (st)
+		return g12e_fail(MMC_CMD_ALL_SEND_CID, st, rsp);
+	/*
+	 * CMD3 SEND_RELATIVE_ADDR, R6: [31:16] the card's RCA.  RCA 0 is
+	 * reserved (it deselects every card); the host asks again (4.2.2).
+	 */
+	for (n = 0; n < 3; n++) {
+		st = g12e_cmd(SD_CMD_SEND_RELATIVE_ADDR, 0, 0, &rsp);
+		if (st)
+			return g12e_fail(SD_CMD_SEND_RELATIVE_ADDR, st, rsp);
+		g12e_rca = rsp >> 16;
+		if (g12e_rca)
+			return 0;
+	}
+	return g12e_fail(SD_CMD_SEND_RELATIVE_ADDR, 0, rsp);
+}
+
+/*
  * Identify and select the card, then raise the clock.  Leaves the card in
  * transfer state on the user area.
  */
@@ -205,6 +318,12 @@ static int g12e_init(void)
 	st = g12e_cmd(MMC_CMD_GO_IDLE_STATE, G12E_CC_NO_RESP, 0, &rsp);
 	if (st)
 		return g12e_fail(MMC_CMD_GO_IDLE_STATE, st, rsp);
+
+	if (g12e_sd) {
+		if (g12e_ident_sd())
+			return -1;
+		goto select;
+	}
 
 	t0 = g12e_us();
 	do {
@@ -224,9 +343,20 @@ static int g12e_init(void)
 	st = g12e_cmd(MMC_CMD_SET_RELATIVE_ADDR, 0, G12E_RCA << 16, &rsp);
 	if (st)
 		return g12e_fail(MMC_CMD_SET_RELATIVE_ADDR, st, rsp);
-	st = g12e_cmd(MMC_CMD_SELECT_CARD, G12E_CC_R1B, G12E_RCA << 16, &rsp);
+select:
+	st = g12e_cmd(MMC_CMD_SELECT_CARD, G12E_CC_R1B, g12e_rca << 16, &rsp);
 	if (st || (rsp & G12E_R1_ERR))
 		return g12e_fail(MMC_CMD_SELECT_CARD, st, rsp);
+
+	/*
+	 * A byte-addressed SD card (SDSC) may come up with a block length other
+	 * than 512; CMD16 sets it (SDHC/SDXC fix it at 512 and ignore it).
+	 */
+	if (g12e_sd && !g12e_sector_mode) {
+		st = g12e_cmd(MMC_CMD_SET_BLOCKLEN, 0, 512, &rsp);
+		if (st || (rsp & G12E_R1_ERR))
+			return g12e_fail(MMC_CMD_SET_BLOCKLEN, st, rsp);
+	}
 
 	/* CLOCK: 6 MHz data clock, the ROM's word. */
 	writel(G12E_CLK_DATA, g12e_reg(G12E_CLOCK));
@@ -234,21 +364,59 @@ static int g12e_init(void)
 }
 
 /*
+ * The whole identification twice at most: a card that answered nothing the
+ * first time (power still settling, a command collided with the ROM's last
+ * state) gets CMD0 and a fresh start.  Bounded by two G12E_OCR_US waits.
+ */
+static int g12e_init_tries(void)
+{
+	u32 t0;
+
+	if (!g12e_init())
+		return 0;
+	printf("EM: init retry\n");
+	t0 = g12e_us();
+	while (g12e_us() - t0 < 10000)
+		;
+	return g12e_init();
+}
+
+/*
  * Read @count blocks from @lba of the selected partition.  Each block lands
  * in the controller buffer and is moved by CPU to @dst (if not NULL) and
  * folded into *@crc (if not NULL; caller seeds ~0 and finalises with ~).
  */
+/* Attempts per block: a CRC or timeout on one CMD17 is retried, not fatal. */
+#define G12E_READ_TRIES		3
+
+#if IS_ENABLED(CONFIG_TPL_MESON_G12A_READ_FAULT_TEST)
+/* TEST ONLY: fail the first attempt of this many reads (.data, see g12e_port). */
+static u32 g12e_fault_left __section(".data") = 2;
+#endif
+
 static int g12e_read(u32 lba, u32 count, u32 *dst, u32 *crc)
 {
 	const u32 __iomem *buf = g12e_reg(G12E_BUF);
-	u32 st, rsp, i, w;
+	u32 st, rsp, i, w, n;
 
 	for (; count; count--, lba++) {
-		st = g12e_cmd(MMC_CMD_READ_SINGLE_BLOCK,
-			      G12E_CC_DATA_IO | G12E_CC_BLOCK_MODE |
-			      G12E_CC_LEN(1),
-			      g12e_sector_mode ? lba : lba << 9, &rsp);
-		if (st || (rsp & G12E_R1_ERR))
+		for (n = 0; n < G12E_READ_TRIES; n++) {
+			st = g12e_cmd(MMC_CMD_READ_SINGLE_BLOCK,
+				      G12E_CC_DATA_IO | G12E_CC_BLOCK_MODE |
+				      G12E_CC_LEN(1),
+				      g12e_sector_mode ? lba : lba << 9, &rsp);
+#if IS_ENABLED(CONFIG_TPL_MESON_G12A_READ_FAULT_TEST)
+			if (!n && g12e_fault_left) {
+				g12e_fault_left--;
+				st |= BIT(30);	/* not a STATUS bit: injected */
+			}
+#endif
+			if (!st && !(rsp & G12E_R1_ERR))
+				break;
+			printf("EM: read lba %x try %u st %08x rsp %08x\n",
+			       lba, n + 1, st, rsp);
+		}
+		if (n == G12E_READ_TRIES)
 			return g12e_fail(MMC_CMD_READ_SINGLE_BLOCK, st, rsp);
 		for (i = 0; i < 128; i++) {
 			w = readl(buf + i);
@@ -281,7 +449,7 @@ static int g12e_access(u32 part)
 		if (st || (rsp & G12E_R1_ERR))
 			return g12e_fail(MMC_CMD_SWITCH, st, rsp);
 	}
-	st = g12e_cmd(MMC_CMD_SEND_STATUS, 0, G12E_RCA << 16, &rsp);
+	st = g12e_cmd(MMC_CMD_SEND_STATUS, 0, g12e_rca << 16, &rsp);
 	if (st || (rsp & (G12E_R1_ERR | MMC_STATUS_SWITCH_ERROR)) ||
 	    (rsp & MMC_STATUS_CURR_STATE) != MMC_STATE_TRANS)
 		return g12e_fail(MMC_CMD_SEND_STATUS, st, rsp);
@@ -299,13 +467,17 @@ void g12_tpl_emmc_selftest(void)
 {
 	u32 t0, t1, t2, crc;
 
+	/* TPL_MESON_G12A_SD_SELFTEST (TEST ONLY): the same reads on the SD slot. */
+	g12e_port(IS_ENABLED(CONFIG_TPL_MESON_G12A_SD_SELFTEST));
+	printf("EM: port %s base %08lx\n", g12e_sd ? "sd" : "emmc",
+	       (unsigned long)g12e_base);
 	printf("EM: mux0 %08x gclk0 %08x clk %08x cfg %08x\n",
 	       readl((void __iomem *)G12E_PIN_MUX_0),
 	       readl((void __iomem *)G12E_GCLK_MPEG0),
 	       readl(g12e_reg(G12E_CLOCK)), readl(g12e_reg(G12E_CFG)));
 
 	t0 = g12e_us();
-	if (g12e_init())
+	if (g12e_init_tries())
 		return;
 	t1 = g12e_us();
 
@@ -320,6 +492,11 @@ void g12_tpl_emmc_selftest(void)
 		return;
 	printf("EM: user lba1+128 crc32 %08x us %u\n", ~crc, g12e_us() - t2);
 
+	if (g12e_sd) {
+		/* An SD card has no boot partitions. */
+		printf("EM: OK init us %u total us %u\n", t1 - t0, g12e_us() - t0);
+		return;
+	}
 	if (g12e_access(1))
 		return;
 	crc = ~0u;
@@ -360,6 +537,7 @@ u32 meson_g12_residual_dest_fit(void);
 
 static u32 g12e_hdr[G12E_LAYOUT_WORDS];
 static int g12e_hdr_ok;
+static u32 g12e_part;	/* the staged layout's hardware partition (SD: 0) */
 /* One block between the controller buffer and the splitter (BSS, sized at link). */
 static u32 g12e_blk[128];
 
@@ -388,11 +566,19 @@ int g12_tpl_emmc_fetch_w1(void)
 	u32 *blk = g12e_blk;
 	u32 t0, crc, off, n, i, len;
 
+	/*
+	 * The port follows the BootROM's boot device: SD (it loaded this TPL
+	 * from the SD slot) reads the layout from the SD user area, partition
+	 * 0, at the same LBA; anything else reads the eMMC as before.
+	 */
+	g12e_hdr_ok = 0;
+	g12e_port(meson_get_boot_device() == BOOT_DEVICE_SD);
+	g12e_part = g12e_sd ? 0 : CONFIG_TPL_MESON_G12A_EMMC_FETCH_PART;
+	printf("EF: port %s\n", g12e_sd ? "sd" : "emmc");
 	t0 = g12e_us();
-	if (g12e_init())
+	if (g12e_init_tries())
 		return -1;
-	if (CONFIG_TPL_MESON_G12A_EMMC_FETCH_PART &&
-	    g12e_access(CONFIG_TPL_MESON_G12A_EMMC_FETCH_PART))
+	if (g12e_part && g12e_access(g12e_part))
 		return -1;
 
 	if (g12e_read(CONFIG_TPL_MESON_G12A_EMMC_FETCH_LBA, 1, blk, NULL))
@@ -403,13 +589,13 @@ int g12_tpl_emmc_fetch_w1(void)
 	for (i = 0; i < G12E_LAYOUT_WORDS - 1; i++)
 		crc = g12e_crc32(crc, g12e_hdr[i]);
 	printf("EF: hdr p%u lba %x magic %08x v%u w1 %x+%x %08x w2 %x+%x %08x split %x\n",
-	       CONFIG_TPL_MESON_G12A_EMMC_FETCH_PART,
+	       g12e_part,
 	       CONFIG_TPL_MESON_G12A_EMMC_FETCH_LBA, g12e_hdr[0], g12e_hdr[1],
 	       g12e_hdr[4], g12e_hdr[5], g12e_hdr[6], g12e_hdr[7], g12e_hdr[8],
 	       g12e_hdr[9], g12e_hdr[10]);
 	if (g12e_hdr[0] != G12E_LAYOUT_MAGIC ||
 	    g12e_hdr[1] != G12E_LAYOUT_VERSION ||
-	    g12e_hdr[2] != CONFIG_TPL_MESON_G12A_EMMC_FETCH_PART ||
+	    g12e_hdr[2] != g12e_part ||
 	    g12e_hdr[3] != CONFIG_TPL_MESON_G12A_EMMC_FETCH_LBA ||
 	    g12e_hdr[10] != meson_g12_residual_spl_fit_split() ||
 	    g12e_hdr[8] <= g12e_hdr[10] ||
@@ -458,7 +644,7 @@ int g12_tpl_emmc_fetch_w2(void)
 		      (u32 *)(uintptr_t)meson_g12_residual_dest_fit(), &crc))
 		return -1;
 	printf("EF: w2 %u B crc32 %08x us %u\n", len, ~crc, g12e_us() - t0);
-	if (CONFIG_TPL_MESON_G12A_EMMC_FETCH_PART && g12e_access(0))
+	if (g12e_part && g12e_access(0))
 		return -1;
 	if (g12e_check_crc("w2", ~crc, g12e_hdr[9]))
 		return -1;

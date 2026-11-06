@@ -23,8 +23,8 @@
  * board's DDR4 (SK hynix H5AN8G6NAFR, 3.9 us required at Tc 85..95 C) across
  * its whole range.  The open chain -- the product default -- trains in our
  * TPL at 38 and the SC governor relaxes it while cool, so this is a no-op
- * there.  The opt-in vendor chain (libretech-cc_v2_defconfig, and the SPI
- * image libretech-cc_v2_spi_defconfig) trains with the vendor BL2, which
+ * there.  The opt-in vendor chain (libretech-cc_v2_vendor_defconfig, SD and
+ * SPI image alike) trains with the vendor BL2, which
  * leaves 76 (7.6 us), legal only to 85 C, and nothing reads the DRAM's
  * temperature on that chain.  So U-Boot proper, the first stage of ours there,
  * lowers the field -- as aml-s905x-cc.c does for the DDR3 board.

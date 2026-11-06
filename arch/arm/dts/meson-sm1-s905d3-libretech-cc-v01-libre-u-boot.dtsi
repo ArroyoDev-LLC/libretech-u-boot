@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * U-Boot additions for meson-sm1-s905d3-libretech-cc-v01-libre.dts: the same
+ * board, the libre firmware layout, SPI NOR in use (4-bit eMMC). U-Boot
+ * auto-includes only the first matching <dt-name>-u-boot.dtsi, so the
+ * -libre DT names the board's own.
+ */
+
+#include "meson-sm1-s905d3-libretech-cc-v01-u-boot.dtsi"
+#include "meson-sm1-s905d3-libretech-cc-nor-u-boot.dtsi"
+#include "meson-sm1-s905d3-libretech-cc-spl-dfu-u-boot.dtsi"

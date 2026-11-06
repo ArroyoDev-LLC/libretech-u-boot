@@ -3828,6 +3828,97 @@ void tcpm_settle(struct udevice *dev)
 	tcpm_start_service(dev);
 }
 
+/*
+ * Do not hand the OS a MessageID it will repeat.
+ *
+ * A PD receiver drops a message whose MessageID equals the last one it took
+ * from the same sender, as a retransmission (it still sends GoodCRC). The OS
+ * driver starts its own counter at 0 without a reset of the link, so if our
+ * last message carried ID 0, its first one is silently dropped. Measured on
+ * ROC-RK3399-PC Type-C0 with a PD monitor: our 5 V Request went out as 0x10a2
+ * (ID 0), Linux's first message, Get_Source_Cap 0x00a7 (ID 0), got a GoodCRC
+ * and no reply in three boots out of three, and Linux fell back to a
+ * Soft_Reset, which leaves it ~25 ms to answer the Source_Caps that follow.
+ * In the two of those boots that reset, the monitor's Hard Reset came right
+ * after that Soft_Reset (both were slowed by I2C tracing).
+ *
+ * So end on any other ID: one Get_Sink_Cap, which the source answers with its
+ * sink caps or Not_Supported and which changes no state on either side.
+ */
+static void tcpm_inlet_msgid_handoff(struct udevice *dev)
+{
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+	ulong start;
+	int ret;
+
+	/* message_id is the NEXT ID: 1 means the last message carried 0 */
+	if (port->message_id != 1)
+		return;
+
+	ret = tcpm_pd_send_control(dev, PD_CTRL_GET_SINK_CAP);
+	/* take the reply, so the OS does not find it in the RX FIFO */
+	start = get_timer(0);
+	while (!ret && get_timer(start) < PD_T_SENDER_RESPONSE) {
+		tcpm_poll_event_step(dev);
+		udelay(500);
+	}
+	printf("%s: TCPM: power inlet: last MessageID before the OS %u%s\n",
+	       dev->name, (port->message_id - 1) & PD_HEADER_ID_MASK,
+	       ret ? " (Get_Sink_Cap failed)" : "");
+}
+
+/*
+ * Hand the OS a power inlet that needs no servicing.
+ *
+ * The service tick stops when U-Boot boots an OS, and nothing services the
+ * port until the OS's own driver initialises the chip -- about 8 s into
+ * Linux on ROC-RK3399-PC. In DisplayPort alt mode the partner keeps sending
+ * Attention VDMs. The chip acknowledges them until its RX FIFO fills, then
+ * goes silent, and the partner Soft Resets and then Hard Resets the link. On
+ * the port that powers the board that Hard Reset is a power cut. Measured on
+ * ROC-RK3399-PC Type-C0 with a PD monitor as the only supply: a power-on
+ * reset right after GRUB's "Loading initial ramdisk", before the kernel
+ * printed a line, on every boot that got that far.
+ *
+ * So, before the OS: leave the alt mode, which quiets the partner, and drop
+ * the contract to vSafe5V, so that whatever kernel boots starts from a
+ * contract it cannot lose power by renegotiating. A failure here is
+ * reported and the boot goes on: neither step can take the port's VBUS
+ * away (a sink cannot Hard Reset an inlet, see HARD_RESET_SEND).
+ */
+static void tcpm_inlet_quiesce(struct udevice *dev)
+{
+	struct tcpm_port *port = dev_get_uclass_plat(dev);
+	struct typec_dp_state *dp = tcpm_dp_state(dev);
+	unsigned int nr_snk_pdo = port->nr_snk_pdo;
+	int ret;
+
+	if (port->port_type != TYPEC_PORT_SNK || port->self_powered ||
+	    !port->attached || !port->pd_capable)
+		return;
+
+	if (dp && dp->active) {
+		ret = typec_dp_exit(dev, dp);
+		printf("%s: TCPM: power inlet: DisplayPort alt mode %s before the OS\n",
+		       dev->name, ret ? "NOT exited" : "exited");
+	}
+
+	if (port->supply_voltage > 5000 && nr_snk_pdo &&
+	    pdo_fixed_voltage(port->snk_pdo[0]) == 5000) {
+		/* Re-request from the source caps we hold, offering vSafe5V only. */
+		port->nr_snk_pdo = 1;
+		tcpm_set_state(dev, SNK_NEGOTIATE_CAPABILITIES, 0);
+		ret = tcpm_wait_ready(dev, PD_T_SINK_WAIT_CAP * 2);
+		port->nr_snk_pdo = nr_snk_pdo;
+
+		printf("%s: TCPM: power inlet: contract %u mV %u mA before the OS%s\n",
+		       dev->name, port->supply_voltage, port->current_limit,
+		       ret ? " (renegotiation did not settle)" : "");
+	}
+
+	tcpm_inlet_msgid_handoff(dev);
+}
+
 int tcpm_pre_remove(struct udevice *dev)
 {
 	struct tcpm_port *port = dev_get_uclass_plat(dev);
@@ -3837,6 +3928,8 @@ int tcpm_pre_remove(struct udevice *dev)
 		port->probe_pump_pending = false;
 		port->service_on = false;
 	}
+
+	tcpm_inlet_quiesce(dev);
 
 	return 0;
 }

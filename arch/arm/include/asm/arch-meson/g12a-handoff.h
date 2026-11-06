@@ -114,7 +114,7 @@ struct g12a_xpl_handoff {
  *     FIT_OFFSET == SPL_PAD_TO == SPL_MAX_SIZE
  *
  * and the room is SPL_MAX_SIZE - MESON_G12A_SPL_OFFSET.  Read out of a
- * generated .config for aml-s905d3-cc_libre_open_defconfig rather than assumed:
+ * generated .config for aml-s905d3-cc_open_defconfig rather than assumed:
  * SPL_MAX_SIZE 0x40000, SPL_PAD_TO 0x40000, MESON_G12A_FIT_OFFSET 0x40000,
  * MESON_G12A_SPL_OFFSET 0x10000 -- room 0x30000, 196608 B.
  *

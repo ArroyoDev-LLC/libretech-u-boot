@@ -10,6 +10,50 @@
 #include <asm/arch-rockchip/sdram.h>
 #include <asm/arch-rockchip/sdram_common.h>
 
+static const char *sdram_dram_type_name(unsigned char dramtype)
+{
+	switch (dramtype) {
+	case DDR3:
+		return "DDR3";
+	case DDR4:
+		return "DDR4";
+	case LPDDR2:
+		return "LPDDR2";
+	case LPDDR3:
+		return "LPDDR3";
+	case LPDDR4:
+		return "LPDDR4";
+	default:
+		return "unknown DRAM";
+	}
+}
+
+/*
+ * The DRAM result a good boot prints (bootloader policy, "Boot console
+ * output": result lines only, diagnostics behind a switch). Same form as the
+ * Amlogic TPL's line, "DDR: <n> MB, <type> <MHz> MHz", which scorers grep.
+ * The geometry line stays behind CONFIG_RAM_ROCKCHIP_DEBUG.
+ */
+void sdram_print_ddr_summary(struct sdram_cap_info *cap_info,
+			     struct sdram_base_params *base, u32 split)
+{
+	u64 cap;
+
+	cap = sdram_get_cs_cap(cap_info, 3, base->dramtype);
+	if (cap_info->row_3_4)
+		cap = cap * 3 / 4;
+	else if (split)
+		cap = cap / 2 + (split << 24) / 2;
+
+	printascii("DDR: ");
+	printdec(cap >> 20);
+	printascii(" MB, ");
+	printascii(sdram_dram_type_name(base->dramtype));
+	printascii(" ");
+	printdec(base->ddr_freq);
+	printascii(" MHz\n");
+}
+
 #ifdef CONFIG_RAM_ROCKCHIP_DEBUG
 void sdram_print_dram_type(unsigned char dramtype)
 {

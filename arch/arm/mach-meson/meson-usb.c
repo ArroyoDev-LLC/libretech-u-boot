@@ -19,7 +19,9 @@
  */
 
 #include <chip_serial.h>
+#include <lc_stage.h>
 #include <asm/io.h>
+#include <asm/arch/boot.h>
 #include <asm/arch/gx-handoff.h>
 #include <linux/delay.h>
 
@@ -378,33 +380,46 @@ static const u8 identify_rsp[8] = { 0x02, 0x22, 0x00, 0x20, 0, 0, 0, 0 };
  *  post soft-reenum: CDC-ACM 55 B (≤64, single EP0 packet; 75 B IAD timed out)
  */
 /*
- * TPL_MESON_USB_REENUM (the *_libre_dfu_defconfig targets only): the TPL
- * re-enumerates as its own device, and its iSerialNumber is the chip id.
+ * TPL_MESON_USB_REENUM: on a USB boot the TPL re-enumerates as its own
+ * device, and its iSerialNumber is the chip id.  The boot source decides
+ * (usb_reenum_now, set in meson_usb_receive_fit()): the BootROM booting over
+ * USB means the host is the Libre Computer app, which follows the device by
+ * its port.
  */
 #define USB_REENUM	CONFIG_IS_ENABLED(MESON_USB_REENUM)
 #define STR_IDX_SERIAL	3
 #define USB_ISERIAL	(USB_REENUM ? STR_IDX_SERIAL : 0)
+static int usb_reenum_now;
 /*
- * GUSBCFG on the PHY-POR start.  The re-enumeration uses U-Boot's
- * reconfig_usbd() value, 0x540f: TxFIFO rewind (14), turnaround 5, 16-bit
- * UTMI (3), HS/FS timeout calibration 7 -- the shape measured to answer a
- * fresh HS attach (E4b-E6, amlogic gxl/tpl-usb-stage-bus-reset-plan.md).
+ * GUSBCFG on the start.  The re-enumeration uses U-Boot's reconfig_usbd()
+ * value, 0x540f: TxFIFO rewind (14), turnaround 5, 16-bit UTMI (3), HS/FS
+ * timeout calibration 7 -- the shape measured to answer a fresh HS attach
+ * (E4b-E6, amlogic gxl/tpl-usb-stage-bus-reset-plan.md).
  */
-#define USB_GUSBCFG_START	(USB_REENUM ? 0x540f : USBTRDTIM_5)
+#define USB_GUSBCFG_START	(usb_reenum_now ? 0x540f : USBTRDTIM_5)
+
+/*
+ * bcdDevice is the stage word (include/lc_stage.h): phase 0, the BootROM's
+ * protocol on the vendor descriptor, the console on the CDC one. A host reads
+ * it only when it asks for this descriptor -- after the re-enumeration; a
+ * host that never re-reads keeps the BootROM's cached word.
+ */
+#define DD_STAGE(fn)	(LC_STAGE_WORD(LC_STAGE_PHASE_ROM, fn) & 0xff), \
+			(LC_STAGE_WORD(LC_STAGE_PHASE_ROM, fn) >> 8)
 
 static const u8 dev_desc_vendor[18] = {
 	18, 0x01, 0x00, 0x02,
 	0x00, 0x00, 0x00, 0x40,
 	(USB_VID & 0xff), (USB_VID >> 8),
 	(USB_PID & 0xff), (USB_PID >> 8),
-	0x00, 0x01, 0x00, 0x00, USB_ISERIAL, 0x01,
+	DD_STAGE(LC_STAGE_FN_ROMPROTO), 0x00, 0x00, USB_ISERIAL, 0x01,
 };
 static const u8 dev_desc_cdc[18] = {
 	18, 0x01, 0x00, 0x02,
 	0x02, 0x00, 0x00, 0x40,
 	(USB_VID & 0xff), (USB_VID >> 8),
 	(USB_PID & 0xff), (USB_PID >> 8),
-	0x00, 0x01, 0x00, 0x00, USB_ISERIAL, 0x01,
+	DD_STAGE(LC_STAGE_FN_CONSOLE), 0x00, 0x00, USB_ISERIAL, 0x01,
 };
 
 #if USB_REENUM
@@ -2626,20 +2641,24 @@ void meson_usb_receive_fit(void)
 	}
 #if USB_REENUM
 	/*
-	 * Re-enumerate as our own device: a 10 ms host-visible disconnect,
-	 * then the PHY-POR start, and straight into the receive loop -- the
-	 * host starts pass 2 as soon as identify answers, so bulk must be
-	 * served at full rate from here (a slower poll overran the RX FIFO,
-	 * E5).  The host follows the device by its port.
+	 * On a USB boot, re-enumerate as our own device: a 10 ms host-visible
+	 * disconnect, then the PHY-POR start, and straight into the receive
+	 * loop -- the host starts pass 2 as soon as identify answers, so bulk
+	 * must be served at full rate from here (a slower poll overran the RX
+	 * FIFO, E5).  The host follows the device by its port.  Any other boot
+	 * source keeps the BootROM's session.
 	 */
-	reenum_fifo[0] = R(GRXFSIZ);
-	reenum_fifo[1] = R(GNPTXFSIZ);
-	reenum_fifo[2] = R(DIEPTXF1);
-	reenum_fifo[3] = R(DIEPTXF2);
-	reenum_fifo_valid = 1;
-	SET(DCTL, SFTDISCON);
-	crude_mdelay(10);
-	meson_usb_device_start(1, 1);
+	usb_reenum_now = meson_get_boot_device() == BOOT_DEVICE_USB;
+	if (usb_reenum_now) {
+		reenum_fifo[0] = R(GRXFSIZ);
+		reenum_fifo[1] = R(GNPTXFSIZ);
+		reenum_fifo[2] = R(DIEPTXF1);
+		reenum_fifo[3] = R(DIEPTXF2);
+		reenum_fifo_valid = 1;
+		SET(DCTL, SFTDISCON);
+		crude_mdelay(10);
+	}
+	meson_usb_device_start(1, usb_reenum_now);
 #else
 	meson_usb_device_start(1, 0);
 #endif

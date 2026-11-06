@@ -10,6 +10,8 @@
 		mmc0 = &emmc;
 		mmc1 = &sdmmc;
 		spi0 = &spi0;
+		/* the OTG controller env usb_otg sets for the kernel (boot/usb_otg_role.c) */
+		usb-otg = &usb20_otg;
 	};
 
 	chosen {

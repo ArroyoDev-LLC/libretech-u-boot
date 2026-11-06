@@ -80,6 +80,7 @@
 #include <linux/ctype.h>    /* isalpha, isdigit */
 #include <console.h>
 #include <bootretry.h>
+#include <bootrom.h>
 #include <cli.h>
 #include <cli_hush.h>
 #include <command.h>        /* find_cmd */
@@ -1019,7 +1020,26 @@ static void get_user_input(struct in_str *i)
 
 	bootretry_reset_cmd_timeout();
 	i->__promptme = 1;
-	n = uboot_cli_readline(i);
+	if (i->promptmode == 1) {
+		/* the top-level prompt (not PS2): a wait for a person */
+		enum bootrom_wait prev = bootrom_wait_set(BOOTROM_WAIT_PROMPT);
+
+		n = uboot_cli_readline(i);
+		bootrom_wait_set(prev);
+	} else {
+		n = uboot_cli_readline(i);
+	}
+	if (n == -3) {
+		/* a USB `bootrom` request: run it here, between commands */
+		bootrom_act();
+		console_buffer[0] = '\0';
+		flag_repeat = 0;
+		i->__promptme = 0;
+	} else if (n >= 0 && i->promptmode == 1) {
+		/* a line typed while a host transfer runs waits for its end */
+		if (dfu_resident_hold())
+			console_buffer[0] = '\0';
+	}
 
 #ifdef CONFIG_BOOT_RETRY_TIME
 	if (n == -2) {

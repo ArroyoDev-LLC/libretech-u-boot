@@ -164,8 +164,24 @@
 #define GX_AO_SEC_GP_CFG5	GX_AO_ADDR(0x95)
 #define GX_AO_SEC_SD_CFG15	GX_AO_ADDR(0x8f)
 
+/*
+ * AO_GPIO_O_EN_N (0xc8100024): GPIOAO output enables [9:0], their levels
+ * [25:16], and bit 31 = TEST_N's output level.  BSP v2015
+ * arch/arm/cpu/armv8/gxl/firmware/scp_task/secure_apb.h:1490.
+ */
+#define GX_AO_GPIO_O_EN_N	GX_AO_ADDR(0x09)
+#define GX_AO_TEST_N_OUT	BIT(31)
+
 #define GX_SEC_AO_ADDR(off)	(GX_SEC_AOBUS_BASE + ((off) << 2))
 #define GX_SEC_AO_SEC_GP_CFG0	GX_SEC_AO_ADDR(0x90)
+/*
+ * AO_SEC_REG0 (0xc8100140, written here through its secure alias 0xda100140;
+ * a non-secure access aborts): bit 0 = TEST_N direction, 1 = output.  BSP v2015
+ * arch/arm/cpu/armv8/gxl/firmware/scp_task/secure_apb.h:1664; the bit is what
+ * the vendor BL31's SM_TEST_N_DIR (SMC 0x82000046) leaf flips.
+ */
+#define GX_SEC_AO_SEC_REG0	GX_SEC_AO_ADDR(0x50)
+#define GX_AO_SEC_REG0_TEST_N_OUT	BIT(0)
 
 #define GX_AO_BOOT_DEVICE	0xF
 #define GX_AO_MEM_SIZE_MASK	0xFFFF0000

@@ -326,6 +326,23 @@ static int do_usb_mass_storage(struct cmd_tbl *cmdtp, int flag,
 
 cleanup_register:
 	g_dnl_release(udc);
+	/*
+	 * The host may have rewritten the media, partition table included:
+	 * read it again, so the partitions, the EFI disks and a boot after
+	 * this one see what is there now, not the table read at probe.
+	 */
+#if CONFIG_IS_ENABLED(BLK)
+	if (!ro) {
+		int i;
+
+		for (i = 0; i < ums_count; i++) {
+			struct udevice *bdev = ums[i].block_dev.bdev;
+
+			if (bdev && blk_rescan_partitions(bdev))
+				printf("UMS: LUN %d: partition table not read again\n", i);
+		}
+	}
+#endif
 	goto cleanup_ums_init;
 cleanup_board:
 	udc_device_put(udc);

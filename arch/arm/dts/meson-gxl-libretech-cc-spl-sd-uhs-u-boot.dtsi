@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * AML-S905X-CC and AML-S905X-CC-V2: the SD slot's two rails in the DRAM-stage
+ * SPL's USB flash session, so it can switch the card to 1.8 V signalling.
+ * VCC_CARD (GPIOCLK_1) power-cycles the card, the only way a UHS card leaves
+ * 1.8 V for the next stage; VDDIO_CARD (GPIOAO_3, hence the AO gpio controller)
+ * switches its IO rail between 3.3 V and 1.8 V. Each board's own dtsi adds the
+ * USB PHYs' phy-supply rail, which the PHYs look up once SPL has the regulator
+ * framework.
+ *
+ * Not in meson-gxl-libretech-spl-usbflash-u-boot.dtsi: the AC boards include
+ * that file and have no SD slot, so no vcc_card or vddio_card node.
+ */
+
+&vcc_card {
+	bootph-pre-ram;
+};
+
+&vddio_card {
+	bootph-pre-ram;
+};
+
+&aobus {
+	bootph-pre-ram;
+};
+
+&pinctrl_aobus {
+	bootph-pre-ram;
+};
+
+&gpio_ao {
+	bootph-pre-ram;
+};

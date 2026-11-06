@@ -687,7 +687,7 @@
  * the same reason CONFIG_MESON_GXL_VDDEE_PWM_B carries that warning in Kconfig.
  * They lived as literals in dram-gxl.c under a comment reading "CC-V2 / P212",
  * which was accurate while AML-S905X-CC-V2 was the only board that compiled
- * them; libretech-ac_libre_defconfig makes it wrong, because the two boards'
+ * them; libretech-ac_defconfig makes it wrong, because the two boards'
  * READ tables genuinely differ:
  *
  *   DDR4 32-bit (CC-V2, board/aml-s905x-cc-v2/firmware/timing.c):
@@ -702,7 +702,7 @@
  * DDR3 DOES reach here.  This comment used to end "DDR3 does not reach here at
  * all: no DDR3 defconfig sets CONFIG_DRAM_DQS_CORR (libretech-cc_libre does
  * not), so the DDR4 arms below are the complete set of boards that compile
- * this."  That is false as of libretech-cc_libre_defconfig enabling it: the
+ * this."  That is false as of libretech-cc_defconfig enabling it: the
  * AML-S905X-CC (Le Potato) DDR3 open chain compiles the #else arm below.
  *
  * That is CORRECT for it, and the check is the same one this comment demands of

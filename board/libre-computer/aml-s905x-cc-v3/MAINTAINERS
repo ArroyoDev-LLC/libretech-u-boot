@@ -1,0 +1,6 @@
+LIBRE-COMPUTER AML-S905X-CC-V3
+M:	Neil Armstrong <neil.armstrong@linaro.org>
+S:	Maintained
+L:	u-boot-amlogic@groups.io
+F:	board/libre-computer/aml-s905x-cc-v3/
+F:	configs/libretech-cc_v3_defconfig

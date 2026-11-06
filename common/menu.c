@@ -5,6 +5,7 @@
  */
 
 #include <ansi.h>
+#include <bootrom.h>
 #include <cli.h>
 #include <malloc.h>
 #include <errno.h>
@@ -473,6 +474,7 @@ enum bootmenu_key bootmenu_autoboot_loop(struct bootmenu_data *menu,
 					 struct cli_ch_state *cch)
 {
 	enum bootmenu_key key = BKEY_NONE;
+	enum bootrom_wait prev = bootrom_wait_set(BOOTROM_WAIT_COUNTDOWN);
 	int i, c;
 
 	while (menu->delay > 0) {
@@ -483,6 +485,8 @@ enum bootmenu_key bootmenu_autoboot_loop(struct bootmenu_data *menu,
 		printf("Hit any key to stop autoboot: %d ", menu->delay);
 		for (i = 0; i < 100; ++i) {
 			if (!tstc()) {
+				/* the menu's countdown waits for a person (bootrom.h) */
+				bootrom_act();
 				schedule();
 				mdelay(10);
 				continue;
@@ -523,6 +527,7 @@ enum bootmenu_key bootmenu_autoboot_loop(struct bootmenu_data *menu,
 
 		--menu->delay;
 	}
+	bootrom_wait_set(prev);
 
 	if (ansi)
 		printf(ANSI_CURSOR_POSITION ANSI_CLEAR_LINE, menu->count + 5, 1);
@@ -581,12 +586,17 @@ enum bootmenu_key bootmenu_loop(struct bootmenu_data *menu,
 
 	c = cli_ch_process(cch, 0);
 	if (!c) {
+		enum bootrom_wait prev = bootrom_wait_set(BOOTROM_WAIT_MENU);
+
 		while (!c && !tstc()) {
+			/* the menu waits for a person here (bootrom.h) */
+			bootrom_act();
 			schedule();
 			mdelay(10);
 			c = cli_ch_process(cch, errchar);
 			errchar = -ETIMEDOUT;
 		}
+		bootrom_wait_set(prev);
 		if (!c) {
 			c = getchar();
 			c = cli_ch_process(cch, c);

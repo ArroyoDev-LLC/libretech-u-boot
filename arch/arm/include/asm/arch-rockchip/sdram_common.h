@@ -330,6 +330,9 @@ void sdram_print_dram_type(unsigned char dramtype);
 void sdram_print_ddr_info(struct sdram_cap_info *cap_info,
 			  struct sdram_base_params *base, u32 split);
 void sdram_print_stride(unsigned int stride);
+/* One result line, printed with or without CONFIG_RAM_ROCKCHIP_DEBUG */
+void sdram_print_ddr_summary(struct sdram_cap_info *cap_info,
+			     struct sdram_base_params *base, u32 split);
 
 void sdram_org_config(struct sdram_cap_info *cap_info,
 		      struct sdram_base_params *base,

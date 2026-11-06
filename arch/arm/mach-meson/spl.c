@@ -26,6 +26,7 @@
 #include <asm/arch/clock-g12a.h>
 #include <asm/arch/g12a-ddr-fw.h>
 #include <asm/arch/g12a-handoff.h>
+#include <asm/arch/g12-resident.h>
 /* Strategy A: dram_init() in dram-g12a.c clears 0xFFFB4000, load stubs. */
 #else
 #include <asm/arch/gx.h>
@@ -1051,6 +1052,32 @@ void board_init_f(ulong dummy)
 	 */
 	u32 armed = g12a_resident_arm();
 #endif
+#if defined(CONFIG_TPL_BUILD) && defined(CONFIG_MESON_G12A)
+	/*
+	 * A `bootrom` request is spent by one boot: the first stage a host
+	 * loads over USB clears the BootROM override word, so a board the app
+	 * just booted and flashed boots its storage at the next reset
+	 * (claude design/rules/bootloader/reset-to-usb-boot.md R2).  This TPL
+	 * runs secure, so a plain store.  Only G12A/SM1 boards run this open
+	 * TPL (G12B boots the vendor chain); no socinfo check, because
+	 * AO_SEC_SD_CFG8 read 0 here and the clear never ran (measured on the
+	 * S905D3-CC: the word stayed 4f5244b1 across a USB boot).  A resident
+	 * test build arming on a USB boot (MESON_G12A_RESIDENT_ARM_ON_USB)
+	 * keeps its arm.
+	 */
+	if (!IS_ENABLED(CONFIG_MESON_G12A_RESIDENT_ARM_ON_USB) &&
+	    meson_get_boot_device() == BOOT_DEVICE_USB) {
+		writel(0, (void __iomem *)0xFF800008UL);
+		/*
+		 * The resident chain's boot-hang count too (R11): a host that
+		 * loads us after N failed boots starts the count over.  Only a
+		 * value carrying the count's magic is cleared.
+		 */
+		if ((readl((void __iomem *)G12A_RESIDENT_HANG_REG) &
+		     G12A_RESIDENT_HANG_MAGIC_MASK) == G12A_RESIDENT_HANG_MAGIC)
+			writel(0, (void __iomem *)G12A_RESIDENT_HANG_REG);
+	}
+#endif
 
 	meson_timer_rate_init();
 
@@ -1069,6 +1096,34 @@ void board_init_f(ulong dummy)
 				early_puthex(g12a_resident_word());
 				early_puts("\n");
 			}
+		}
+	}
+	{
+		/*
+		 * The boot count (MESON_G12A_RESIDENT_HANG_RETRIES): "UF cnt"
+		 * and this boot's count; at N the word is armed instead and
+		 * the TPL waits for the watchdog, which resets the board into
+		 * the BootROM's USB wait (claude design/rules/bootloader/
+		 * reset-to-usb-boot.md R11).
+		 */
+		u32 hang = g12a_resident_hang();
+
+		if (hang & G12A_RESIDENT_HANG_COUNTED) {
+			early_puts("UF cnt ");
+			early_puthex(hang & G12A_RESIDENT_HANG_COUNT);
+			early_puts("\n");
+		}
+		if (hang & G12A_RESIDENT_HANG_AT_N) {
+			early_puts("UF cnt at N ");
+			early_puthex(hang & G12A_RESIDENT_HANG_COUNT);
+			early_puts(": USB at the watchdog\n");
+			for (;;)
+				;
+		}
+		if (hang & G12A_RESIDENT_HANG_TEST) {
+			early_puts("UF cnt TEST hang\n");
+			for (;;)
+				;
 		}
 	}
 #endif
@@ -1252,14 +1307,14 @@ void board_init_f(ulong dummy)
 #if defined(CONFIG_MESON_G12A_RESIDENT)
 	/*
 	 * Resident build: the BootROM's boot device picks the source.  eMMC
-	 * reads the staged layout; any other device (USB, the rig's recovery
-	 * path) keeps today's USB window.
+	 * or SD reads the staged layout from that medium; any other device
+	 * (USB, the rig's recovery path) keeps today's USB window.
 	 */
 	{
-		int g12a_resident_from_emmc(void);
+		int g12a_resident_from_storage(void);
 		int g12_tpl_emmc_fetch_w1(void);
 
-		if (g12a_resident_from_emmc()) {
+		if (g12a_resident_from_storage()) {
 			early_puts("EF1\n");
 			if (g12_tpl_emmc_fetch_w1())
 				early_puts("EF1 FAIL\n");
@@ -1344,10 +1399,10 @@ void board_init_f(ulong dummy)
 	/* Window 2 from the staged eMMC layout; no length on failure → NOSPL. */
 #if defined(CONFIG_MESON_G12A_RESIDENT)
 	{
-		int g12a_resident_from_emmc(void);
+		int g12a_resident_from_storage(void);
 		int g12_tpl_emmc_fetch_w2(void);
 
-		if (g12a_resident_from_emmc()) {
+		if (g12a_resident_from_storage()) {
 			early_puts("EF2\n");
 			if (g12_tpl_emmc_fetch_w2())
 				early_puts("EF2 FAIL\n");

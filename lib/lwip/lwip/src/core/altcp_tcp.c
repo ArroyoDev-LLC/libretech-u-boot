@@ -134,6 +134,8 @@ static err_t
 altcp_tcp_poll(void *arg, struct tcp_pcb *tpcb)
 {
   struct altcp_pcb *conn = (struct altcp_pcb *)arg;
+
+  LWIP_UNUSED_ARG(tpcb);
   if (conn) {
     ALTCP_TCP_ASSERT_CONN_PCB(conn, tpcb);
     if (conn->poll) {

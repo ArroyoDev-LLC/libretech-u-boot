@@ -48,8 +48,8 @@ static int usbflash_bootm(void)
 	/*
 	 * The host that sent the FIT is on the OTG port and the kernel's
 	 * console is a gadget on it: the port stays a device unless the
-	 * environment already chose (boot/usb_otg_role.c, applied by the
-	 * board's ft_board_setup()).
+	 * environment already chose (boot/usb_otg_role.c, applied to every
+	 * kernel FDT by image_setup_libfdt()).
 	 */
 	if (IS_ENABLED(CONFIG_USB_OTG_ROLE) && !env_get(USB_OTG_ENV))
 		env_set(USB_OTG_ENV, "device");

@@ -2958,6 +2958,13 @@ static int mmc_power_cycle(struct mmc *mmc)
 	if (ret)
 		return ret;
 
+	/*
+	 * A power cycle returns a card to 3.3 V signalling (SD Physical Layer
+	 * Specification §3.9.4): the IO goes there while the card is off, so
+	 * the card never comes back to a 1.8 V host.
+	 */
+	mmc_set_signal_voltage(mmc, MMC_SIGNAL_VOLTAGE_330);
+
 	ret = mmc_host_power_cycle(mmc);
 	if (ret)
 		return ret;
@@ -3212,6 +3219,30 @@ int mmc_deinit(struct mmc *mmc)
 		return 0;
 
 	if (IS_SD(mmc)) {
+#if CONFIG_IS_ENABLED(MMC_UHS_SUPPORT)
+		/*
+		 * A card switched to 1.8 V signalling stays there until it
+		 * loses power, and a slower mode does not change that: the
+		 * IO rail would stay at 1.8 V into whatever reads the card
+		 * next, a BootROM after a reset included, which talks 3.3 V.
+		 * Give the card back in its power-on state instead: power
+		 * off, IO rail to 3.3 V, power on.  It is no longer
+		 * initialised; a later user starts with mmc_init().
+		 */
+		if (mmc->signal_voltage == MMC_SIGNAL_VOLTAGE_180) {
+			int ret = mmc_power_off(mmc);
+
+			if (!ret)
+				ret = mmc_set_signal_voltage(mmc,
+							     MMC_SIGNAL_VOLTAGE_330);
+			/* the card's power-off time before power on */
+			udelay(2000);
+			if (!ret)
+				ret = mmc_power_on(mmc);
+			mmc->has_init = 0;
+			return ret;
+		}
+#endif
 		caps_filtered = mmc->card_caps &
 			~(MMC_CAP(UHS_SDR12) | MMC_CAP(UHS_SDR25) |
 			  MMC_CAP(UHS_SDR50) | MMC_CAP(UHS_DDR50) |

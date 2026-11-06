@@ -551,12 +551,21 @@ void buck1_set_value(int vol)
 	rk805_write(0x2f, (uint8_t *)&vol, 1);
 }
 
-void rk805_out_led_ctrl(bool enable)
-{
-	int mask = 0x3;
-	int val = enable ? 0x0 : 0x1;
+/*
+ * The status LEDs on the RK805's outputs (bootloader policy "Status LEDs"):
+ * red, power, on as soon as TPL loads; green, ready, off until U-Boot proper
+ * has loaded and turns it on (its gpio-leds node, default-state "on").
+ * RK805_OUT_REG (0x52) bit 0 is OUT1 (red LED703), bit 1 is OUT2 (green
+ * LED701); both LEDs hang from VCC_IO through their resistor into the pin,
+ * so a low output lights them (rk3328-roc.dtsi: GPIO_ACTIVE_LOW). The
+ * register resets to 0, both lit; this was 0x1 (red off, green on).
+ */
+#define RK805_OUT_REG		0x52
+#define RK805_OUT_GREEN_OFF	BIT(1)
 
-	buck1_clrsetbits(0x52, mask, val);
+void rk805_out_led_ctrl(void)
+{
+	buck1_clrsetbits(RK805_OUT_REG, 0x3, RK805_OUT_GREEN_OFF);
 }
 #endif
 
@@ -621,7 +630,8 @@ void board_init_f(ulong dummy)
 	/* set buck1 to 1.2v which is VDD_LOG */
 	buck1_set_value(0x27);
 
-	rk805_out_led_ctrl(0);
+	/* red on, green off until U-Boot proper has loaded */
+	rk805_out_led_ctrl();
 #endif
 
 	ret = uclass_get_device(UCLASS_RAM, 0, &dev);

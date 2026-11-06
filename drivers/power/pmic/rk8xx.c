@@ -4,9 +4,11 @@
  * Written by Simon Glass <sjg@chromium.org>
  */
 
+#include <bootsource.h>
 #include <dm.h>
 #include <dm/lists.h>
 #include <bitfield.h>
+#include <env.h>
 #include <errno.h>
 #include <log.h>
 #include <linux/bitfield.h>
@@ -57,16 +59,103 @@ U_BOOT_DRIVER(rk8xx_sysreset) = {
 	.ops		= &rk8xx_sysreset_ops,
 };
 
+#define RK808_INT_PLUG_IN	BIT(0)	/* INT_STS2, INT_STS_MSK2 */
+#define RK808_INT_PLUG_OUT	BIT(1)
+
+/*
+ * The RK808 has no power-on reason register. Its PLUG_IN interrupt status
+ * latches when power is applied, but also on a supply dip while the board
+ * runs, and it survives a SoC reset. The interrupt masks tell the two apart:
+ * they read 0 after the PMIC powers up and keep what was written while it
+ * stays powered (Linux masks the PLUG interrupts, and so does this, on every
+ * boot). So power was just applied only if PLUG_IN is set while the PLUG_IN
+ * mask is still 0. The masks are set on every boot, and the status cleared
+ * after a power-up, so a supply glitch while the board is off waiting for the
+ * button cannot make the press read as a plug-in. Runs once, at probe.
+ * Returns 1 power applied, 0 not, -EIO when a register could not be read.
+ */
+static int rk808_power_applied(struct udevice *dev)
+{
+	int sts = pmic_reg_read(dev, REG_INT_STS2);
+	int msk = pmic_reg_read(dev, REG_INT_STS_MSK2);
+	bool cold;
+
+	if (sts < 0 || msk < 0)
+		return -EIO;
+
+	cold = !(msk & RK808_INT_PLUG_IN) && (sts & RK808_INT_PLUG_IN);
+	pmic_reg_write(dev, REG_INT_STS_MSK2,
+		       msk | RK808_INT_PLUG_IN | RK808_INT_PLUG_OUT);
+	if (cold)
+		pmic_reg_write(dev, REG_INT_STS2, sts);	/* write-1-to-clear */
+
+	return cold;
+}
+
+static void rk808_dev_off(struct udevice *dev, const char *who)
+{
+	printf("%s: power attached, off until the power button\n", who);
+	if (pmic_clrsetbits(dev, REG_DEVCTRL, 0, BIT(0)))
+		printf("%s: DEV_OFF failed, booting\n", who);
+}
+
+static void rk808_off_for_plugin(struct udevice *dev)
+{
+	struct rk8xx_priv *priv = dev_get_priv(dev);
+
+	if (priv->power_applied == 1)
+		rk808_dev_off(dev, "RK808");
+}
+
+#if IS_ENABLED(CONFIG_ROCKCHIP_RK8XX_POWER_ON_ATTACH)
+void rk8xx_power_on_attach(void)
+{
+	const char *val = env_get("power_on_attach");
+	struct rk8xx_priv *priv;
+	struct udevice *dev;
+
+	/* An on/off platform key takes on|1 and off|0 (board-config.md) */
+	if (!val || !strcmp(val, "on") || !strcmp(val, "1"))
+		return;
+	if (strcmp(val, "off") && strcmp(val, "0")) {
+		printf("power_on_attach: unknown value '%s', booting\n", val);
+		return;
+	}
+	/* A MaskROM USB boot is the recovery path: never refuse it */
+	if (IS_ENABLED(CONFIG_BOOTSOURCE) && bootsource_get() == BOOTSOURCE_USB)
+		return;
+	if (uclass_get_device_by_driver(UCLASS_PMIC,
+					DM_DRIVER_GET(rockchip_rk805), &dev)) {
+		printf("power_on_attach: no RK8xx PMIC, booting\n");
+		return;
+	}
+	priv = dev_get_priv(dev);
+	if (priv->variant != RK808_ID) {
+		printf("power_on_attach: not supported on RK%x, booting\n",
+		       priv->variant);
+		return;
+	}
+	if (priv->power_applied < 0) {
+		printf("power_on_attach: cannot read the PMIC, booting\n");
+		return;
+	}
+	if (priv->power_applied)
+		rk808_dev_off(dev, "power_on_attach");
+}
+#endif
+
 /* In the event of a plug-in and the appropriate option has been
  * selected, we simply shutdown instead of continue the normal boot
- * process. Please note the rk808 is not supported as it doesn't
- * have the appropriate register.
+ * process.
  */
 void rk8xx_off_for_plugin(struct udevice *dev)
 {
 	struct rk8xx_priv *priv = dev_get_priv(dev);
 
 	switch (priv->variant) {
+	case RK808_ID:
+		rk808_off_for_plugin(dev);
+		break;
 	case RK805_ID:
 	case RK816_ID:
 	case RK818_ID:
@@ -234,6 +323,16 @@ static int rk8xx_bind(struct udevice *dev)
 	if (!children)
 		debug("%s: %s - no child found\n", __func__, dev->name);
 
+	/* The RK805's OUT1/OUT2, on the PMIC's own gpio-controller node */
+	if (CONFIG_IS_ENABLED(RK805_GPIO) &&
+	    device_is_compatible(dev, "rockchip,rk805") &&
+	    dev_read_bool(dev, "gpio-controller")) {
+		ret = device_bind_driver_to_node(dev, "rk805_gpio", "gpio",
+						 dev_ofnode(dev), NULL);
+		if (ret)
+			return ret;
+	}
+
 	if (IS_ENABLED(CONFIG_XPL_BUILD) &&
 	    IS_ENABLED(CONFIG_ROCKCHIP_RK8XX_DISABLE_BOOT_ON_POWERON))
 		dev_or_flags(dev, DM_FLAG_PROBE_AFTER_BIND);
@@ -344,6 +443,13 @@ static int rk8xx_probe(struct udevice *dev)
 			       pmic_reg_read(dev, off_source));
 		printf("\n");
 	}
+
+	priv->power_applied = -ENODATA;
+	if (priv->variant == RK808_ID &&
+	    (IS_ENABLED(CONFIG_ROCKCHIP_RK8XX_DISABLE_BOOT_ON_POWERON) ||
+	     (IS_ENABLED(CONFIG_ROCKCHIP_RK8XX_POWER_ON_ATTACH) &&
+	      !IS_ENABLED(CONFIG_XPL_BUILD))))
+		priv->power_applied = rk808_power_applied(dev);
 
 	if (IS_ENABLED(CONFIG_ROCKCHIP_RK8XX_DISABLE_BOOT_ON_POWERON))
 		rk8xx_off_for_plugin(dev);

@@ -1714,6 +1714,18 @@ config CMD_PINMUX
 	  is useful for debugging purposes to check the pin muxing and to know if
 	  a pin is configured as a GPIO or as an alternate function.
 
+config CMD_BOOTROM
+	bool "bootrom - reset to the BootROM's USB download mode"
+	depends on SYSRESET
+	help
+	  Arm the SoC family's BootROM mechanism (an override word, a boot-mode
+	  flag), read it back, and reset, so the next boot is the BootROM's USB
+	  download mode whatever media is present. Prints one line:
+	  'bootrom: forced', 'bootrom: unsupported' (nothing changed) or
+	  'bootrom: reset-failed' (armed, the reset returned, the arm undone).
+	  The family provides bootrom_arch_check/arm/disarm(); without them the
+	  answer is 'unsupported'.
+
 config CMD_POWEROFF
 	bool "poweroff"
 	help

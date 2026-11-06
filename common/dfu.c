@@ -24,6 +24,14 @@ __weak void dfu_background(void)
 {
 }
 
+/* Did the last run_usb_dnl_gadget() end with the host's DETACH? */
+static bool usb_dnl_detached;
+
+bool usb_dnl_last_detached(void)
+{
+	return usb_dnl_detached;
+}
+
 int run_usb_dnl_gadget(int usbctrl_index, char *usb_dnl_gadget)
 {
 	const char *exit_reason = "unknown";
@@ -31,6 +39,7 @@ int run_usb_dnl_gadget(int usbctrl_index, char *usb_dnl_gadget)
 	struct udevice *udc;
 	int ret, i = 0;
 
+	usb_dnl_detached = false;
 	ret = udc_device_get_by_index(usbctrl_index, &udc);
 	if (ret) {
 		pr_err("udc_device_get_by_index failed\n");
@@ -61,6 +70,7 @@ int run_usb_dnl_gadget(int usbctrl_index, char *usb_dnl_gadget)
 			 */
 			if (dfu_usb_get_reset()) {
 				dfu_reset = true;
+				usb_dnl_detached = true;
 				exit_reason = "host issued USB reset (dfu-util -R); rebooting";
 				goto exit;
 			}
@@ -71,6 +81,7 @@ int run_usb_dnl_gadget(int usbctrl_index, char *usb_dnl_gadget)
 			 * completion with dfu-util
 			 */
 			if (++i == 10000) {
+				usb_dnl_detached = true;
 				exit_reason = "host detached";
 				goto exit;
 			}

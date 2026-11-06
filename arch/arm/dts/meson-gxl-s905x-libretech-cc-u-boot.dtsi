@@ -40,7 +40,7 @@
  * doing the reading.
  *
  * There is no &cbus / &spifc hunk here, and that is not an omission: this
- * board has no SPI NOR part and libretech-cc_libre_defconfig sets no
+ * board has no SPI NOR part and libretech-cc_defconfig sets no
  * MESON_SPIFC, so its TPL has exactly one pull medium.
  */
 &apb {
@@ -60,6 +60,12 @@
 
 #if defined(CONFIG_SPL_DFU)
 #include "meson-gxl-libretech-spl-usbflash-u-boot.dtsi"
+#include "meson-gxl-libretech-cc-spl-sd-uhs-u-boot.dtsi"
+
+/* usb2_phy0's phy-supply (HDMI_5V, GPIOH_3). */
+&hdmi_5v {
+	bootph-pre-ram;
+};
 #endif
 
 / {

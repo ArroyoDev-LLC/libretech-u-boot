@@ -25,6 +25,7 @@
 #include <bootsource.h>
 #include <env.h>
 #include <event.h>
+#include <g_dnl.h>
 #include <membuf.h>
 #include <stdio.h>
 #include <stdio_dev.h>
@@ -46,6 +47,13 @@ static int usb_boot_acm_console(void)
 	acm = stdio_get_by_name("usbacm");
 	if (!acm || !acm->start)
 		return 0;
+	/*
+	 * A host is on the port, perhaps late: past the connect timeout the
+	 * gadget stays up and waits for it, rather than leaving the rest of the
+	 * boot with no console, no resident DFU and no `bootrom` request over
+	 * USB, and the board looking hung from the host.
+	 */
+	acm_console_wait_for_host(true);
 	ret = acm->start(acm);
 	if (ret) {
 		printf("USB console: no host took the ACM port (%d)\n", ret);
@@ -81,7 +89,8 @@ static int usb_boot_acm_console(void)
 		snprintf(buf, sizeof(buf), "%s,usbacm", cur);
 		env_set(streams[i], buf);
 	}
-	printf("USB console: usbacm beside the UART\n");
+	printf("USB console: usbacm beside the UART%s\n",
+	       acm_console_connected() ? "" : " (waiting for a host)");
 
 	return 0;
 }

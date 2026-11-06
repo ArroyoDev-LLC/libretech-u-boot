@@ -8,6 +8,7 @@
 #include <ansi.h>
 #include <autoboot.h>
 #include <bootretry.h>
+#include <bootrom.h>
 #include <cli.h>
 #include <command.h>
 #include <console.h>
@@ -375,6 +376,8 @@ static void print_boot_delay(int bootdelay)
 
 static int abortboot_single_key(int bootdelay)
 {
+	/* the countdown is a wait for a person (bootrom.h): status says so */
+	enum bootrom_wait prev = bootrom_wait_set(BOOTROM_WAIT_COUNTDOWN);
 	int abort = 0;
 	unsigned long ts;
 
@@ -393,6 +396,8 @@ static int abortboot_single_key(int bootdelay)
 			int key = console_poll_key();
 
 			if (key == -1) {
+				/* the countdown is a wait for a person (bootrom.h) */
+				bootrom_act();
 				udelay(10000);
 				continue;
 			}
@@ -412,6 +417,7 @@ static int abortboot_single_key(int bootdelay)
 
 		print_boot_delay(bootdelay);
 	}
+	bootrom_wait_set(prev);
 
 	putc('\n');
 

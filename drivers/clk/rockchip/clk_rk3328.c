@@ -19,6 +19,8 @@
 #include <dt-bindings/clock/rk3328-cru.h>
 #include <linux/bitops.h>
 #include <linux/delay.h>
+#include <linux/err.h>
+#include <linux/kernel.h>
 
 struct pll_div {
 	u32 refdiv;
@@ -38,7 +40,7 @@ struct pll_div {
 	.postdiv1 = _postdiv1, .postdiv2 = _postdiv2};
 
 static const struct pll_div gpll_init_cfg = PLL_DIVISORS(GPLL_HZ, 1, 4, 1);
-static const struct pll_div cpll_init_cfg = PLL_DIVISORS(CPLL_HZ, 2, 2, 1);
+static const struct pll_div cpll_init_cfg = PLL_DIVISORS(CPLL_HZ, 1, 1, 1);
 
 static const struct pll_div apll_816_cfg = PLL_DIVISORS(816 * MHz, 1, 2, 1);
 static const struct pll_div apll_600_cfg = PLL_DIVISORS(600 * MHz, 1, 3, 1);
@@ -283,6 +285,121 @@ static void rkclk_set_pll(struct rk3328_cru *cru, enum rk_clk_id clk_id,
 	rk_clrsetreg(&cru->mode_con, mode_mask, PLL_MODE_NORM << mode_shift);
 }
 
+/*
+ * Every CLKSEL composite that can take CPLL, from Linux's clk-rk3328.c tables
+ * (COMPOSITE entries with "cpll" -- or "cpll_peri" for aclk_peri_pre -- among
+ * their parents): the register, the mux field and CPLL's value in it, the
+ * divider field.
+ */
+struct rk3328_cpll_child {
+	u8 con;
+	u8 mux_shift, mux_width, cpll_sel;
+	u8 div_shift, div_width;
+};
+
+static const struct rk3328_cpll_child rk3328_cpll_children[] = {
+	{ 38, 14, 2, 0,  0, 14 },	/* clk_rtc32k */
+	{ 44,  6, 2, 0,  0,  5 },	/* aclk_gpu_pre */
+	/* clk_ddr (CON3) is left out: the DRAM clock is TPL's, never retimed here */
+	{  4, 13, 2, 0,  8,  3 },	/* pclk_ddr */
+	{  0, 13, 2, 0,  8,  5 },	/* aclk_bus_pre */
+	{ 21, 15, 1, 0,  8,  5 },	/* clk_tsp */
+	{  6, 15, 1, 0,  0,  7 },	/* clk_i2s0_div */
+	{  8, 15, 1, 0,  0,  7 },	/* clk_i2s1_div */
+	{ 10, 15, 1, 0,  0,  7 },	/* clk_i2s2_div */
+	{ 12, 15, 1, 0,  0,  7 },	/* clk_spdif_div */
+	{ 14, 12, 2, 0,  0,  7 },	/* clk_uart0_div */
+	{ 16, 12, 2, 0,  0,  7 },	/* clk_uart1_div */
+	{ 18, 12, 2, 0,  0,  7 },	/* clk_uart2_div */
+	{ 34,  7, 1, 0,  0,  7 },	/* clk_i2c0 */
+	{ 34, 15, 1, 0,  8,  7 },	/* clk_i2c1 */
+	{ 35,  7, 1, 0,  0,  7 },	/* clk_i2c2 */
+	{ 35, 15, 1, 0,  8,  7 },	/* clk_i2c3 */
+	{ 20,  7, 1, 0,  0,  5 },	/* clk_crypto */
+	{ 24,  7, 1, 0,  0,  7 },	/* clk_spi */
+	{ 24, 15, 1, 0,  8,  7 },	/* clk_pwm */
+	{  4,  6, 2, 0,  0,  6 },	/* clk_otp */
+	{  5, 14, 2, 0,  8,  5 },	/* clk_efuse */
+	{ 20, 14, 2, 0,  8,  5 },	/* clk_pdm */
+	{ 52,  6, 2, 0,  0,  6 },	/* clk_wifi */
+	{ 48,  6, 2, 0,  0,  5 },	/* aclk_rkvdec_pre */
+	{ 48, 14, 2, 0,  8,  5 },	/* sclk_vdec_cabac */
+	{ 49,  6, 2, 0,  0,  5 },	/* sclk_vdec_core */
+	{ 50,  6, 2, 0,  0,  5 },	/* aclk_vpu_pre */
+	{ 51,  6, 2, 0,  0,  5 },	/* aclk_rkvenc */
+	{ 51, 14, 2, 0,  8,  5 },	/* sclk_venc_core */
+	{ 52, 14, 2, 0,  8,  5 },	/* sclk_venc_dsp */
+	{ 37,  6, 2, 0,  0,  5 },	/* aclk_vio_pre */
+	{ 36, 14, 2, 0,  8,  5 },	/* aclk_rga_pre */
+	{ 36,  6, 2, 0,  0,  5 },	/* clk_rga */
+	{ 39,  6, 2, 0,  0,  5 },	/* aclk_vop_pre */
+	{ 40,  0, 1, 1,  8,  8 },	/* dclk_lcdc_src */
+	{ 30,  8, 2, 0,  0,  8 },	/* clk_sdmmc */
+	{ 31,  8, 2, 0,  0,  8 },	/* clk_sdio */
+	{ 32,  8, 2, 0,  0,  8 },	/* clk_emmc */
+	{ 43,  8, 2, 0,  0,  8 },	/* clk_sdmmc_ext */
+	{ 45,  7, 1, 0,  0,  7 },	/* clk_ref_usb3otg_src */
+	{ 25,  6, 2, 0,  0,  5 },	/* aclk_gmac */
+	{ 27,  7, 1, 0,  0,  5 },	/* clk_mac2io_src */
+	{ 27, 15, 1, 0,  8,  5 },	/* clk_mac2io_out */
+	{ 26,  7, 1, 0,  0,  5 },	/* clk_mac2phy_src */
+	{ 28,  6, 2, 0,  0,  5 },	/* aclk_peri_pre (cpll_peri) */
+};
+
+/* CPLL's rate now: its output in normal mode, 24 MHz in slow mode */
+static ulong rk3328_cpll_rate(struct rk3328_cru *cru)
+{
+	u32 con0 = readl(&cru->cpll_con[0]), con1 = readl(&cru->cpll_con[1]);
+	u32 fbdiv = (con0 & PLL_FBDIV_MASK) >> PLL_FBDIV_SHIFT;
+	u32 postdiv1 = (con0 & PLL_POSTDIV1_MASK) >> PLL_POSTDIV1_SHIFT;
+	u32 refdiv = (con1 & PLL_REFDIV_MASK) >> PLL_REFDIV_SHIFT;
+	u32 postdiv2 = (con1 & PLL_POSTDIV2_MASK) >> PLL_POSTDIV2_SHIFT;
+
+	if (((readl(&cru->mode_con) >> CPLL_MODE_SHIFT) & 1) != PLL_MODE_NORM ||
+	    !refdiv || !postdiv1 || !postdiv2)
+		return OSC_HZ;
+
+	return (ulong)((u64)OSC_HZ * fbdiv / refdiv / postdiv1 / postdiv2);
+}
+
+/*
+ * Before CPLL moves to CPLL_HZ, give every child running from it the divider
+ * that keeps its rate: the rate it has now, or -- with CPLL still at its reset
+ * or slow-mode state, as in TPL -- the rate it had at U-Boot's former
+ * CPLL_FORMER_HZ. Linux does the same before it raises CPLL (rk3328.dtsi's
+ * assigned-clocks: "CPLL should run at 1200, but that is to high for the
+ * initial dividers of most of its children"). A divider that would overflow
+ * its field is clamped there.
+ */
+static void rk3328_cpll_children_keep_rate(struct rk3328_cru *cru)
+{
+	ulong from = rk3328_cpll_rate(cru);
+	int i;
+
+	if (from < 100 * MHz)
+		from = CPLL_FORMER_HZ;
+	if (from == CPLL_HZ)
+		return;
+
+	for (i = 0; i < ARRAY_SIZE(rk3328_cpll_children); i++) {
+		const struct rk3328_cpll_child *c = &rk3328_cpll_children[i];
+		u32 con = readl(&cru->clksel_con[c->con]);
+		u32 div_max = 1U << c->div_width;
+		u32 div, keep;
+
+		if (((con >> c->mux_shift) & ((1U << c->mux_width) - 1)) !=
+		    c->cpll_sel)
+			continue;
+		div = ((con >> c->div_shift) & (div_max - 1)) + 1;
+		keep = (u32)DIV_ROUND_UP((u64)div * CPLL_HZ, from);
+		if (keep > div_max)
+			keep = div_max;
+		rk_clrsetreg(&cru->clksel_con[c->con],
+			     (div_max - 1) << c->div_shift,
+			     (keep - 1) << c->div_shift);
+	}
+}
+
 static void rkclk_init(struct rk3328_cru *cru)
 {
 	u32 aclk_div;
@@ -293,6 +410,7 @@ static void rkclk_init(struct rk3328_cru *cru)
 
 	/* configure gpll cpll */
 	rkclk_set_pll(cru, CLK_GENERAL, &gpll_init_cfg);
+	rk3328_cpll_children_keep_rate(cru);
 	rkclk_set_pll(cru, CLK_CODEC, &cpll_init_cfg);
 
 	/* configure perihp aclk, hclk, pclk */
@@ -334,33 +452,44 @@ void rk3328_configure_cpu(struct rk3328_cru *cru,
 		     aclkm_div << ACLKM_CORE_DIV_SHIFT);
 }
 
+/* CPLL or GPLL, by a one-bit mux that reads 0 for CPLL */
+static ulong rk3328_cpll_gpll_hz(u32 sel)
+{
+	return sel ? GPLL_HZ : CPLL_HZ;
+}
+
 static ulong rk3328_i2c_get_clk(struct rk3328_cru *cru, ulong clk_id)
 {
-	u32 div, con;
+	u32 div, con, sel;
 
 	switch (clk_id) {
 	case SCLK_I2C0:
 		con = readl(&cru->clksel_con[34]);
 		div = con >> CLK_I2C0_DIV_CON_SHIFT & CLK_I2C_DIV_CON_MASK;
+		sel = con >> CLK_I2C0_PLL_SEL_SHIFT & CLK_I2C_PLL_SEL_MASK;
 		break;
 	case SCLK_I2C1:
 		con = readl(&cru->clksel_con[34]);
 		div = con >> CLK_I2C1_DIV_CON_SHIFT & CLK_I2C_DIV_CON_MASK;
+		sel = con >> CLK_I2C1_PLL_SEL_SHIFT & CLK_I2C_PLL_SEL_MASK;
 		break;
 	case SCLK_I2C2:
 		con = readl(&cru->clksel_con[35]);
 		div = con >> CLK_I2C2_DIV_CON_SHIFT & CLK_I2C_DIV_CON_MASK;
+		sel = con >> CLK_I2C2_PLL_SEL_SHIFT & CLK_I2C_PLL_SEL_MASK;
 		break;
 	case SCLK_I2C3:
 		con = readl(&cru->clksel_con[35]);
 		div = con >> CLK_I2C3_DIV_CON_SHIFT & CLK_I2C_DIV_CON_MASK;
+		sel = con >> CLK_I2C3_PLL_SEL_SHIFT & CLK_I2C_PLL_SEL_MASK;
 		break;
 	default:
 		printf("do not support this i2c bus\n");
 		return -EINVAL;
 	}
 
-	return DIV_TO_RATE(GPLL_HZ, div);
+	/* the reset mux is CPLL, and nothing moves it unless the rate is set */
+	return DIV_TO_RATE(rk3328_cpll_gpll_hz(sel), div);
 }
 
 static ulong rk3328_i2c_set_clk(struct rk3328_cru *cru, ulong clk_id, uint hz)
@@ -464,11 +593,17 @@ static ulong rk3328_mmc_get_clk(struct rk3328_cru *cru, uint clk_id)
 	con = readl(&cru->clksel_con[con_id]);
 	div = (con & CLK_EMMC_DIV_CON_MASK) >> CLK_EMMC_DIV_CON_SHIFT;
 
-	if ((con & CLK_EMMC_PLL_MASK) >> CLK_EMMC_PLL_SHIFT
-	    == CLK_EMMC_PLL_SEL_24M)
-		return DIV_TO_RATE(OSC_HZ, div) / 2;
-	else
+	/* the card clock: the selected source over the divider and the controller's 2 */
+	switch ((con & CLK_EMMC_PLL_MASK) >> CLK_EMMC_PLL_SHIFT) {
+	case CLK_EMMC_PLL_SEL_CPLL:
+		return DIV_TO_RATE(CPLL_HZ, div) / 2;
+	case CLK_EMMC_PLL_SEL_GPLL:
 		return DIV_TO_RATE(GPLL_HZ, div) / 2;
+	case CLK_EMMC_PLL_SEL_24M:
+		return DIV_TO_RATE(OSC_HZ, div) / 2;
+	default:
+		return DIV_TO_RATE(480 * MHz, div) / 2;
+	}
 }
 
 static ulong rk3328_mmc_set_clk(struct rk3328_cru *cru,
@@ -489,7 +624,6 @@ static ulong rk3328_mmc_set_clk(struct rk3328_cru *cru,
 	default:
 		return -EINVAL;
 	}
-	/* Select clk_sdmmc/emmc source from GPLL by default */
 	/* mmc clock defaulg div 2 internal, need provide double in cru */
 	src_clk_div = DIV_ROUND_UP(GPLL_HZ / 2, set_rate);
 
@@ -501,9 +635,23 @@ static ulong rk3328_mmc_set_clk(struct rk3328_cru *cru,
 			     CLK_EMMC_PLL_SEL_24M << CLK_EMMC_PLL_SHIFT |
 			     (src_clk_div - 1) << CLK_EMMC_DIV_CON_SHIFT);
 	} else {
+		/*
+		 * GPLL or CPLL, whichever lands closer at or below the request:
+		 * the tuned-mode ladder asks for 200 / 150 / 100 / 50 MHz, and
+		 * GPLL alone (576 MHz) gives 144 / 144 / 96 / 48 where CPLL
+		 * (1200 MHz) gives them exactly.
+		 */
+		int cpll_div = DIV_ROUND_UP(CPLL_HZ / 2, set_rate);
+		uint sel = CLK_EMMC_PLL_SEL_GPLL;
+
+		if (cpll_div <= 127 &&
+		    CPLL_HZ / 2 / cpll_div > GPLL_HZ / 2 / src_clk_div) {
+			sel = CLK_EMMC_PLL_SEL_CPLL;
+			src_clk_div = cpll_div;
+		}
 		rk_clrsetreg(&cru->clksel_con[con_id],
 			     CLK_EMMC_PLL_MASK | CLK_EMMC_DIV_CON_MASK,
-			     CLK_EMMC_PLL_SEL_GPLL << CLK_EMMC_PLL_SHIFT |
+			     sel << CLK_EMMC_PLL_SHIFT |
 			     (src_clk_div - 1) << CLK_EMMC_DIV_CON_SHIFT);
 	}
 
@@ -517,7 +665,8 @@ static ulong rk3328_pwm_get_clk(struct rk3328_cru *cru)
 	con = readl(&cru->clksel_con[24]);
 	div = (con & CLK_PWM_DIV_CON_MASK) >> CLK_PWM_DIV_CON_SHIFT;
 
-	return DIV_TO_RATE(GPLL_HZ, div);
+	return DIV_TO_RATE(rk3328_cpll_gpll_hz((con & CLK_PWM_PLL_SEL_MASK) >>
+					       CLK_PWM_PLL_SEL_SHIFT), div);
 }
 
 static ulong rk3328_pwm_set_clk(struct rk3328_cru *cru, uint hz)
@@ -592,17 +741,22 @@ static ulong rk3328_vop_get_clk(struct rk3328_clk_priv *priv, ulong clk_id)
 	case ACLK_VOP_PRE:
 		con = readl(&cru->clksel_con[39]);
 		div = (con & ACLK_VOP_DIV_CON_MASK) >> ACLK_VOP_DIV_CON_SHIFT;
-		parent = GPLL_HZ;
+		con = (con & ACLK_VOP_PLL_SEL_MASK) >> ACLK_VOP_PLL_SEL_SHIFT;
+		parent = con == ACLK_VOP_PLL_SEL_CPLL ? CPLL_HZ :
+			 con == ACLK_VOP_PLL_SEL_USB480M ? 480 * MHz : GPLL_HZ;
 		break;
 	case ACLK_VIO_PRE:
 		con = readl(&cru->clksel_con[37]);
 		div = (con & ACLK_VIO_DIV_CON_MASK) >> ACLK_VIO_DIV_CON_SHIFT;
-		parent = GPLL_HZ;
+		con = (con & ACLK_VIO_PLL_SEL_MASK) >> ACLK_VIO_PLL_SEL_SHIFT;
+		parent = con == ACLK_VIO_PLL_SEL_CPLL ? CPLL_HZ :
+			 con == ACLK_VIO_PLL_SEL_USB480M ? 480 * MHz : GPLL_HZ;
 		break;
 	case DCLK_LCDC:
 		con = readl(&cru->clksel_con[40]);
 		div = (con & DCLK_LCDC_DIV_CON_MASK) >> DCLK_LCDC_DIV_CON_SHIFT;
-		parent = GPLL_HZ;
+		parent = ((con & DCLK_LCDC_PLL_SEL_MASK) >> DCLK_LCDC_PLL_SEL_SHIFT) ==
+			 DCLK_LCDC_PLL_SEL_CPLL ? CPLL_HZ : GPLL_HZ;
 		break;
 	default:
 		printf("%s: Unsupported vop get clk#%ld\n", __func__, clk_id);
@@ -619,7 +773,8 @@ static ulong rk3328_vop_set_clk(struct rk3328_clk_priv *priv,
 	int src_clk_div;
 	u32 con, parent;
 
-	src_clk_div = DIV_ROUND_UP(GPLL_HZ, hz);
+	/* ACLK_VOP_PRE and ACLK_VIO_PRE are put on CPLL: size from it */
+	src_clk_div = DIV_ROUND_UP(CPLL_HZ, hz);
 	assert(src_clk_div - 1 < 31);
 
 	switch (clk_id) {
@@ -642,8 +797,8 @@ static ulong rk3328_vop_set_clk(struct rk3328_clk_priv *priv,
 			parent = readl(&cru->clksel_con[40]);
 			parent = (parent & DCLK_LCDC_PLL_SEL_MASK) >>
 				 DCLK_LCDC_PLL_SEL_SHIFT;
-			if (parent)
-				src_clk_div = DIV_ROUND_UP(GPLL_HZ, hz);
+			if (parent == DCLK_LCDC_PLL_SEL_CPLL)
+				src_clk_div = DIV_ROUND_UP(CPLL_HZ, hz);
 			else
 				src_clk_div = DIV_ROUND_UP(GPLL_HZ, hz);
 
@@ -672,6 +827,33 @@ static ulong rk3328_hdmiphy_get_clk(struct rk3328_cru *cru)
 	return DIV_TO_RATE(GPLL_HZ, div);
 }
 
+/*
+ * pclk_bus, the parent of pclk_wdt (Linux clk-rk3328.c:
+ * SGRF_GATE(PCLK_WDT, "pclk_wdt", "pclk_bus")), read from the registers as
+ * they are: aclk_bus_pre = CPLL or GPLL (CLKSEL_CON0[14:13]) /
+ * (CLKSEL_CON0[12:8] + 1), pclk_bus = aclk_bus_pre / (CLKSEL_CON1[14:12] + 1)
+ * (RK3328 TRM part 1, CRU_CLKSEL_CON0 / CON1). U-Boot never sets these; TPL
+ * and the CPLL move (rk3328_cpll_children_keep_rate) leave them.
+ */
+static ulong rk3328_pclk_bus_get_clk(struct rk3328_cru *cru)
+{
+	u32 con0 = readl(&cru->clksel_con[0]);
+	u32 con1 = readl(&cru->clksel_con[1]);
+	u32 sel = (con0 >> 13) & 0x3;
+	u32 adiv = (con0 >> 8) & 0x1f;
+	u32 pdiv = (con1 >> 12) & 0x7;
+	ulong src;
+
+	if (sel == 0)
+		src = rk3328_cpll_rate(cru);
+	else if (sel == 1)
+		src = GPLL_HZ;
+	else
+		return 0;	/* the HDMI PHY PLL: not a bus parent we set */
+
+	return src / (adiv + 1) / (pdiv + 1);
+}
+
 static ulong rk3328_clk_get_rate(struct clk *clk)
 {
 	struct rk3328_clk_priv *priv = dev_get_priv(clk->dev);
@@ -685,6 +867,14 @@ static ulong rk3328_clk_get_rate(struct clk *clk)
 	case SCLK_SDMMC:
 	case SCLK_EMMC:
 		rate = rk3328_mmc_get_clk(priv->cru, clk->id);
+		break;
+	case SCLK_SDMMC_DRV:
+	case SCLK_SDMMC_SAMPLE:
+		rate = rk3328_mmc_get_clk(priv->cru, SCLK_SDMMC);
+		break;
+	case SCLK_EMMC_DRV:
+	case SCLK_EMMC_SAMPLE:
+		rate = rk3328_mmc_get_clk(priv->cru, SCLK_EMMC);
 		break;
 	case SCLK_I2C0:
 	case SCLK_I2C1:
@@ -706,6 +896,16 @@ static ulong rk3328_clk_get_rate(struct clk *clk)
 		break;
 	case SCLK_USB3OTG_REF:
 		rate = OSC_HZ;
+		break;
+	/*
+	 * pclk_wdt's gate is in the secure GRF (Linux: SGRF_GATE), on out of
+	 * reset (rk3328_clk_enable() accepts it). Without a rate here
+	 * designware_wdt_probe() fails, initr_watchdog() drops the device with
+	 * a debug print, and no watchdog is started or stopped on RK3328
+	 * (WATCHDOG_AUTOSTART notwithstanding) -- as on RK3399 before its case.
+	 */
+	case PCLK_WDT:
+		rate = rk3328_pclk_bus_get_clk(priv->cru);
 		break;
 	default:
 		return -ENOENT;
@@ -887,10 +1087,145 @@ static int rk3328_clk_set_parent(struct clk *clk, struct clk *parent)
 	return -ENOENT;
 }
 
+/*
+ * MMC drive / sample phase clocks (SDMMC_CON0/1, EMMC_CON0/1), the delay
+ * line Linux drives through clk-mmc-phase.c: a 90-degree coarse select plus
+ * up to 255 fine delay elements of ~60 ps each, both relative to the card
+ * clock (the CRU source divided by the controller's fixed 2). The same math
+ * as clk_rk3399.c.
+ */
+#define RK3328_MMC_PHASE_SHIFT		1
+#define RK3328_MMC_PHASE_MASK		0x07ff
+#define RK3328_MMC_DELAY_SEL		BIT(10)
+#define RK3328_MMC_DEGREE_MASK		0x3
+#define RK3328_MMC_DELAYNUM_OFFSET	2
+#define RK3328_MMC_DELAYNUM_MASK	(0xff << RK3328_MMC_DELAYNUM_OFFSET)
+#define RK3328_MMC_DELAY_ELEMENT_PSEC	60
+
+static u32 *rk3328_mmc_phase_reg(struct rk3328_cru *cru, ulong clk_id,
+				 ulong *rate_id)
+{
+	switch (clk_id) {
+	case SCLK_SDMMC_DRV:
+		*rate_id = SCLK_SDMMC;
+		return &cru->sdmmc_con[0];
+	case SCLK_SDMMC_SAMPLE:
+		*rate_id = SCLK_SDMMC;
+		return &cru->sdmmc_con[1];
+	case SCLK_EMMC_DRV:
+		*rate_id = SCLK_EMMC;
+		return &cru->emmc_con[0];
+	case SCLK_EMMC_SAMPLE:
+		*rate_id = SCLK_EMMC;
+		return &cru->emmc_con[1];
+	default:
+		return NULL;
+	}
+}
+
+static int rk3328_clk_get_phase(struct clk *clk)
+{
+	struct rk3328_clk_priv *priv = dev_get_priv(clk->dev);
+	ulong rate_id, rate;
+	u32 raw, delay_num;
+	u32 *reg;
+	int degrees;
+
+	reg = rk3328_mmc_phase_reg(priv->cru, clk->id, &rate_id);
+	if (!reg)
+		return -ENOSYS;
+
+	rate = rk3328_mmc_get_clk(priv->cru, rate_id);
+	if (!rate || IS_ERR_VALUE(rate))
+		return 0;
+
+	raw = readl(reg) >> RK3328_MMC_PHASE_SHIFT;
+	degrees = (raw & RK3328_MMC_DEGREE_MASK) * 90;
+
+	if (raw & RK3328_MMC_DELAY_SEL) {
+		/* degrees per delay element, scaled by 1000000 */
+		ulong factor = (RK3328_MMC_DELAY_ELEMENT_PSEC / 10) *
+			       36 * (rate / 10000);
+
+		delay_num = (raw & RK3328_MMC_DELAYNUM_MASK) >>
+			    RK3328_MMC_DELAYNUM_OFFSET;
+		degrees += DIV_ROUND_CLOSEST(delay_num * factor, 1000000);
+	}
+
+	return degrees % 360;
+}
+
+static int rk3328_clk_set_phase(struct clk *clk, int degrees)
+{
+	struct rk3328_clk_priv *priv = dev_get_priv(clk->dev);
+	ulong rate_id, rate;
+	u32 nineties, remainder, delay, delay_num, raw;
+	u32 *reg;
+
+	reg = rk3328_mmc_phase_reg(priv->cru, clk->id, &rate_id);
+	if (!reg)
+		return -ENOSYS;
+
+	if (degrees < 0 || degrees >= 360)
+		return -EINVAL;
+
+	rate = rk3328_mmc_get_clk(priv->cru, rate_id);
+	if (!rate || IS_ERR_VALUE(rate))
+		return -EINVAL;
+
+	nineties = degrees / 90;
+	remainder = degrees % 90;
+
+	/*
+	 * Fine delay elements for the remainder, at the current card clock;
+	 * each element is 44..77 ps, so the result can be up to ~25 degrees
+	 * off -- the tuning sweep tolerates that (the same approximation
+	 * Linux makes).
+	 */
+	delay = 10000000; /* PSECS_PER_SEC / 10000 / 10 */
+	delay *= remainder;
+	delay = DIV_ROUND_CLOSEST(delay,
+				  (rate / 1000) * 36 *
+				  (RK3328_MMC_DELAY_ELEMENT_PSEC / 10));
+	delay_num = min_t(u32, delay, 255);
+
+	raw = delay_num ? RK3328_MMC_DELAY_SEL : 0;
+	raw |= delay_num << RK3328_MMC_DELAYNUM_OFFSET;
+	raw |= nineties;
+
+	rk_clrsetreg(reg, RK3328_MMC_PHASE_MASK << RK3328_MMC_PHASE_SHIFT,
+		     raw << RK3328_MMC_PHASE_SHIFT);
+
+	debug("%s: clk %ld set_phase(%d) delay_num=%u reg=0x%08x actual=%d\n",
+	      __func__, clk->id, degrees, delay_num, readl(reg),
+	      rk3328_clk_get_phase(clk));
+
+	return 0;
+}
+
+/*
+ * Only pclk_wdt: its gate is in the secure GRF and on out of reset, but
+ * clk_enable() without an enable op is -ENOSYS, which designware_wdt_probe()
+ * treats as fatal. Every other id keeps the -ENOSYS it had before this op
+ * existed, so the drivers that tolerate -ENOSYS see no change.
+ */
+static int rk3328_clk_enable(struct clk *clk)
+{
+	switch (clk->id) {
+	case PCLK_WDT:
+		return 0;
+	default:
+		return -ENOSYS;
+	}
+}
+
 static struct clk_ops rk3328_clk_ops = {
+	.enable = rk3328_clk_enable,
 	.get_rate = rk3328_clk_get_rate,
 	.set_rate = rk3328_clk_set_rate,
 	.set_parent = rk3328_clk_set_parent,
+	.get_phase = rk3328_clk_get_phase,
+	.set_phase = rk3328_clk_set_phase,
 };
 
 static int rk3328_clk_probe(struct udevice *dev)

@@ -45,6 +45,8 @@
  *   usbflash ums mmc <n> ro     UMS of mmc <n>'s user area, read-only, for an
  *                               mmc that answered; when the host ejects the
  *                               medium, DFU again
+ *   usbflash ums mmc <n> ro app the same with a vendor-class interface, so no
+ *                               host OS driver binds it (the app's own path)
  *   usbflash dfu                DFU again
  *   usbflash boot               the session ends and the boot continues
  *   usbflash boot prompt        the same, and U-Boot proper does not autoboot
@@ -277,9 +279,10 @@ static void usbflash_probe_sd(void)
 		return;
 	}
 	usbflash_mmc_ok[1] = true;
-	printf("SPL usbflash: mmc 1 (SD) user 0x%x KiB, mode %u clock %u bus %u-bit\n",
+	printf("SPL usbflash: mmc 1 (SD) user 0x%x KiB, mode %u clock %u bus %u-bit, version 0x%x ocr 0x%08x%s\n",
 	       (u32)(mmc->capacity_user >> 10), (u32)mmc->selected_mode,
-	       mmc->clock, mmc->bus_width);
+	       mmc->clock, mmc->bus_width, mmc->version, mmc->ocr,
+	       mmc->high_capacity ? " HC" : "");
 	ret = usbflash_add_mmc_list("1", usbflash_fam->sd_alts, true);
 	if (ret)
 		printf("SPL usbflash: SD alts not added (%d)\n", ret);
@@ -398,6 +401,11 @@ static int usbflash_allowed(const char *s, size_t len, struct usbflash_cmd *cmd)
 		if (cmd->mmc > 1 || !usbflash_mmc_ok[cmd->mmc])
 			return -ENODEV;
 	}
+	/* `bootrom: unsupported` reads as errTARGET at the manifest step */
+	if (cmd->verb == USBFLASH_BOOTROM &&
+	    (!usbflash_fam->bootrom_check || !usbflash_fam->bootrom_arm ||
+	     usbflash_fam->bootrom_check()))
+		return -ENOSYS;
 
 	return 0;
 }
@@ -497,9 +505,11 @@ static int usbflash_ums_write(struct ums *ums_dev, ulong start,
 /*
  * UMS of mmc @n's user area until the host ejects the medium; read-only
  * unless @ro is false, which usbflash_allowed() admits only in a writing
- * build.
+ * build.  @app puts the interface in the vendor class for this gadget only,
+ * so no host OS driver binds it (the Libre Computer app speaks Bulk-Only to
+ * it over its own USB stack).
  */
-static int usbflash_ums(int n, bool ro)
+static int usbflash_ums(int n, bool ro, bool app)
 {
 	struct mmc *mmc = find_mmc_device(n);
 	struct blk_desc *desc;
@@ -546,16 +556,18 @@ static int usbflash_ums(int n, bool ro)
 		printf("SPL usbflash: UMS: no UDC (%d)\n", ret);
 		return ret;
 	}
+	fsg_set_interface_class(app ? USB_CLASS_VENDOR_SPEC : USB_CLASS_MASS_STORAGE);
 	ret = fsg_init(&lun, 1, udc);
 	if (!ret)
 		ret = g_dnl_register("usb_dnl_ums");
 	if (ret) {
+		fsg_set_interface_class(USB_CLASS_MASS_STORAGE);
 		printf("SPL usbflash: UMS: gadget not registered (%d)\n", ret);
 		udc_device_put(udc);
 		return ret;
 	}
 
-	puts("SPL usbflash: UMS up\n");
+	printf("SPL usbflash: UMS up%s\n", app ? " (vendor class, for the app)" : "");
 	do {
 		dm_usb_gadget_handle_interrupts(udc);
 		ret = fsg_main_thread(NULL);
@@ -563,6 +575,7 @@ static int usbflash_ums(int n, bool ro)
 	} while (!ret);
 
 	g_dnl_release(udc);
+	fsg_set_interface_class(USB_CLASS_MASS_STORAGE);
 	/*
 	 * f_mass_storage's busy_indicator() draws its spinner as "\r<c>" with
 	 * no newline (shared with proper's `ums`, so left alone there). Blank
@@ -576,7 +589,7 @@ static int usbflash_ums(int n, bool ro)
 }
 #else
 /* Not reached: usbflash_allowed() refuses the verb in a build without UMS. */
-static int usbflash_ums(int n, bool ro)
+static int usbflash_ums(int n, bool ro, bool app)
 {
 	return -ENOSYS;
 }
@@ -591,8 +604,8 @@ static void usbflash_mark(int n, const struct usbflash_cmd *cmd)
 {
 	switch (cmd->verb) {
 	case USBFLASH_UMS:
-		printf("SPL usbflash: script %d: ums mmc %d%s\n", n, cmd->mmc,
-		       cmd->ro ? " ro" : "");
+		printf("SPL usbflash: script %d: ums mmc %d%s%s\n", n, cmd->mmc,
+		       cmd->ro ? " ro" : "", cmd->app ? " app" : "");
 		break;
 	case USBFLASH_DFU:
 		printf("SPL usbflash: script %d: dfu\n", n);
@@ -608,6 +621,9 @@ static void usbflash_mark(int n, const struct usbflash_cmd *cmd)
 		break;
 	case USBFLASH_RESET:
 		printf("SPL usbflash: script %d: reset\n", n);
+		break;
+	case USBFLASH_BOOTROM:
+		printf("SPL usbflash: script %d: bootrom\n", n);
 		break;
 	}
 }
@@ -701,8 +717,27 @@ void spl_usbflash_session(const struct spl_usbflash_family *fam)
 			puts("SPL usbflash: reset\n");
 			fam->reset();
 		}
+		if (cmd.verb == USBFLASH_BOOTROM) {
+			/*
+			 * Only on the host's DETACH: a session that timed out
+			 * means the host is gone, and an armed BootROM would wait
+			 * for it with no timeout.  Dropped, the boot continues.
+			 */
+			if (!usb_dnl_last_detached()) {
+				puts("SPL usbflash: bootrom dropped (no DETACH), boot continues\n");
+				break;
+			}
+			if (fam->bootrom_arm()) {
+				puts("bootrom: unsupported\n");
+			} else {
+				dfu_free_entities();
+				usbflash_restore();
+				puts("bootrom: forced\n");
+				fam->reset();
+			}
+		}
 		if (cmd.verb == USBFLASH_UMS)
-			usbflash_ums(cmd.mmc, cmd.ro);
+			usbflash_ums(cmd.mmc, cmd.ro, cmd.app);
 		/*
 		 * Let the host see the last gadget go before the next one comes:
 		 * on RK3399 a gadget restarted at once, after a SuperSpeed

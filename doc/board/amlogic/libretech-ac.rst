@@ -25,7 +25,7 @@ U-Boot Compilation
 .. code-block:: bash
 
     $ export CROSS_COMPILE=aarch64-none-elf-
-    $ make libretech-ac_defconfig
+    $ make libretech-ac_vendor_defconfig
     $ make
 
 U-Boot Signing with Pre-Built FIP repo

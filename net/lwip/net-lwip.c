@@ -37,11 +37,52 @@ static uchar net_pkt_buf[(PKTBUFSRX) * PKTSIZE_ALIGN + PKTALIGN]
 const u8 net_bcast_ethaddr[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 char *pxelinux_configfile;
 
+/* TX generated inside netif->input (TCP ACKs) must not call eth_send
+ * while that same device is still inside eth_recv. Queue those and
+ * flush after input returns. A dropped ACK leaves the peer at its
+ * initial window, which is the one HTTP header segment.
+ */
+#define NET_LWIP_TXQ 16
+static struct pbuf *net_lwip_txq[NET_LWIP_TXQ];
+static int net_lwip_txqn;
+static int net_lwip_in_rx;
+
+static err_t net_lwip_send_now(struct udevice *udev, struct pbuf *p)
+{
+	void *pp;
+	int err;
+
+	pp = memalign(PKTALIGN, p->tot_len);
+	if (!pp)
+		return ERR_MEM;
+	if (pbuf_copy_partial(p, pp, p->tot_len, 0) != p->tot_len) {
+		free(pp);
+		return ERR_BUF;
+	}
+	err = eth_get_ops(udev)->send(udev, pp, p->tot_len);
+	free(pp);
+	if (err) {
+		printf("net tx err %d len %u\n", err, p->tot_len);
+		return ERR_ABRT;
+	}
+	return ERR_OK;
+}
+
+static void net_lwip_tx_flush(struct udevice *udev)
+{
+	int i;
+
+	for (i = 0; i < net_lwip_txqn; i++) {
+		net_lwip_send_now(udev, net_lwip_txq[i]);
+		pbuf_free(net_lwip_txq[i]);
+		net_lwip_txq[i] = NULL;
+	}
+	net_lwip_txqn = 0;
+}
+
 static err_t net_lwip_tx(struct netif *netif, struct pbuf *p)
 {
 	struct udevice *udev = netif->state;
-	void *pp = NULL;
-	int err;
 
 	if (CONFIG_IS_ENABLED(LWIP_DEBUG_RXTX)) {
 		printf("net_lwip_tx: %u bytes, udev %s\n", p->len, udev->name);
@@ -49,25 +90,16 @@ static err_t net_lwip_tx(struct netif *netif, struct pbuf *p)
 			       true);
 	}
 
-	if ((unsigned long)p->payload % PKTALIGN) {
-		/*
-		 * Some net drivers have strict alignment requirements and may
-		 * fail or output invalid data if the packet is not aligned.
-		 */
-		pp = memalign(PKTALIGN, p->len);
-		if (!pp)
-			return ERR_ABRT;
-		memcpy(pp, p->payload, p->len);
+	if (net_lwip_in_rx) {
+		if (net_lwip_txqn >= NET_LWIP_TXQ)
+			net_lwip_tx_flush(udev);
+		pbuf_ref(p);
+		net_lwip_txq[net_lwip_txqn++] = p;
+		return ERR_OK;
 	}
 
-	err = eth_get_ops(udev)->send(udev, pp ? pp : p->payload, p->len);
-	free(pp);
-	if (err) {
-		debug("send error %d\n", err);
-		return ERR_ABRT;
-	}
-
-	return ERR_OK;
+	/* Whole chain: p->len is only the first pbuf. */
+	return net_lwip_send_now(udev, p);
 }
 
 static err_t net_lwip_if_init(struct netif *netif)
@@ -354,8 +386,12 @@ int net_lwip_rx(struct udevice *udev, struct netif *netif)
 			}
 
 			pbuf = alloc_pbuf_and_copy(packet, len);
-			if (pbuf)
+			if (pbuf) {
+				net_lwip_in_rx = 1;
 				netif->input(pbuf, netif);
+				net_lwip_in_rx = 0;
+				net_lwip_tx_flush(udev);
+			}
 		}
 		if (len >= 0 && eth_get_ops(udev)->free_pkt)
 			eth_get_ops(udev)->free_pkt(udev, packet, len);

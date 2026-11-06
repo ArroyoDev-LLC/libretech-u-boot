@@ -185,6 +185,7 @@ obj-$(CONFIG_CMD_SYSBOOT) += sysboot.o
 obj-$(CONFIG_CMD_STACKPROTECTOR_TEST) += stackprot_test.o
 obj-$(CONFIG_CMD_TCPM) += tcpm.o
 obj-$(CONFIG_CMD_TEMPERATURE) += temperature.o
+obj-$(CONFIG_CMD_BOOTROM) += bootrom.o
 obj-$(CONFIG_CMD_TERMINAL) += terminal.o
 obj-$(CONFIG_CMD_TIME) += time.o
 obj-$(CONFIG_CMD_BOOTSETTINGS) += bootsettings.o

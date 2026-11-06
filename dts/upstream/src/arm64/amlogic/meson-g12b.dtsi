@@ -164,6 +164,7 @@
 			cache-sets = <512>;
 		};
 	};
+
 };
 
 &clkc {
@@ -201,39 +202,25 @@
 	compatible = "amlogic,g12b-ddr-pmu";
 };
 
+&dmc {
+	/*
+	 * The DMC's per-port channel-control window (DMC_AM0_CHAN_CTRL at word
+	 * 0x60 through DMC_AXI11_HOLD_CTRL at 0xad). Scanout cannot wait, so
+	 * every G12B board gives the VPU read ports (16/17/18) the top weight;
+	 * the firmware leaves every port at 0. A board that raises another port
+	 * restates these three in its own list, keeping them above it.
+	 */
+	dmc_qos: qos@180 {
+		compatible = "amlogic,g12b-dmc-port-priority";
+		reg = <0x0 0x180 0x0 0x140>;
+		amlogic,port-priority = <16 7>, <17 7>, <18 7>;
+	};
+};
+
 &npu {
 	status = "okay";
 	power-domains = <&pwrc PWRC_G12A_NNA_ID>;
 	interrupts = <GIC_SPI 147 IRQ_TYPE_LEVEL_HIGH>;
-};
-
-/ {
-	soc {
-		wave420l: hevc-encoder@ff610000 {
-			compatible = "amlogic,meson-g12b-wave420l";
-			reg = <0x0 0xff610000 0x0 0x4000>;
-			interrupts = <GIC_SPI 187 IRQ_TYPE_EDGE_RISING>;
-			clocks = <&clkc CLKID_DOS>,
-				 <&clkc CLKID_WAVE420L_A>,
-				 <&clkc CLKID_WAVE420L_B>,
-				 <&clkc CLKID_WAVE420L_C>;
-			clock-names = "dos", "wave420_aclk", "wave420_bclk", "wave420_cclk";
-			assigned-clocks = <&clkc CLKID_WAVE420L_A_SEL>,
-					  <&clkc CLKID_WAVE420L_B_SEL>,
-					  <&clkc CLKID_WAVE420L_C_SEL>,
-					  <&clkc CLKID_WAVE420L_A>,
-					  <&clkc CLKID_WAVE420L_B>,
-					  <&clkc CLKID_WAVE420L_C>;
-			assigned-clock-parents = <&clkc CLKID_FCLK_DIV3>,
-						 <&clkc CLKID_FCLK_DIV3>,
-						 <&clkc CLKID_FCLK_DIV3>;
-			assigned-clock-rates = <0>, <0>, <0>,
-					       <666666667>, <666666667>, <666666667>;
-			amlogic,hhi-sysctrl = <&hhi>;
-			amlogic,ao-sysctrl = <&rti>;
-			status = "disabled";
-		};
-	};
 };
 
 &apb {
@@ -265,6 +252,35 @@
 				reg = <0>;
 				/* Sensor endpoint connected in board .dts */
 			};
+		};
+	};
+};
+
+/ {
+	soc {
+		wave420l: hevc-encoder@ff610000 {
+			compatible = "amlogic,meson-g12b-wave420l";
+			reg = <0x0 0xff610000 0x0 0x4000>;
+			interrupts = <GIC_SPI 187 IRQ_TYPE_EDGE_RISING>;
+			clocks = <&clkc CLKID_DOS>,
+				 <&clkc CLKID_WAVE420L_A>,
+				 <&clkc CLKID_WAVE420L_B>,
+				 <&clkc CLKID_WAVE420L_C>;
+			clock-names = "dos", "wave420_aclk", "wave420_bclk", "wave420_cclk";
+			assigned-clocks = <&clkc CLKID_WAVE420L_A_SEL>,
+					  <&clkc CLKID_WAVE420L_B_SEL>,
+					  <&clkc CLKID_WAVE420L_C_SEL>,
+					  <&clkc CLKID_WAVE420L_A>,
+					  <&clkc CLKID_WAVE420L_B>,
+					  <&clkc CLKID_WAVE420L_C>;
+			assigned-clock-parents = <&clkc CLKID_FCLK_DIV3>,
+						 <&clkc CLKID_FCLK_DIV3>,
+						 <&clkc CLKID_FCLK_DIV3>;
+			assigned-clock-rates = <0>, <0>, <0>,
+					       <666666667>, <666666667>, <666666667>;
+			amlogic,hhi-sysctrl = <&hhi>;
+			amlogic,ao-sysctrl = <&rti>;
+			status = "disabled";
 		};
 	};
 };

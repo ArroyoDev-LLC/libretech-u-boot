@@ -114,3 +114,4 @@ obj-y += mscc_eswitch/
 obj-y += phy/
 obj-y += qe/
 obj-y += ti/
+obj-$(CONFIG_WIFI_MT7601U) += wireless/

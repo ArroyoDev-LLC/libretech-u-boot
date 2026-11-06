@@ -260,6 +260,17 @@ void console_drop_kept_keys(void);
 void console_kept_keys_to_cli(void);
 
 /**
+ * console_kept_keys_hold() - keep the kept keys from getchar() / tstc() again
+ *
+ * For a reader inside the command line that must see only the device's keys
+ * and keeps what it does not act on (a line held while a host transfer runs).
+ * console_kept_keys_to_cli() hands them back.
+ *
+ * Return: true if the kept keys were open to the command line
+ */
+bool console_kept_keys_hold(void);
+
+/**
  * console_discard_input() - drop the kept keys and every pending input key
  *
  * For a reader that waits on a key the user presses after its prompt (pause,

@@ -33,6 +33,10 @@
  * @replay:	optional: write the boot so far (earlier stages' console) to @out,
  *		the ACM console, before the session's first line
  * @reset:	`usbflash reset`: reset the board; does not return
+ * @bootrom_check: optional: 0 when this unit can force its next boot to the
+ *		BootROM's USB mode; without it `usbflash bootrom` is refused
+ * @bootrom_arm: optional: arm that mechanism and read it back (0: armed);
+ *		the session then resets through @reset
  */
 struct spl_usbflash_family {
 	const char *emmc_alts;
@@ -47,6 +51,8 @@ struct spl_usbflash_family {
 	void (*restore)(void);
 	void (*replay)(void (*out)(const char *s, unsigned int len));
 	void (*reset)(void);
+	int (*bootrom_check)(void);
+	int (*bootrom_arm)(void);
 };
 
 /**

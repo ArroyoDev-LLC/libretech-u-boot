@@ -16,7 +16,7 @@ CONFIG_SF_DEFAULT_CS=0
 CONFIG_SF_DEFAULT_SPEED=30000000
 # Env size for FAT uboot.env (Libre Computer policy: env proper on boot media
 # EFI/FAT, NOT in SPI NOR). Matches zynq_e310_defconfig and
-# aml-s905d3-cc_defconfig. This was 0x10000 (64 KiB) until 2026-07-30, a
+# aml-s905d3-cc_vendor_defconfig. This was 0x10000 (64 KiB) until 2026-07-30, a
 # leftover sized to the NOR erase block from the retired ENV_IS_IN_SPI_FLASH
 # arrangement; nothing about a FAT file wants an erase-block size. Changing it
 # changes the size of uboot.env on the ESP, so the old 64 KiB file no longer
@@ -174,7 +174,7 @@ CONFIG_OF_LIST="zynq-adrv9009"
 # Env proper lives on the boot media's EFI/FAT partition, per Libre Computer
 # bootloader policy §4 ("Environment storage: a filesystem, never a raw block" --
 # never a raw offset, and never in NOR; the NOR config sector holds *overrides*
-# only). Same backend as zynq_e310_defconfig and aml-s905d3-cc_defconfig.
+# only). Same backend as zynq_e310_defconfig and aml-s905d3-cc_vendor_defconfig.
 #
 # This REPLACES an earlier env-in-QSPI-NOR arrangement (ENV_IS_IN_SPI_FLASH at a
 # raw ENV_OFFSET=0x200000) whose stated goal was to keep the SD a clean generic

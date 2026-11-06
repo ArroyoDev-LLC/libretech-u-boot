@@ -104,6 +104,12 @@
 
 #if defined(CONFIG_SPL_DFU)
 #include "meson-gxl-libretech-spl-usbflash-u-boot.dtsi"
+#include "meson-gxl-libretech-cc-spl-sd-uhs-u-boot.dtsi"
+
+/* Both USB2 PHYs' phy-supply (VCC5V, GPIOH_3). */
+&vcc5v {
+	bootph-pre-ram;
+};
 #endif
 
 / {
@@ -132,7 +138,7 @@
 /*
  * Open-chain SCMI (aml-s905x-cc-v2 / libretech-cc_v2).
  * Merged only when CONFIG_SCMI_FIRMWARE is enabled
- * (amlogic/libretech-cc-v2-scmi.config, libretech-cc_v2_libre_defconfig).
+ * (amlogic/libretech-cc-v2-scmi.config, libretech-cc_v2_defconfig).
  * MHU + AHB shmem already exist in meson-gx.dtsi; this overlay adds
  * firmware/scmi and disables vendor SCPI for the U-Boot DTB only.
  * Do not treat the v1 libretech-cc include as V2 proof.

@@ -1,0 +1,5 @@
+menu "Wireless LAN"
+
+source "drivers/net/wireless/mt7601u/Kconfig"
+
+endmenu

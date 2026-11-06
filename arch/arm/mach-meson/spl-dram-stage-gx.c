@@ -406,7 +406,7 @@ void board_init_f(ulong dummy)
 	 * common/spl/spl.c's board_init_r() is what parses the FIT and invokes
 	 * BL31: spl_boot_device() -> boot_from_devices() -> spl_ram_load_image()
 	 * (BOOT_DEVICE_RAM, FIT at CONFIG_SPL_LOAD_FIT_ADDRESS -- 0x02000000 on
-	 * libretech-cc_libre_defconfig, 0x0c000000 on the v2 and ac boards --
+	 * libretech-cc_defconfig, 0x0c000000 on the v2 and ac boards --
 	 * where TPL's USB session left it) or spl_mmc_load_image()
 	 * (SYS_MMCSD_RAW_MODE_U_BOOT_SECTOR 0x100 = 0x20000 = the binman FIT
 	 * offset 0x1fe00 plus the 0x200 image offset) -> spl_load_simple_fit()

@@ -1,0 +1,13 @@
+config SCMI_LC_TYPEC
+	bool "Libre Computer lc-typec SCMI vendor protocol 0x80"
+	depends on SCMI_FIRMWARE && ROCKCHIP_RK3399
+	select SCMI_ID_VENDOR_80
+	help
+	  The RK3399 Cortex-M0 SCMI server can own the rear Type-C0 port
+	  (sole I2C7 master, sink policy engine) and reports it through the
+	  vendor protocol 0x80 "lc-typec". With this option U-Boot takes the
+	  bind-time ownership decision, keeps its own fusb302 TCPM and the
+	  I2C7 controller off that port when the M0 owns it, feeds the
+	  Type-C PHY the orientation the M0 reports, and adds
+	  `scmi typec status`. A server without 0x80 leaves everything as
+	  before.

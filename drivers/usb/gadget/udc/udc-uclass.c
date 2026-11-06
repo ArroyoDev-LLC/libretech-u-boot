@@ -18,17 +18,31 @@ usb_gadget_generic_dev_ops(struct udevice *dev)
 	return (const struct usb_gadget_generic_ops *)dev->driver->ops;
 }
 
+/*
+ * A nested call returns at once.  The console's writes service its gadget
+ * (f_acm's __acm_tx, and its idle servicing while no host is connected), so a
+ * printf from inside a gadget callback (a setup handler, a completion) would
+ * otherwise run the controller's interrupt handler inside itself.
+ */
 int dm_usb_gadget_handle_interrupts(struct udevice *dev)
 {
 	const struct usb_gadget_generic_ops *ops;
+	static bool in_handler;
+	int ret;
 
 	ops = usb_gadget_generic_dev_ops(dev);
 	if (!ops)
 		return -EFAULT;
 	if (!ops->handle_interrupts)
 		return -ENOSYS;
+	if (in_handler)
+		return 0;
 
-	return ops->handle_interrupts(dev);
+	in_handler = true;
+	ret = ops->handle_interrupts(dev);
+	in_handler = false;
+
+	return ret;
 }
 
 int udc_device_get_by_index(int index, struct udevice **udev)

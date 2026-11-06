@@ -253,6 +253,66 @@ done:
 	return ret;
 }
 
+int dfu_init_env_groups(const char *groups)
+{
+#ifdef CONFIG_SET_DFU_ALT_INFO
+	char *spec, *rest, *grp, *dev, *list = NULL, *grown;
+	const char *alts;
+	size_t n = 0, add;
+	int ret = -EINVAL;
+
+	/* As dfu_init_env_entities(): whoever builds a list takes it */
+	dfu_console_release();
+
+	dfu_reinit_needed = false;
+	dfu_alt_info_changed = false;
+
+	if (dfu_bare_phase())
+		return -EINVAL;
+	spec = strdup(groups);
+	if (!spec)
+		return -ENOMEM;
+	rest = spec;
+	while ((grp = strsep(&rest, "&"))) {
+		grp = skip_spaces(grp);
+		dev = strchr(grp, ' ');
+		if (!dev)
+			goto done;
+		*dev++ = '\0';
+		dev = skip_spaces(dev);
+
+		set_dfu_alt_info(grp, dev);
+		alts = dfu_env_get("dfu_alt_info");
+		if (!alts || !*alts) {
+			pr_err("DFU: no alternates for \"%s %s\"\n", grp, dev);
+			goto done;
+		}
+		/* "&" (after the first) + "<interface> <devstr>=" + alts + NUL */
+		add = 1 + strlen(grp) + 1 + strlen(dev) + 1 + strlen(alts) + 1;
+		grown = realloc(list, n + add);
+		if (!grown) {
+			ret = -ENOMEM;
+			goto done;
+		}
+		list = grown;
+		n += sprintf(list + n, "%s%s %s=%s", n ? "&" : "", grp, dev,
+			     alts);
+	}
+	if (!list)
+		goto done;
+
+	ret = dfu_config_interfaces(list);
+	if (ret)
+		pr_err("DFU entities configuration failed: %d\n", ret);
+done:
+	free(list);
+	free(spec);
+	return ret;
+#else
+	return -ENOSYS;
+#endif
+}
+
 static unsigned char *dfu_buf;
 static unsigned long dfu_buf_size;
 

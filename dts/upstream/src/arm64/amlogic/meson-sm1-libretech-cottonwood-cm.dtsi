@@ -61,29 +61,29 @@
 
 /* SM1: 4x A55 with per-core clocks, single CPU voltage domain */
 &cpu0 {
+	cpu-supply = <&vddcpu_b>;
 	operating-points-v2 = <&cpu_opp_table>;
 	clocks = <&clkc CLKID_CPU_CLK>;
-	cpu-supply = <&vddcpu_b>;
 	clock-latency = <50000>;
 };
 
 &cpu1 {
+	cpu-supply = <&vddcpu_b>;
 	operating-points-v2 = <&cpu_opp_table>;
 	clocks = <&clkc CLKID_CPU1_CLK>;
-	cpu-supply = <&vddcpu_b>;
 	clock-latency = <50000>;
 };
 
 &cpu2 {
+	cpu-supply = <&vddcpu_b>;
 	operating-points-v2 = <&cpu_opp_table>;
 	clocks = <&clkc CLKID_CPU2_CLK>;
-	cpu-supply = <&vddcpu_b>;
 	clock-latency = <50000>;
 };
 
 &cpu3 {
+	cpu-supply = <&vddcpu_b>;
 	operating-points-v2 = <&cpu_opp_table>;
 	clocks = <&clkc CLKID_CPU3_CLK>;
-	cpu-supply = <&vddcpu_b>;
 	clock-latency = <50000>;
 };

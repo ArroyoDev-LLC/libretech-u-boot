@@ -251,8 +251,18 @@ struct rk8xx_reg_table {
 
 struct rk8xx_priv {
 	int variant;
+	/* RK808: 1 = this power-up came from power being attached, 0 = not, <0 = unknown */
+	int power_applied;
 };
 
 int rk8xx_spl_configure_buck(struct udevice *pmic, int buck, int uvolt);
+
+/*
+ * The power_on_attach platform key (claude design/rules/bootloader/board-config.md):
+ * absent, "on" or "1" boots; "off" or "0" powers the PMIC off when this power-up came
+ * from power being attached. Call after the environment and the board config
+ * block are in (board_late_init()). CONFIG_ROCKCHIP_RK8XX_POWER_ON_ATTACH.
+ */
+void rk8xx_power_on_attach(void);
 
 #endif

@@ -119,6 +119,29 @@
 };
 
 /*
+ * lc-typec, the M0's vendor SCMI protocol 0x80 -- the one SCMI addition this
+ * file carries, despite the agent itself living in dts/upstream, because it
+ * has to be in U-Boot's own control FDT STATICALLY: the agent binds a
+ * protocol driver only for a DT subnode whose id Base reports
+ * (scmi_bind_protocols, at post_bind), long before ft_board_setup could add
+ * one. With a firmware that lacks 0x80 the node is inert in U-Boot, and Linux
+ * logs "SCMI protocol 128 not implemented" once and skips it.
+ *
+ * When the M0 owns the rear Type-C0 port (scmi_m0_owns_typec()),
+ * ft_board_setup creates that port's usb-c-connector as connector@0 under
+ * this node -- hence the address cells -- for the kernel's ucsi_scmi driver.
+ * It is never created here: the default stays legacy.
+ * claude:rockchip/rk3399/plan/m0-typec-pd-owner.md "U-Boot".
+ */
+&scmi {
+	scmi_lc_typec: protocol@80 {
+		reg = <0x80>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+	};
+};
+
+/*
  * No &dc_12v override. This file used to re-type the shared dtsi's
  * mp8859_dcdc child as `compatible = "regulator-fixed"` "until mp8859 has
  * its own dt-binding", and it never did anything on any path: U-Boot has no
@@ -139,6 +162,16 @@
 };
 
 &gpio1 {
+	bootph-pre-ram;
+};
+
+/*
+ * The SD slot's card detect (&sdmmc cd-gpios, GPIO0_A7): without this bank
+ * in SPL the dw_mmc driver has no cd-gpio and reports a card present
+ * whatever the slot holds, so the SPL flash session's `info` could not say
+ * whether a card is in.
+ */
+&gpio0 {
 	bootph-pre-ram;
 };
 
@@ -656,14 +689,7 @@
  */
 &tcphy0 {
 	bootph-pre-ram;
-	/*
-	 * Measured on a V1.2 board with a DP monitor on Type-C0 (CC reading
-	 * a normal plug): the link trains only with the lanes muxed for the
-	 * reversed orientation and AUX polarity set for the normal one. The
-	 * V1.2A drawings show Type-C0 and Type-C1 wired alike; Type-C1 trains
-	 * with the plain CC orientation.
-	 */
-	libretech,typec-orientation-inverted;
+	/* libretech,typec-orientation-inverted: in rk3399-roc-pc.dtsi */
 };
 
 &tcphy0_usb3 {

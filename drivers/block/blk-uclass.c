@@ -841,6 +841,49 @@ static int blk_post_probe(struct udevice *dev)
 	return 0;
 }
 
+int blk_rescan_partitions(struct udevice *dev)
+{
+	struct udevice *child, *next;
+	struct blk_desc *desc;
+	int ret;
+
+	if (!CONFIG_IS_ENABLED(PARTITIONS) || !blk_enabled())
+		return 0;
+	if (!dev || device_get_uclass_id(dev) != UCLASS_BLK)
+		return -EINVAL;
+
+	/*
+	 * The partition devices were created from the table read at probe;
+	 * removing them (and the block device, whose EFI disk object
+	 * efi_disk_probe() rebuilds with its partitions only at the block
+	 * device's probe) drops every object made from the old table.
+	 */
+	device_foreach_child_safe(child, next, dev) {
+		if (device_get_uclass_id(child) != UCLASS_PARTITION)
+			continue;
+		ret = device_remove(child, DM_REMOVE_NORMAL);
+		if (ret)
+			return ret;
+		ret = device_unbind(child);
+		if (ret)
+			return ret;
+	}
+	ret = device_remove(dev, DM_REMOVE_NORMAL);
+	if (ret)
+		return ret;
+
+	/*
+	 * part_init() keeps a cached type whose own test still passes, and a
+	 * GPT's protective MBR passes the DOS test: forget the type, so the
+	 * table is probed in driver order, as at the first probe.
+	 */
+	desc = dev_get_uclass_plat(dev);
+	desc->part_type = PART_TYPE_UNKNOWN;
+
+	/* blk_post_probe() reads the table again (part_init) */
+	return device_probe(dev);
+}
+
 UCLASS_DRIVER(blk) = {
 	.id		= UCLASS_BLK,
 	.name		= "blk",

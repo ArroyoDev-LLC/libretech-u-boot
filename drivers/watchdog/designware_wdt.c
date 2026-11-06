@@ -76,8 +76,13 @@ static int designware_wdt_stop(struct udevice *dev)
 	designware_wdt_reset(dev);
 	writel(0, priv->base + DW_WDT_CR);
 
-	if (CONFIG_IS_ENABLED(DM_RESET) &&
-	    ofnode_read_prop(dev_ofnode(dev), "resets", &ret)) {
+	/*
+	 * Use the handles probe took, not the "resets" property: on a flat
+	 * tree the device's node offset goes stale once the control FDT is
+	 * edited in place (fdt resize, fdt set), and CR=0 alone does not stop
+	 * every DesignWare watchdog (RK3399 WDT0 keeps counting).
+	 */
+	if (CONFIG_IS_ENABLED(DM_RESET) && priv->resets.count) {
 		ret = reset_assert_bulk(&priv->resets);
 		if (ret)
 			return ret;

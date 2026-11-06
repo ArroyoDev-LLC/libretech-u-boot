@@ -106,7 +106,13 @@ check_member(rockchip_cru, sdio1_con[1], 0x594);
 #define NPLL_HZ		(1200*MHz)
 #define PPLL_HZ		(676*MHz)
 
-#define PMU_PCLK_HZ	(48*MHz)
+/*
+ * pclk_pmu_src: PPLL / 7 = 96.57 MHz, the PMUCRU reset value (CLKSEL_CON0
+ * 0x0706, TRM part 1). The M0 SCMI server's speed follows this clock, not
+ * its own: at 48 MHz it runs at half the speed (2.16 vs 4.29 us per
+ * instruction measured on slot7). 676 / 96 truncates to 7, divider 6.
+ */
+#define PMU_PCLK_HZ	(96*MHz)
 
 #define ACLKM_CORE_L_HZ	(300*MHz)
 #define ATCLK_CORE_L_HZ	(300*MHz)
@@ -141,6 +147,21 @@ enum apll_l_frequencies {
 enum apll_b_frequencies {
 	APLL_B_600_MHZ,
 };
+
+/*
+ * The boot's real reset cause, kept by TPL (rockchip B186 F21). TPL follows a
+ * watchdog or TSADC reset with a global soft reset of its own, and BL31 clears
+ * CRU_GLB_RST_ST, so the register alone reads as a soft or a power-on reset
+ * by the time anything reports it. PMU_SYS_REG1 keeps its value across a
+ * global soft reset and is cleared by a power cut; nothing else uses it.
+ *   [31:16] RK3399_RST_CAUSE_MAGIC  [15] TPL's own reset is pending
+ *   [5:0] CRU_GLB_RST_ST of the reset that started this boot
+ */
+#define RK3399_RST_CAUSE_REG		0xff3100f4	/* PMU_SYS_REG1 */
+#define RK3399_RST_CAUSE_MAGIC		0x52430000
+#define RK3399_RST_CAUSE_MAGIC_MASK	0xffff0000
+#define RK3399_RST_CAUSE_PENDING	0x8000
+#define RK3399_RST_CAUSE_MASK		0x3f
 
 void rk3399_configure_cpu_l(struct rockchip_cru *cru,
 			    enum apll_l_frequencies apll_l_freq);

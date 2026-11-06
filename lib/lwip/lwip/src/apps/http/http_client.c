@@ -48,6 +48,7 @@
 #include "lwip/apps/http_client.h"
 
 #include "lwip/altcp_tcp.h"
+#include "lwip/tcp.h"
 #include "lwip/dns.h"
 #include "lwip/debug.h"
 #include "lwip/mem.h"
@@ -282,6 +283,14 @@ httpc_tcp_recv(void *arg, struct altcp_pcb *pcb, struct pbuf *p, err_t r)
   httpc_state_t* req = (httpc_state_t*)arg;
   LWIP_UNUSED_ARG(r);
 
+  if (p != NULL) {
+    /* Header bytes are progress. Leaving them un-acked keeps the
+     * window shut until the blank line arrives, which never does if
+     * that line is in the next segment.
+     */
+    req->timeout_ticks = HTTPC_POLL_TIMEOUT;
+    altcp_recved(pcb, p->tot_len);
+  }
   if (p == NULL) {
     httpc_result_t result;
     if (req->parse_state != HTTPC_PARSE_RX_DATA) {
@@ -368,6 +377,7 @@ httpc_tcp_poll(void *arg, struct altcp_pcb *pcb)
 {
   /* implement timeout */
   httpc_state_t* req = (httpc_state_t*)arg;
+
   LWIP_UNUSED_ARG(pcb);
   if (req != NULL) {
     if (req->timeout_ticks) {
@@ -396,12 +406,15 @@ static err_t
 httpc_tcp_connected(void *arg, struct altcp_pcb *pcb, err_t err)
 {
   err_t r;
+  u16_t req_len;
   httpc_state_t* req = (httpc_state_t*)arg;
+
   LWIP_UNUSED_ARG(pcb);
   LWIP_UNUSED_ARG(err);
 
   /* send request; last char is zero termination */
-  r = altcp_write(req->pcb, req->request->payload, req->request->len - 1, TCP_WRITE_FLAG_COPY);
+  req_len = req->request->len - 1;
+  r = altcp_write(req->pcb, req->request->payload, req_len, TCP_WRITE_FLAG_COPY);
   if (r != ERR_OK) {
      /* could not write the single small request -> fail, don't retry */
      return httpc_close(req, HTTPC_RESULT_ERR_MEM, 0, r);

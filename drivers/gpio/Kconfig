@@ -298,6 +298,15 @@ config MAX7320_GPIO
 	 original maxim device has 8 push/pull outputs,
 	 some clones offers 16bit.
 
+config RK805_GPIO
+	bool "Rockchip RK805 PMIC output GPIOs"
+	depends on DM_GPIO && PMIC_RK8XX
+	help
+	  The RK805 PMIC's two output-only pins, OUT1 and OUT2, as GPIOs 0
+	  and 1 of the PMIC node (bits 0 and 1 of RK805_OUT_REG, 0x52), as
+	  Linux's pinctrl-rk805 numbers them. Boards drive status LEDs from
+	  them (ROC-RK3328-CC).
+
 config MAX77663_GPIO
 	bool "MAX77663 GPIO cell of PMIC driver"
 	depends on DM_GPIO && DM_PMIC_MAX77663
@@ -427,6 +436,22 @@ config ROCKCHIP_GPIO
 	  a number of banks (different for each SoC type) each with 32 GPIOs.
 	  The GPIOs for a device are defined in the device tree with one node
 	  for each bank.
+
+config RK3328_GRF_GPIO
+	bool "Rockchip RK3328 GRF GPIO_MUTE line"
+	depends on DM_GPIO && ROCKCHIP_RK3328 && REGMAP && SYSCON
+	help
+	  The RK3328's one output-only GPIO in the GRF, GPIO_MUTE at
+	  GRF_SOC_CON10[1] ("rockchip,rk3328-grf-gpio"). Boards switch the
+	  SD card's IO between 3.3 V and 1.8 V with it (the vqmmc regulator
+	  for UHS-I), or mute audio.
+
+config SPL_RK3328_GRF_GPIO
+	bool "Rockchip RK3328 GRF GPIO_MUTE line in SPL"
+	depends on SPL_DM_GPIO && ROCKCHIP_RK3328 && SPL_REGMAP && SPL_SYSCON
+	help
+	  The RK3328 GRF GPIO_MUTE line in SPL, for an SPL that runs the SD
+	  card in UHS-I (the SPL USB flash session).
 
 config SANDBOX_GPIO
 	bool "Enable sandbox GPIO driver"

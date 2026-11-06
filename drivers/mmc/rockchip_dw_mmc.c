@@ -610,6 +610,10 @@ static int rockchip_dwmmc_get_cd(struct udevice *dev)
 	struct rockchip_dwmmc_priv *priv = dev_get_priv(dev);
 	struct mmc *mmc = priv->host.mmc;
 
+	/* Found empty this boot (dw_mmc.c dwmci_control_clken()). */
+	if (priv->host.absent)
+		return 0;
+
 	/* Soldered-down, or told to poll: always present */
 	if (mmc->cfg->host_caps & (MMC_CAP_NONREMOVABLE | MMC_CAP_NEEDS_POLL))
 		return 1;
@@ -757,6 +761,12 @@ U_BOOT_DRIVER(rockchip_rk3288_dw_mshc) = {
 	.probe		= rockchip_dwmmc_probe,
 	.priv_auto	= sizeof(struct rockchip_dwmmc_priv),
 	.plat_auto	= sizeof(struct rockchip_mmc_plat),
+	/*
+	 * Removed before an OS or a reset (dm_remove_devices_active()), so
+	 * the uclass's mmc_deinit() hands the cards on in a state the next
+	 * reader takes: an SD card in UHS goes back to 3.3 V signalling.
+	 */
+	.flags		= DM_FLAG_OS_PREPARE,
 };
 
 DM_DRIVER_ALIAS(rockchip_rk3288_dw_mshc, rockchip_rk2928_dw_mshc)

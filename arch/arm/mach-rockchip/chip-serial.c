@@ -67,6 +67,20 @@ static int cpuid_read(u8 *cpuid)
 #define RK3328_AUTO_CTRL	0x0024
 #define RK3328_AUTO_RD		BIT(1)
 #define RK3328_AUTO_ENB		BIT(0)
+/*
+ * EFUSE_MOD bit 0, work_mod: 0 auto mode, 1 user mode (RK3328 TRM part 1
+ * §12.4.2). The BootROM hands the TPL the controller in user mode with the
+ * read timings EFUSE_T_*_R (0x3c..0x4c) at their reset value, 0, and an auto
+ * read then completes and returns zeros. It switches to auto mode and sets
+ * those timings itself only before it loads SPL.
+ */
+#define RK3328_MOD		0x0000
+#define RK3328_MOD_USER		BIT(0)
+#define RK3328_T_CSB_R		0x003c
+#define RK3328_T_PGENB_R	0x0040
+#define RK3328_T_LOAD_R		0x0044
+#define RK3328_T_ADDR_R		0x0048
+#define RK3328_T_STROBE_R	0x004c
 
 #if IS_ENABLED(CONFIG_ROCKCHIP_RK3399)
 #define EFUSE_BASE		0xff690000	/* efuse0, rk3399-base.dtsi */
@@ -93,6 +107,19 @@ static int efuse_word(unsigned int word, u32 *val)
 #else
 	int i;
 
+	if (readl(base + RK3328_MOD) & RK3328_MOD_USER) {
+		/*
+		 * The read timings the BootROM programs before SPL, read back
+		 * from the controller in SPL on a ROC-RK3328-CC (2026-11-05):
+		 * the TPL leaves them as the BootROM would.
+		 */
+		writel(0x00010004, base + RK3328_T_CSB_R);
+		writel(0x00010004, base + RK3328_T_PGENB_R);
+		writel(0x00010004, base + RK3328_T_LOAD_R);
+		writel(0x00010004, base + RK3328_T_ADDR_R);
+		writel(0x00020003, base + RK3328_T_STROBE_R);
+		clrbits_le32(base + RK3328_MOD, RK3328_MOD_USER);
+	}
 	writel(RK3328_AUTO_RD | RK3328_AUTO_ENB | RK3399_ADDR(word),
 	       base + RK3328_AUTO_CTRL);
 	udelay(1);

@@ -11,9 +11,8 @@
  * (built-in, /lbs override, PXE, a distro). boot.ini, the NOR config
  * sector or a saved environment set it with a plain setenv.
  *
- * It is called from the board's ft_board_setup(), which image_setup_libfdt()
- * runs on every board (EVT_FT_FIXUP is not notified when U-Boot runs on a
- * live tree, which these boards do).
+ * image_setup_libfdt() calls it for every board, on a flat tree or a live
+ * tree alike.
  *
  * Failure modes: an unknown value, a board with no `usb-otg` alias, or a
  * kernel FDT without that node is reported and 0 is returned, so the boot

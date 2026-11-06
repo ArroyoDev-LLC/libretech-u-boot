@@ -80,7 +80,7 @@ void bootsource_announce(enum bootsource src);
  *
  * Sets `bootsource` to the token, `bootdevice` to @mmc_dev when given,
  * prints the banner, and records @src for /chosen/libre-computer,boot-source
- * in the kernel FDT (the EVT_FT_FIXUP spy, or bootsource_fdt_fixup()).
+ * in the kernel FDT (bootsource_fdt_fixup()).
  */
 void bootsource_publish(enum bootsource src, int mmc_dev);
 
@@ -96,8 +96,7 @@ enum bootsource bootsource_get(void);
  * bootsource_fdt_fixup() - write /chosen/libre-computer,boot-source into @blob
  * @blob: the FDT the kernel boots
  *
- * For a board on a live tree, where EVT_FT_FIXUP is not sent: called from
- * its ft_board_setup().
+ * Called by image_setup_libfdt() for every board.
  *
  * Return: 0, or a libfdt error
  */

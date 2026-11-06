@@ -51,6 +51,7 @@
 
 #include <asm/io.h>
 #include <asm/arch/boot.h>
+#include <asm/arch/g12-resident.h>
 #include <asm/arch/g12a-handoff.h>
 #include <linux/bitops.h>
 #include <linux/types.h>
@@ -59,6 +60,45 @@
 #define G12R_AO_RTI_STATUS_REG2		0xFF800008UL
 /* The BootROM's "USB first, wait for the host forever" value (ROM 0xffff68c8/cc). */
 #define G12R_OVD_USB_FOREVER		0x4f5244b1u
+
+/*
+ * The failed-boot count (MESON_G12A_RESIDENT_HANG_RETRIES), in
+ * G12A_RESIDENT_HANG_REG (asm/arch/g12-resident.h): it survives the EE
+ * watchdog's reset, a power cut clears it, and the normal world can write it
+ * (measured on the S905D3-CC:
+ * amlogic/software/boot/g12/audit/2026-11-04-sm1-boot-hang-counter-register.md).
+ * [7:0] the boots counted since the last one that reached a wait for a person.
+ */
+#define G12R_AO_RTI_STATUS_REG1		G12A_RESIDENT_HANG_REG
+#define G12R_HANG_MAGIC			G12A_RESIDENT_HANG_MAGIC
+#define G12R_HANG_MAGIC_MASK		G12A_RESIDENT_HANG_MAGIC_MASK
+#define G12R_HANG_COUNT_MASK		G12A_RESIDENT_HANG_COUNT
+
+#if defined(CONFIG_MESON_G12A_RESIDENT_HANG_RETRIES)
+#define G12R_HANG_RETRIES		CONFIG_MESON_G12A_RESIDENT_HANG_RETRIES
+#else
+#define G12R_HANG_RETRIES		0
+#endif
+
+/* The boots counted, 0 when AO_RTI_STATUS_REG1 does not carry the magic. */
+static __maybe_unused u32 g12r_hang_count(void)
+{
+	u32 v = readl((void __iomem *)G12R_AO_RTI_STATUS_REG1);
+
+	return (v & G12R_HANG_MAGIC_MASK) == G12R_HANG_MAGIC ?
+		v & G12R_HANG_COUNT_MASK : 0;
+}
+
+/* Clear the count and return it; leave a value without the magic alone (0). */
+static __maybe_unused u32 g12r_hang_clear(void)
+{
+	u32 v = readl((void __iomem *)G12R_AO_RTI_STATUS_REG1);
+
+	if ((v & G12R_HANG_MAGIC_MASK) != G12R_HANG_MAGIC)
+		return 0;
+	writel(0, (void __iomem *)G12R_AO_RTI_STATUS_REG1);
+	return v & G12R_HANG_COUNT_MASK;
+}
 
 /*
  * EE watchdog, the block drivers/watchdog/meson_gxbb_wdt.c drives at
@@ -86,9 +126,16 @@
  */
 static u32 g12r_wdt_owned __section(".data");
 
-int g12a_resident_from_emmc(void)
+/*
+ * The BootROM loaded this TPL from storage the reader can fetch the staged
+ * layout from: the eMMC (boot0) or the SD slot (user area; tpl-emmc-g12.c
+ * picks the port from the same boot device).
+ */
+int g12a_resident_from_storage(void)
 {
-	return meson_get_boot_device() == BOOT_DEVICE_EMMC;
+	int dev = meson_get_boot_device();
+
+	return dev == BOOT_DEVICE_EMMC || dev == BOOT_DEVICE_SD;
 }
 
 /*
@@ -124,6 +171,32 @@ bool g12a_resident_wdt_keep(void)
 	return true;
 }
 
+/* What the arm decided about the boot count (g12a_resident_hang()); .data, as above */
+static u32 g12r_hang_state __section(".data");
+
+/*
+ * MESON_G12A_RESIDENT_HANG_RETRIES (claude design/rules/bootloader/
+ * reset-to-usb-boot.md R11): count this boot, or, with N already counted,
+ * arm the word instead of booting and let the watchdog reset the board into
+ * the BootROM's USB wait.  The count stays at N: the TPL a host then loads
+ * over USB clears it with the word (spl.c), as a power cut does.
+ */
+static void g12r_hang_step(void)
+{
+	u32 n = g12r_hang_count();
+
+	if (n >= G12R_HANG_RETRIES) {
+		writel(G12R_OVD_USB_FOREVER, (void __iomem *)G12R_AO_RTI_STATUS_REG2);
+		g12r_hang_state = G12A_RESIDENT_HANG_AT_N | n;
+		return;
+	}
+	n++;
+	writel(G12R_HANG_MAGIC | n, (void __iomem *)G12R_AO_RTI_STATUS_REG1);
+	g12r_hang_state = G12A_RESIDENT_HANG_COUNTED | n;
+	if (IS_ENABLED(CONFIG_MESON_G12A_RESIDENT_HANG_TEST))
+		g12r_hang_state |= G12A_RESIDENT_HANG_TEST;
+}
+
 /**
  * g12a_resident_arm() - arm the EE watchdog (and, "rig" mode, the word).
  *
@@ -148,9 +221,29 @@ u32 g12a_resident_arm(void)
 	       (void __iomem *)G12R_WDT_CNTL);
 	g12r_wdt_owned = 1;
 
-	if (IS_ENABLED(CONFIG_MESON_G12A_RESIDENT_OVERRIDE))
-		writel(G12R_OVD_USB_FOREVER, (void __iomem *)G12R_AO_RTI_STATUS_REG2);
+	if (IS_ENABLED(CONFIG_MESON_G12A_RESIDENT_OVERRIDE)) {
+		if (!G12R_HANG_RETRIES)
+			/* "rig": the word on the first hang */
+			writel(G12R_OVD_USB_FOREVER,
+			       (void __iomem *)G12R_AO_RTI_STATUS_REG2);
+		else
+			g12r_hang_step();
+	}
 	return readl((void __iomem *)G12R_WDT_CNTL);
+}
+
+/**
+ * g12a_resident_hang() - what this TPL's arm decided about the boot count.
+ *
+ * Return: G12A_RESIDENT_HANG_* flags with the count in [7:0]: COUNTED (this
+ * boot counted, so [7:0] is the count including it), AT_N (N boots were
+ * counted: the word is armed and the watchdog about to fire), TEST (TEST
+ * ONLY: stop here).  0 when nothing was counted (not armed, or the "rig"
+ * mode).  The caller prints it, then spins on AT_N or TEST.
+ */
+u32 g12a_resident_hang(void)
+{
+	return g12r_hang_state;
 }
 
 /* g12a_resident_word() - read back the USB-override word, for the TPL print. */
@@ -265,6 +358,7 @@ bool g12a_resident_fit_in_ram(void)
 
 #elif !defined(CONFIG_XPL_BUILD)
 
+#include <bootrom.h>
 #include <command.h>
 #include <dm.h>
 #include <env.h>
@@ -374,6 +468,16 @@ void board_quiesce_devices(void)
 {
 	u32 before = g12r_word();
 	bool word = before == G12R_OVD_USB_FOREVER;
+	u32 counted;
+
+	/*
+	 * This boot reached the OS hand-off: it was not a hang (R11).  Say so
+	 * when a count was cleared: the count this boot started, through the
+	 * autoboot countdown, which does not clear it.
+	 */
+	counted = g12r_hang_clear();
+	if (counted)
+		printf("USB fallback: boot count %u cleared at the OS hand-off\n", counted);
 
 	/*
 	 * Nothing to do unless the word is armed ("rig") or U-Boot left the
@@ -391,6 +495,19 @@ void board_quiesce_devices(void)
 	       readl((void __iomem *)G12R_WDT_CNTL));
 }
 
+/*
+ * The prompt and the boot menu are waits for a person (bootrom.h): a boot
+ * that reached one was not a hang, so its count goes (R11).  The autoboot
+ * countdown does not clear it, so a hang loading the OS after it counts.
+ */
+#if CONFIG_IS_ENABLED(CMD_BOOTROM)
+void board_wait_for_person(enum bootrom_wait w)
+{
+	if (w == BOOTROM_WAIT_PROMPT || w == BOOTROM_WAIT_MENU)
+		g12r_hang_clear();
+}
+#endif
+
 static int do_usbfb(struct cmd_tbl *cmdtp, int flag, int argc,
 		    char *const argv[])
 {
@@ -407,6 +524,9 @@ static int do_usbfb(struct cmd_tbl *cmdtp, int flag, int argc,
 	       before, before == G12R_OVD_USB_FOREVER ? "armed" : "clear",
 	       readl((void __iomem *)G12R_WDT_CNTL),
 	       readl((void __iomem *)G12R_WDT_TCNT));
+	printf("USB fallback: boots counted %u of %u (AO_RTI_STATUS_REG1 %08x)\n",
+	       g12r_hang_count(), G12R_HANG_RETRIES,
+	       readl((void __iomem *)G12R_AO_RTI_STATUS_REG1));
 	return CMD_RET_SUCCESS;
 }
 

@@ -53,7 +53,9 @@
  */
 
 #include <chip_serial.h>
+#include <lc_stage.h>
 #include <asm/io.h>
+#include <asm/arch/boot.h>
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/types.h>
@@ -270,17 +272,27 @@
 static const u8 identify_rsp[8] = { 0x02, 0x23, 0x00, 0x20, 0, 0, 0, 0 };
 
 /*
- * TPL_MESON_USB_REENUM (the *_libre_dfu_defconfig targets only): the TPL
- * re-enumerates as its own device, and its iSerialNumber is the chip id.
+ * TPL_MESON_USB_REENUM: on a USB boot the TPL re-enumerates as its own
+ * device, and its iSerialNumber is the chip id.  The boot source decides:
+ * the BootROM booting over USB means the host is the Libre Computer app,
+ * which follows the device by its port.
  */
 #define USB_REENUM	CONFIG_IS_ENABLED(MESON_USB_REENUM)
 #define STR_IDX_SERIAL	3
+
+/*
+ * bcdDevice is the stage word (include/lc_stage.h): phase 0, the BootROM's
+ * protocol. A host reads it only when it asks for this descriptor -- after
+ * the re-enumeration; a host that never re-reads keeps the BootROM's word.
+ */
+#define DD_STAGE	LC_STAGE_WORD(LC_STAGE_PHASE_ROM, LC_STAGE_FN_ROMPROTO)
 
 static const u8 dev_desc[18] = {
 	18, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x40,
 	(USB_VID & 0xff), (USB_VID >> 8),
 	(USB_PID & 0xff), (USB_PID >> 8),
-	0x00, 0x01, 0x00, 0x00, USB_REENUM ? STR_IDX_SERIAL : 0, 0x01,
+	(DD_STAGE & 0xff), (DD_STAGE >> 8), 0x00, 0x00,
+	USB_REENUM ? STR_IDX_SERIAL : 0, 0x01,
 };
 
 #if USB_REENUM
@@ -1716,14 +1728,17 @@ static void g12_device_start_worldcup(void)
 	  GOTGCTL_BVALOEN | GOTGCTL_BVALOVAL);
 #if USB_REENUM
 	/*
-	 * Re-enumerate as our own device: a 10 ms host-visible disconnect
-	 * before the soft-connect below, keeping the BootROM's configuration.
-	 * Needs SET_ADDRESS applied on the SETUP and the bulk toggle reset on
-	 * SET_CONFIGURATION (both in this file).  The host follows the device
-	 * by its port.
+	 * On a USB boot, re-enumerate as our own device: a 10 ms host-visible
+	 * disconnect before the soft-connect below, keeping the BootROM's
+	 * configuration.  Needs SET_ADDRESS applied on the SETUP and the bulk
+	 * toggle reset on SET_CONFIGURATION (both in this file).  The host
+	 * follows the device by its port.  Any other boot source keeps the
+	 * BootROM's session.
 	 */
-	SET(DCTL, SFTDISCON);
-	crude_mdelay(10);
+	if (meson_get_boot_device() == BOOT_DEVICE_USB) {
+		SET(DCTL, SFTDISCON);
+		crude_mdelay(10);
+	}
 #endif
 	{
 		u32 dctl = R(DCTL);

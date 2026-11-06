@@ -1121,16 +1121,23 @@ static void acm_console_dfu_build(void)
 {
 	char alt[] = CONFIG_USB_FUNCTION_ACM_DFU_ALT;
 	char *dev;
+	int ret;
 
 	acm_console_dfu = false;
 	if (dfu_entities_in_use())
 		return;
-	dev = strchr(alt, ' ');
-	if (dev) {
-		*dev++ = '\0';
-		dev = skip_spaces(dev);
+	if (strchr(alt, '&')) {
+		/* Several "<interface> <devstr>" groups: one list of them all */
+		ret = dfu_init_env_groups(alt);
+	} else {
+		dev = strchr(alt, ' ');
+		if (dev) {
+			*dev++ = '\0';
+			dev = skip_spaces(dev);
+		}
+		ret = dfu_init_env_entities(alt, dev);
 	}
-	if (dfu_init_env_entities(alt, dev)) {
+	if (ret) {
 		dfu_free_entities();
 		printf("USB console: no DFU beside it (%s)\n",
 		       CONFIG_USB_FUNCTION_ACM_DFU_ALT);
@@ -1196,6 +1203,60 @@ bool acm_console_has_dfu(void)
 }
 #endif
 
+/*
+ * CONSOLE_PREFER_USB (common/console.c): the console's host is reading. The
+ * gadget is up, the host holds the port open (DTR) and is taking what is sent
+ * (a host that raised DTR and stopped reading leaves tx_stalled set).
+ */
+bool console_usb_host_ready(void)
+{
+	struct f_acm *f_acm;
+
+	if (!acm_console || !acm_console->priv || acm_console_suspended)
+		return false;
+	f_acm = acm_console->priv;
+
+	return f_acm->connected && (f_acm->handshake_bits & ACM_CTRL_DTR) &&
+	       !f_acm->tx_stalled;
+}
+
+static bool acm_wait_for_host;
+
+void acm_console_wait_for_host(bool on)
+{
+	acm_wait_for_host = on;
+}
+
+bool acm_console_connected(void)
+{
+	struct f_acm *f_acm;
+
+	if (!acm_console || !acm_console->priv || acm_console_suspended)
+		return false;
+	f_acm = acm_console->priv;
+
+	return f_acm->connected;
+}
+
+/*
+ * While no host has the gadget configured, a write returns before __acm_tx(),
+ * and so before any servicing: a host that plugs in while a command prints
+ * (and never polls the console's input) got no answer to its enumeration
+ * until the command ended.  Service the controller from writes too, at most
+ * every ACM_IDLE_SERVICE_MS, so a long run of output stays cheap.
+ */
+#define ACM_IDLE_SERVICE_MS	10
+
+static void acm_service_idle(struct f_acm *f_acm)
+{
+	static ulong last;
+
+	if (get_timer(last) < ACM_IDLE_SERVICE_MS)
+		return;
+	last = get_timer(0);
+	dm_usb_gadget_handle_interrupts(f_acm->udc);
+}
+
 /* STDIO */
 static int acm_stdio_tstc(struct stdio_dev *dev)
 {
@@ -1251,8 +1312,10 @@ static void acm_stdio_putc(struct stdio_dev *dev, const char c)
 
 	buf_push(&f_acm->tx_buf, &c, 1);
 
-	if (!f_acm->connected)
+	if (!f_acm->connected) {
+		acm_service_idle(f_acm);
 		return;
+	}
 
 	__acm_tx(f_acm);
 }
@@ -1272,8 +1335,10 @@ static void acm_stdio_puts(struct stdio_dev *dev, const char *str)
 		buf_push(&f_acm->tx_buf, str++, 1);
 	}
 
-	if (!f_acm->connected)
+	if (!f_acm->connected) {
+		acm_service_idle(f_acm);
 		return;
+	}
 
 	__acm_tx(f_acm);
 }
@@ -1319,15 +1384,22 @@ static int acm_stdio_start(struct stdio_dev *dev)
 		 * Give up -- on Ctrl-C, or when no host configures the gadget
 		 * in time (USB_FUNCTION_ACM_CONNECT_TIMEOUT_MS, so a console
 		 * that adds usbacm by itself does not hang a boot with no host
-		 * on the port) -- and undo the start either way. A cancel used
-		 * to return with the gadget registered and dev->priv set: the
-		 * next console output went to a gadget nobody services, and
-		 * the board took an SError in acm_stdio_puts().
+		 * on the port) -- and undo the start.
+		 *
+		 * Except on a timeout with acm_wait_for_host (a USB boot): the
+		 * gadget stays up and the console keeps waiting, serviced from
+		 * its input poll and its writes, so a host that came late (a
+		 * replug, an app busy at that moment) still gets the console,
+		 * the resident DFU and its `bootrom` request.  The UDC stays
+		 * probed: the SError once seen here was a UDC removed under a
+		 * live console (dfu/ums), not a gadget left waiting.
 		 */
 		ret = ctrlc() ? -ECANCELED :
 		      CONFIG_USB_FUNCTION_ACM_CONNECT_TIMEOUT_MS &&
 		      get_timer(start) > CONFIG_USB_FUNCTION_ACM_CONNECT_TIMEOUT_MS ?
 		      -ETIMEDOUT : 0;
+		if (ret == -ETIMEDOUT && acm_wait_for_host)
+			break;
 		if (ret) {
 			g_dnl_unregister();
 			g_dnl_clear_detach();
@@ -1399,6 +1471,12 @@ int drv_usbacm_init(void)
 	struct stdio_dev stdio;
 	int ret;
 
+	/*
+	 * Every hook left unset must read NULL: stdio_register() copies the
+	 * struct, and console_flush() calls ->flush (CONSOLE_FLUSH_SUPPORT)
+	 * whenever it is non-NULL, so stack garbage there is a jump to it.
+	 */
+	memset(&stdio, 0, sizeof(stdio));
 	strcpy(stdio.name, "usbacm");
 	stdio.flags = DEV_FLAGS_INPUT | DEV_FLAGS_OUTPUT;
 	stdio.tstc = acm_stdio_tstc;

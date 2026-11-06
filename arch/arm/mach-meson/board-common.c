@@ -28,7 +28,6 @@
 #include <fs.h>
 #include <linux/sizes.h>
 #include <u-boot/crc.h>
-#include <usb_otg_role.h>
 
 #include <asm/psci.h>
 #if defined(CONFIG_MESON_GX_LIBRE_SECURE_LAYOUT)
@@ -280,22 +279,7 @@ int ft_board_setup(void *blob, struct bd_info *bd)
 	if (IS_ENABLED(CONFIG_MESON_G12A_LIBRE_SCMI_FIXUP))
 		meson_g12a_libre_scmi_fixup(blob);
 
-	/*
-	 * env usb_otg -> the OTG controller's dr_mode.  It reports its own
-	 * failures; a DT it could not write is still the valid DT it was, so
-	 * the boot goes on.
-	 */
-	usb_otg_fdt_fixup(blob);
-
-	/*
-	 * /chosen/libre-computer,boot-source: on this live tree EVT_FT_FIXUP
-	 * is not sent, so bootsource's spy does not run (boot/bootsource.c).
-	 */
-	ret = bootsource_fdt_fixup(blob);
-	if (ret)
-		printf("meson: boot source not written to /chosen: %s\n",
-		       fdt_strerror(ret));
-
+	/* usb_otg and the boot source: image_setup_libfdt() writes them */
 	return meson_ft_board_setup(blob, bd);
 }
 

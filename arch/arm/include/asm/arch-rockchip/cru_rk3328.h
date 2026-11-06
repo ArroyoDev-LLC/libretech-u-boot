@@ -47,7 +47,14 @@ check_member(rk3328_cru, sdmmc_ext_con[1], 0x39c);
 #define OSC_HZ		(24 * MHz)
 #define APLL_HZ		(600 * MHz)
 #define GPLL_HZ		(576 * MHz)
-#define CPLL_HZ		(594 * MHz)
+/*
+ * 1200 MHz, as Linux's rk3328.dtsi assigns it: the SD/eMMC card clocks then
+ * land exactly on 200 / 150 / 100 / 50 MHz (CPLL / n / 2). Before rkclk_init()
+ * raises it, every CPLL child's divider is rescaled to keep the rate it had at
+ * U-Boot's former 594 MHz (rk3328_cpll_children_keep_rate()).
+ */
+#define CPLL_HZ		(1200 * MHz)
+#define CPLL_FORMER_HZ	(594 * MHz)
 
 #define CLK_CORE_HZ	(600 * MHz)
 #define ACLKM_CORE_HZ	(300 * MHz)

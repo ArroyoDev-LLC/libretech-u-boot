@@ -1445,14 +1445,13 @@ int rk_vop_probe(struct udevice *dev)
 		     node = dev_read_next_subnode(node)) {
 			/*
 			 * No fallback on the unranked path.  It is used by the
-			 * SoCs with no max_output_width (rk3288, rk3328), none
-			 * of which is exercised here, and none of whose
-			 * encoders implements .detect -- so enabling it would
-			 * be inert today and an untested behaviour change the
-			 * moment one did.  Wire .detect for such an SoC and
-			 * give this loop the same two-pass shape as
-			 * rk_vop_probe_ranked() when there is a board to test
-			 * it on.
+			 * SoCs with no max_output_width (rk3288), none of which
+			 * is exercised here, and none of whose encoders
+			 * implements .detect -- so enabling it would be inert
+			 * today and an untested behaviour change the moment
+			 * one did.  RK3328 moved to rk_vop_probe_ranked() with
+			 * its max_output and HDMI .detect; do the same for
+			 * such an SoC when there is a board to test it on.
 			 */
 			ret = rk_display_init(dev, plat->base, node, false);
 			if (!ret)

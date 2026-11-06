@@ -419,6 +419,18 @@ int blk_probe_or_unbind(struct udevice *dev);
 int blk_unbind_all(int uclass_id);
 
 /**
+ * blk_rescan_partitions() - read a block device's partition table again
+ *
+ * After the media changed underneath U-Boot (e.g. a host wrote it over USB
+ * mass storage), drop the partition devices and EFI disk objects made from
+ * the old table and probe the device again, which reads the table anew.
+ *
+ * @dev:	Block device (UCLASS_BLK)
+ * Return: 0 if OK, -ve on error
+ */
+int blk_rescan_partitions(struct udevice *dev);
+
+/**
  * blk_find_max_devnum() - find the maximum device number for an interface type
  *
  * Finds the last allocated device number for an interface type @uclass_id. The

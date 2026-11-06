@@ -9,6 +9,7 @@
 
 #include <log.h>
 #include <spi.h>
+#include <spi-mem.h>
 #include <clk.h>
 #include <dm.h>
 #include <regmap.h>
@@ -40,6 +41,13 @@
 
 /* register fields */
 #define CMD_USER		BIT(18)
+/*
+ * The data stage of a read takes two lines (D and Q). Named FAST_READ_DUAL_OUT
+ * in Amlogic's U-Boot (drivers/spi/spifc.c, which sets it for the DIN stage of
+ * a 0x3B read); the datasheets name the register (SPIFC_CONTROL) but not its
+ * bits.
+ */
+#define CTRL_FAST_READ_DUAL_OUT	BIT(14)
 #define CTRL_ENABLE_AHB		BIT(17)
 #define CLOCK_SOURCE		BIT(31)
 #define CLOCK_DIV_SHIFT		12
@@ -66,6 +74,10 @@
 #define SLAVE_SW_RST		BIT(31)
 
 #define SPIFC_BUFFER_SIZE	64
+
+/* spi-mem (spi-mem.o) is linked only in a phase with DM SPI */
+#define MESON_SPIFC_MEM_OPS \
+	(CONFIG_IS_ENABLED(DM_SPI) && IS_ENABLED(CONFIG_SPI_MEM))
 
 struct meson_spifc_priv {
 	struct regmap			*regmap;
@@ -214,6 +226,151 @@ static int meson_spifc_xfer(struct udevice *slave, unsigned int bitlen,
 	return ret;
 }
 
+#if MESON_SPIFC_MEM_OPS
+/**
+ * meson_spifc_din_stream() - receive a read's data stage in the DIN stage
+ * @spifc:	the Meson SPI device
+ * @buf:	the destination buffer
+ * @nbytes:	number of bytes
+ * Return:	0 on success, a negative value on error
+ *
+ * Nothing is driven on the data lines, so the data can arrive on two lines
+ * (CTRL_FAST_READ_DUAL_OUT, set by the caller); the DOUT stage of
+ * meson_spifc_txrx() drives D while it samples Q, which is one line only.
+ * Chip select stays active from the caller's header until the last chunk.
+ *
+ * The stage is configured once and each 64-byte chunk is only started,
+ * awaited and copied out. Per chunk, the regmap read-modify-writes of
+ * meson_spifc_txrx() cost about as much as the chunk's 3.07 us on two lines
+ * at 83.33 MHz.
+ */
+static int meson_spifc_din_stream(struct meson_spifc_priv *spifc, u8 *buf,
+				  unsigned int nbytes)
+{
+	void __iomem *base = regmap_get_range(spifc->regmap, 0);
+	unsigned int done, n, len = 0, i;
+	u32 user4, slave, data;
+	ulong start;
+
+	clrsetbits_le32(base + REG_USER, USER_UC_MASK | USER_DIN_EN_MS,
+			USER_UC_DIN_SEL);
+	user4 = readl(base + REG_USER4) | USER4_CS_ACT;
+	writel(user4, base + REG_USER4);
+	slave = readl(base + REG_SLAVE) & ~SLAVE_TRST_DONE;
+
+	for (done = 0; done < nbytes; done += n) {
+		n = min_t(unsigned int, nbytes - done, SPIFC_BUFFER_SIZE);
+		if (n != len) {
+			writel((8 * n - 1) << USER1_BN_UC_DIN_SHIFT,
+			       base + REG_USER1);
+			len = n;
+		}
+		if (done + n >= nbytes)
+			writel(user4 & ~USER4_CS_ACT, base + REG_USER4);
+
+		writel(slave, base + REG_SLAVE);
+		writel(CMD_USER, base + REG_CMD);
+		start = get_timer(0);
+		while (!(readl(base + REG_SLAVE) & SLAVE_TRST_DONE)) {
+			if (get_timer(start) > 5 * CONFIG_SYS_HZ)
+				return -ETIMEDOUT;
+		}
+
+		for (i = 0; i < n; i += 4) {
+			data = readl(base + REG_C0 + i);
+			memcpy(buf + done + i, &data, min_t(unsigned int, 4,
+							    n - i));
+		}
+	}
+
+	return 0;
+}
+
+/*
+ * One line for the command, address and dummy cycles; one or, for a read, two
+ * lines for the data. A GXL board wires D and Q only (no IO2/IO3), so two is
+ * the most it can use.
+ */
+#define MESON_SPIFC_HDR_MAX	(1 + 4 + 16)
+
+static bool meson_spifc_supports_op(struct spi_slave *slave,
+				    const struct spi_mem_op *op)
+{
+	if (op->cmd.nbytes != 1 || op->cmd.buswidth != 1)
+		return false;
+	if (op->addr.nbytes && (op->addr.buswidth != 1 || op->addr.nbytes > 4))
+		return false;
+	if (op->dummy.nbytes &&
+	    (op->dummy.buswidth != 1 || op->dummy.nbytes > 16))
+		return false;
+	if (op->data.nbytes && op->data.buswidth > 1 &&
+	    (op->data.buswidth != 2 || op->data.dir != SPI_MEM_DATA_IN))
+		return false;
+
+	return spi_mem_default_supports_op(slave, op);
+}
+
+static int meson_spifc_exec_op(struct spi_slave *slave,
+			       const struct spi_mem_op *op)
+{
+	struct meson_spifc_priv *spifc = dev_get_priv(slave->dev->parent);
+	unsigned int nbytes = op->data.nbytes;
+	bool dual = nbytes && op->data.buswidth == 2;
+	u8 hdr[MESON_SPIFC_HDR_MAX];
+	int i, n = 0, len, ret;
+	unsigned int done;
+
+	if (!meson_spifc_supports_op(slave, op))
+		return -EOPNOTSUPP;
+
+	hdr[n++] = op->cmd.opcode;
+	for (i = op->addr.nbytes - 1; i >= 0; i--)
+		hdr[n++] = op->addr.val >> (8 * i);
+	memset(hdr + n, 0xff, op->dummy.nbytes);
+	n += op->dummy.nbytes;
+
+	regmap_update_bits(spifc->regmap, REG_CTRL, CTRL_ENABLE_AHB, 0);
+
+	/* Chip select stays active into the data stage, if there is one */
+	ret = meson_spifc_txrx(spifc, hdr, NULL, 0, n, !nbytes, true);
+
+	if (!ret && nbytes && op->data.dir == SPI_MEM_DATA_IN) {
+		if (dual) {
+			regmap_update_bits(spifc->regmap, REG_CTRL,
+					   CTRL_FAST_READ_DUAL_OUT,
+					   CTRL_FAST_READ_DUAL_OUT);
+			ret = meson_spifc_din_stream(spifc, op->data.buf.in,
+						     nbytes);
+			regmap_update_bits(spifc->regmap, REG_CTRL,
+					   CTRL_FAST_READ_DUAL_OUT, 0);
+		}
+		for (done = 0; !dual && done < nbytes && !ret; done += len) {
+			len = min_t(int, nbytes - done, SPIFC_BUFFER_SIZE);
+			ret = meson_spifc_txrx(spifc, NULL, op->data.buf.in,
+					       done, len, true,
+					       done + len >= nbytes);
+		}
+	} else if (!ret && nbytes) {
+		for (done = 0; done < nbytes && !ret; done += len) {
+			len = min_t(int, nbytes - done, SPIFC_BUFFER_SIZE);
+			ret = meson_spifc_txrx(spifc, op->data.buf.out, NULL,
+					       done, len, true,
+					       done + len >= nbytes);
+		}
+	}
+
+	regmap_update_bits(spifc->regmap, REG_CTRL, CTRL_ENABLE_AHB,
+			   CTRL_ENABLE_AHB);
+
+	return ret;
+}
+
+static const struct spi_controller_mem_ops meson_spifc_mem_ops = {
+	.supports_op	= meson_spifc_supports_op,
+	.exec_op	= meson_spifc_exec_op,
+};
+#endif
+
 /**
  * meson_spifc_parent_rate() - the controller's input rate without the CLK uclass
  *
@@ -276,8 +433,10 @@ static int meson_spifc_set_mode(struct udevice *dev, uint mode)
 {
 	struct meson_spifc_priv *spifc = dev_get_priv(dev);
 
-	if (mode & (SPI_CPHA | SPI_RX_QUAD | SPI_RX_DUAL |
-		    SPI_TX_QUAD | SPI_TX_DUAL))
+	/* Two-line reads only through the spi-mem ops (meson_spifc_exec_op()) */
+	if (mode & (SPI_CPHA | SPI_RX_QUAD | SPI_TX_QUAD | SPI_TX_DUAL))
+		return -ENODEV;
+	if ((mode & SPI_RX_DUAL) && !MESON_SPIFC_MEM_OPS)
 		return -ENODEV;
 
 	regmap_update_bits(spifc->regmap, REG_USER, USER_CLK_NOT_INV,
@@ -308,6 +467,9 @@ static const struct dm_spi_ops meson_spifc_ops = {
 	.xfer		= meson_spifc_xfer,
 	.set_speed	= meson_spifc_set_speed,
 	.set_mode	= meson_spifc_set_mode,
+#if MESON_SPIFC_MEM_OPS
+	.mem_ops	= &meson_spifc_mem_ops,
+#endif
 };
 
 static int meson_spifc_probe(struct udevice *dev)

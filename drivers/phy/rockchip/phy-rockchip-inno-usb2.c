@@ -377,16 +377,24 @@ static const struct rockchip_usb2phy_cfg rk3308_phy_cfgs[] = {
 	{ /* sentinel */ }
 };
 
+/*
+ * The RK3328 port suspend control is the whole override word at 0x100 /
+ * 0x104, as in Linux rk3328_phy_cfgs: 0 on power-on, 0x1d1 on power-off.
+ * The RK3399's two-bit { 1, 0, 2, 1 } field left the OTG word at 0x451 when
+ * a gadget stopped; a host on the OTG port then saw a full-speed device that
+ * never answered (descriptor read -71), disabled the port, and the next
+ * gadget never enumerated.
+ */
 static const struct rockchip_usb2phy_cfg rk3328_usb2phy_cfgs[] = {
 	{
 		.reg = 0x100,
 		.clkout_ctl	= { 0x0108, 4, 4, 1, 0 },
 		.port_cfgs	= {
 			[USB2PHY_PORT_OTG] = {
-				.phy_sus	= { 0x0100, 1, 0, 2, 1 },
+				.phy_sus	= { 0x0100, 15, 0, 0, 0x1d1 },
 			},
 			[USB2PHY_PORT_HOST] = {
-				.phy_sus	= { 0x0104, 1, 0, 2, 1 },
+				.phy_sus	= { 0x0104, 15, 0, 0, 0x1d1 },
 			}
 		},
 	},

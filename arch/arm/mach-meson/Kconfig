@@ -126,6 +126,20 @@ config MESON_G12A_SPL_MAX_SIZE
 	  How much TPL fetches from MESON_G12A_SPL_OFFSET.  Fixed window, not
 	  a parsed header.  Default fills 0x10000..0x40000 (before FIT).
 
+config MESON_XPL_A55_ONLY
+	bool "TPL/SPL run only on Cortex-A55 cores: no Cortex-A53 erratum 843419 stubs"
+	depends on MESON_G12A_XPL_CHAIN
+	help
+	  Link the TPL and SPL with --fix-cortex-a53-843419=adr: ADR fixes only,
+	  no stubs.  The erratum is Cortex-A53 only; G12A (S905X2/D2/Y2) and SM1
+	  (S905D3/X3) have only Cortex-A55 cores, so a site the ADR form cannot
+	  reach needs no fix.  The stub fix is not free: ld pads each stub group
+	  to a 4 KiB page, and one erratum site in the SPL took the S905D3-CC
+	  image past the FIT at 0x40000 (SPL ending at 0x40598 instead of
+	  0x3f688).  This ld has no option to turn the fix off (measured:
+	  -mno-fix-cortex-a53-843419 on the LTO link left the stub).  Never set on a
+	  G12B (A311D/S922X): its little cores are Cortex-A53.
+
 config MESON_G12A_FIT_OFFSET
 	hex "Offset of the FIT inside the combined image"
 	depends on MESON_G12A && SPL
@@ -386,6 +400,40 @@ config TPL_MESON_G12A_EMMC_REG
 	  BootROM reads) and of boot0 sector 0, and the elapsed time.  Never
 	  fatal.  Plan: amlogic/software/boot/g12/plan/sm1-resident-chain.md.
 
+config TPL_MESON_G12A_SD_SELFTEST
+	bool "TEST ONLY: the reader self-test reads the SD slot, not the eMMC"
+	depends on TPL_MESON_G12A_EMMC_REG && !TPL_MESON_G12A_EMMC_FETCH
+	default n
+	help
+	  The self-test drives SD_EMMC_B (0xFFE05000, the SD slot) with the
+	  SD identification sequence (CMD0, CMD8, CMD55 + ACMD41, CMD2,
+	  CMD3, CMD7) instead of the eMMC, and prints the crc32 of SD sector
+	  0 and of LBA 1..128.  It checks the SD half of the reader on a
+	  USB-delivered TPL, with nothing written.  Plan:
+	  amlogic/software/boot/g12/plan/2026-11-05-sm1-tpl-sd.md (S0).
+
+config TPL_MESON_G12A_SD_S18A_PROBE
+	bool "TEST ONLY: the SD self-test reports S18A (is the card still at 1.8 V?)"
+	depends on TPL_MESON_G12A_SD_SELFTEST
+	default n
+	help
+	  Sets S18R in the self-test's ACMD41 and prints the card's S18A: 1 is
+	  a fresh card at 3.3 V signalling, 0 a card already switched to 1.8 V
+	  since its last power cycle.  CMD11 is never sent.  It measures whether
+	  a reset path power-cycled the card.  Plan: amlogic/software/boot/g12/
+	  plan/2026-11-05-sm1-sd-power-io.md section 6.
+
+config TPL_MESON_G12A_READ_FAULT_TEST
+	bool "TEST ONLY: the reader fails the first attempt of its first two reads"
+	depends on TPL_MESON_G12A_EMMC_REG
+	default n
+	help
+	  Marks the first try of the first two block reads as failed, so the
+	  per-block retry runs on hardware: the console shows two
+	  "EM: read lba ... try 1" lines and the data and crc32 come out as
+	  without the option.  Plan: amlogic/software/boot/g12/plan/
+	  2026-11-05-sm1-sd-power-io.md.
+
 config TPL_MESON_G12A_EMMC_FETCH
 	bool "TPL G12A/SM1: fetch both residual windows from eMMC, not USB"
 	depends on TPL_MESON_G12A_EMMC_REG && TPL_MESON_G12A_USB_RESIDUAL
@@ -408,9 +456,12 @@ config TPL_MESON_G12A_EMMC_FETCH
 	  TPL takes offsets and lengths only from that header and checks
 	  every crc, so the TPL constants and the staged file cannot drift.
 
-	  The source is selected by this option, not by the BootROM's boot
-	  device: the TPL itself still arrives over USB.  The USB windows are
-	  not served when it is set.  Read only, as the reader is.
+	  Without MESON_G12A_RESIDENT the source is selected by this option,
+	  not by the BootROM's boot device: the TPL itself still arrives over
+	  USB, and the USB windows are not served.  With it, the boot device
+	  picks: eMMC reads this partition; SD reads the SD slot's user area
+	  (partition 0) at the same LBA, where the header's partition word
+	  must be 0; USB serves the USB windows.  Read only, as the reader is.
 
 config TPL_MESON_G12A_EMMC_FETCH_PART
 	int "eMMC hardware partition holding the staged layout (1 = boot0)"
@@ -496,6 +547,40 @@ config MESON_G12A_RESIDENT_OVERRIDE
 
 	  Plan: amlogic/software/boot/g12/plan/sm1-two-stage-watchdog.md 1a.
 
+config MESON_G12A_RESIDENT_HANG_RETRIES
+	int "Resident chain: failed boots in a row before the BootROM's USB mode"
+	depends on MESON_G12A_RESIDENT_OVERRIDE && CMD_BOOTROM
+	range 0 255
+	default 3
+	help
+	  A product's boot hang: retry, then USB (claude
+	  design/rules/bootloader/reset-to-usb-boot.md R11).  The count of
+	  boots that did not reach a wait for a person lives in
+	  AO_RTI_STATUS_REG1, which survives the watchdog's reset and is
+	  cleared by a power cut (measured on the S905D3-CC:
+	  amlogic/software/boot/g12/audit/2026-11-04-sm1-boot-hang-counter-register.md).
+
+	  TPL, on a boot it arms: with fewer than N boots counted, it counts
+	  this one and boots on under the watchdog; with N counted, it arms
+	  the BootROM USB-override word instead and lets the watchdog reset
+	  the board into the BootROM's USB wait.  A TPL loaded over USB clears
+	  the count with the word.  U-Boot proper clears it at the prompt, at
+	  the boot menu and at the OS hand-off; the autoboot countdown does
+	  not, so a hang loading the OS after it counts.
+
+	  0 keeps the "rig" mode: the word with the watchdog, on the first
+	  hang (a test arm).
+
+config MESON_G12A_RESIDENT_HANG_TEST
+	bool "Resident chain: TEST ONLY -- the TPL hangs after it counts"
+	depends on MESON_G12A_RESIDENT_HANG_RETRIES != 0
+	default n
+	help
+	  The TPL stops after counting a boot it armed, so every boot is a
+	  hang the watchdog ends: N boots counted, then the BootROM's USB
+	  mode.  With MESON_G12A_RESIDENT_ARM_ON_USB it gates from a
+	  USB-delivered image.  Never set in a shipping defconfig.
+
 config MESON_G12A_RESIDENT_ARM_ON_USB
 	bool "Resident chain: TEST ONLY -- arm the watchdog on a USB boot too"
 	depends on MESON_G12A_RESIDENT
@@ -536,16 +621,16 @@ config TPL_MESON_USB_REENUM
 	depends on TPL_MESON_USB_BOOT || TPL_MESON_G12A_USB_RESIDUAL
 	default n
 	help
-	  Instead of continuing the BootROM's USB session, the TPL drops off
-	  the bus for 10 ms after DRAM init and comes back as its own device,
-	  whose iSerialNumber is the chip id (include/chip_serial.h) -- so a
-	  host sees the board's identity from the TPL on.  The host must follow
-	  the device by its port (tools/meson-usb-boot.py and the G12 harness
-	  do); the re-enumeration costs about 0.5 s.
+	  On a USB boot (the BootROM's boot source), instead of continuing the
+	  BootROM's USB session, the TPL drops off the bus for 10 ms after
+	  DRAM init and comes back as its own device, whose iSerialNumber is
+	  the chip id (include/chip_serial.h) -- so a host sees the board's
+	  identity from the TPL on.  A USB boot's host is the Libre Computer
+	  app, which follows the device by its port; the re-enumeration costs
+	  about 0.5 s.  Any other boot source keeps the BootROM's session.
 
-	  Only for the USB flashing (DFU) targets the Libre Computer Android
-	  app uses (*_libre_dfu_defconfig).  Product targets keep the BootROM
-	  session.
+	  On in each board's one product defconfig: there is no separate
+	  flashing target.
 	  GXL: PHY power-on reset restart with U-Boot's GUSBCFG and the
 	  BootROM's FIFO map.  G12: a soft disconnect before the take-over,
 	  keeping the BootROM's configuration.
@@ -559,8 +644,10 @@ config SPL_MESON_USBFLASH_WRITE
 	  The SPL flash session (common/spl/spl_usbflash.c) is
 	  read-only by default.  With this, its eMMC/SD alternates take DFU
 	  downloads and `usbflash ums mmc <n>` serves a read-write LUN.  SPI
-	  NOR stays read-only.  Only for the USB flashing (DFU) targets
-	  (*_libre_dfu_defconfig); product targets keep the read-only session.
+	  NOR stays read-only.  The session runs only on a USB boot
+	  (spl-usbflash.c checks the boot source), whose host is the Libre
+	  Computer app.  On in each board's one product defconfig: there is
+	  no separate flashing target.
 
 config TPL_MESON_USB_BOOT
 	bool "TPL USB boot server (BROM take-over)"
@@ -610,8 +697,8 @@ config MESON_GX_SPL_ENTRY
 	    LIBRE_SECURE     BL33 0x04000000, SCP 0x00001000, BL31 0x00100000
 
 	  FIT staging is not a property of the layout -- SPL_LOAD_FIT_ADDRESS is
-	  set per board: 0x02000000 on libretech-cc_libre_defconfig, 0x0c000000
-	  on libretech-cc_v2_libre_defconfig and libretech-ac_libre_defconfig.
+	  set per board: 0x02000000 on libretech-cc_defconfig, 0x0c000000
+	  on libretech-cc_v2_defconfig and libretech-ac_defconfig.
 	  0x08000000 sits between them and clears both.
 
 	  Distinct again from MESON_SPL_FIT_BUFFER_ADDR 0x05000000 (spl.c), the
@@ -952,7 +1039,7 @@ config MESON_GX_LIBRE_SECURE_LAYOUT
 
 	  This is a compile-time symbol rather than a device-tree property
 	  because the LIBRE and the VENDOR build of a board share one board DTS
-	  and one kernel DTB: libretech-cc_v2_defconfig takes the vendor
+	  and one kernel DTB: libretech-cc_v2_vendor_defconfig takes the vendor
 	  bl31.img, which loads at 0x05100000, while libretech-cc_v2_libre_-
 	  defconfig runs the open TF-A at 0x00100000.  The DTB cannot tell which
 	  firmware is flashed, so the FIRMWARE DESCRIBES ITSELF: U-Boot patches
@@ -1196,7 +1283,7 @@ config MESON_G12A_LIBRE_SECURE_LAYOUT
 
 	  Like the GXL symbol this is compile-time rather than a device-tree
 	  property, because the LIBRE and the VENDOR build of a board share one
-	  board DTS and one kernel DTB: aml-a311d-cc_defconfig takes the vendor
+	  board DTS and one kernel DTB: aml-a311d-cc_vendor_defconfig takes the vendor
 	  bl31.img, which loads at 0x05100000, while the -libre build runs the
 	  open TF-A at 0x00100000.  The DTB cannot tell which firmware is
 	  flashed, so the FIRMWARE DESCRIBES ITSELF -- U-Boot patches the blob
@@ -1256,6 +1343,23 @@ config SYS_BOARD
 	  This option contains information about board name.
 	  Based on this option board/<CONFIG_SYS_VENDOR>/<CONFIG_SYS_BOARD> will
 	  be used.
+
+config MESON_LC_STATUS
+	bool "The board's live status as a read-only DFU alternate"
+	depends on CYCLIC && DFU_VIRT && SET_DFU_ALT_INFO && (MESON_GX || MESON_G12A)
+	help
+	  A cyclic callback samples the board about once a second (sample
+	  number and time, the clocks from GX's or G12A's clock controller,
+	  and the SD slot's card detect) into a text
+	  buffer, and the DFU virt alternate "status" returns it on UPLOAD
+	  (board/libre-computer/common/lc-status.c). With CMD_BOOTROM the
+	  reading also carries, as of the host's request, what U-Boot waits
+	  for (wait=) and the `bootrom` state (bootrom=, bootrom.pending=).
+	  With the usbacm
+	  console's resident DFU (USB_FUNCTION_ACM_DFU, its alternates
+	  naming "virt 0"), a host reads it at U-Boot's prompt over EP0:
+	  nothing is typed on the console and the console's endpoints are
+	  not used. Writes to the alternate are refused.
 
 if SPL
 config SPL_SYS_MALLOC_F_LEN

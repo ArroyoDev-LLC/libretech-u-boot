@@ -24,6 +24,8 @@
 #include <asm/io.h>
 #include <dm/ofnode.h>
 #include <tee/optee.h>
+#include <bootsource.h>
+#include <usb_otg_role.h>
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -589,6 +591,35 @@ __weak int arch_fixup_fdt(void *blob)
 	return 0;
 }
 
+/*
+ * Libre Computer platform policy: `reboot maskrom` from the OS is refused when
+ * the watchdog is handed to the OS running (wdt_handoff=1).
+ *
+ * An image opts in to `reboot maskrom` with the psci node's reset-types child
+ * (`mode-maskrom = <vendor SYSTEM_RESET2 type, cookie>`, an LWT overlay); the
+ * OS then asks the secure firmware for a reset into the BootROM's USB wait.  A
+ * board armed that way that hangs before the reset comes up waiting for a USB
+ * host, not in the storage the watchdog was handed over to reboot into, so
+ * with wdt_handoff=1 the property is removed here and the OS's
+ * `reboot maskrom` is a plain reset.  Every OS entry path (booti/bootm and the
+ * EFI install of the DT) passes through image_setup_libfdt().  Design: claude
+ * design/rules/bootloader/reset-to-usb-boot.md R2, R6.
+ */
+static void fdt_fixup_reboot_maskrom(void *blob)
+{
+	int node;
+
+	if (env_get_yesno("wdt_handoff") != 1)
+		return;
+	node = fdt_path_offset(blob, "/psci/reset-types");
+	if (node < 0 || !fdt_getprop(blob, node, "mode-maskrom", NULL))
+		return;
+	if (fdt_delprop(blob, node, "mode-maskrom"))
+		printf("reboot maskrom: could not remove it from the DT\n");
+	else
+		printf("reboot maskrom: removed from the DT (wdt_handoff=1)\n");
+}
+
 int image_setup_libfdt(struct bootm_headers *images, void *blob, bool lmb)
 {
 	ulong *initrd_start = &images->initrd_start;
@@ -639,6 +670,7 @@ int image_setup_libfdt(struct bootm_headers *images, void *blob, bool lmb)
 
 	/* Update ethernet nodes */
 	fdt_fixup_ethernet(blob);
+	fdt_fixup_reboot_maskrom(blob);
 #if IS_ENABLED(CONFIG_CMD_PSTORE)
 	/* Append PStore configuration */
 	fdt_fixup_pstore(blob);
@@ -666,6 +698,19 @@ int image_setup_libfdt(struct bootm_headers *images, void *blob, bool lmb)
 			goto err;
 		}
 	}
+
+	/*
+	 * The boot source in /chosen and the OTG role from env usb_otg, on
+	 * every board whatever its tree: EVT_FT_FIXUP below is sent only on a
+	 * flat tree, so a board on a live tree would otherwise repeat these
+	 * calls in its ft_board_setup(). Both are no-ops when not configured;
+	 * a failure leaves the FDT valid, so the boot goes on.
+	 */
+	fdt_ret = bootsource_fdt_fixup(blob);
+	if (fdt_ret)
+		printf("boot source not written to /chosen: %s\n",
+		       fdt_strerror(fdt_ret));
+	usb_otg_fdt_fixup(blob);
 
 	if (fdt_initrd(blob, *initrd_start, *initrd_end))
 		goto err;

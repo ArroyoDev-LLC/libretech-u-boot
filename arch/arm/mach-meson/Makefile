@@ -73,6 +73,10 @@ endif
 
 obj-$(CONFIG_MESON_AXG) += board-axg.o
 obj-$(CONFIG_MESON_G12A) += board-g12a.o
+# `bootrom` on G12A/SM1: FORCE/CLEAR of the BootROM override word through TF-A.
+ifeq ($(CONFIG_XPL_BUILD),)
+obj-$(CONFIG_CMD_BOOTROM) += bootrom-g12a.o
+endif
 # G12A/SM1 resident chain: TPL arms the USB fallback, the DRAM stage takes the
 # FIT the TPL delivered, U-Boot proper disarms.  All three phases, C-gated.
 obj-$(CONFIG_MESON_G12A_RESIDENT) += g12-resident.o

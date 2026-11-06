@@ -25,6 +25,7 @@
 #include <asm/arch-rockchip/clock.h>
 #include <env.h>
 #include <phy/rockchip-typec.h>
+#include <scmi_lc_typec.h>
 #if CONFIG_IS_ENABLED(TYPEC_TCPM)
 #include <usb/tcpm.h>
 #include <usb/typec_dp.h>
@@ -555,6 +556,14 @@ static struct udevice *rockchip_tcphy_find_tcpm(struct udevice *dev, bool probe)
 		return NULL;
 
 	/*
+	 * A connector the M0 owns has no port manager in U-Boot: its fusb302
+	 * refuses to probe (fusb302_of_to_plat). Do not even try -- the M0
+	 * lookups in the callers answer for it.
+	 */
+	if (scmi_m0_owns_tcpc(ofnode_get_parent(connector)))
+		return NULL;
+
+	/*
 	 * Match on BOUND devices and probe only the winner.
 	 *
 	 * uclass_foreach_dev_probe() would probe every TCPM in the system as a
@@ -676,10 +685,63 @@ static bool rockchip_tcphy_env_bit(struct rockchip_tcphy *priv,
 	return env_get_hex(name, 0) & BIT(idx);
 }
 
+/**
+ * rockchip_tcphy_m0_port() - is this phy's connector the one the M0 owns?
+ * @dev:	the usb3-port / dp-port child of the phy
+ * @st:	the M0's live CONNECTOR_EXT_STATUS, on a true return
+ *
+ * When the RK3399 M0 owns the rear Type-C0 port (scmi_m0_owns_typec(), the
+ * one bind-time decision), the fusb302 TCPM that used to answer orientation
+ * and data role never probes; the M0 is the port controller now, and its
+ * lc-typec client is asked instead. A failed query reads as "nothing
+ * attached", i.e. the same normal-orientation fallback as a missing TCPM.
+ *
+ * Return: true when @dev's connector is the M0's
+ */
+static bool rockchip_tcphy_m0_port(struct udevice *dev,
+				   struct scmi_lc_typec_ext_status *st)
+{
+	ofnode ep, connector;
+	int ret;
+
+	if (!scmi_m0_owns_typec())
+		return false;
+
+	ep = ofnode_graph_get_endpoint_by_regs(dev_ofnode(dev), -1, -1);
+	if (!ofnode_valid(ep))
+		return false;
+
+	connector = ofnode_graph_get_remote_port_parent(ep);
+	if (!ofnode_valid(connector) ||
+	    !scmi_m0_owns_tcpc(ofnode_get_parent(connector)))
+		return false;
+
+	ret = scmi_lc_typec_rear_status(st);
+	if (ret) {
+		dev_warn(dev, "M0 Type-C status unavailable (%d); assuming no partner\n",
+			 ret);
+		memset(st, 0, sizeof(*st));
+		st->orientation = SCMI_LC_TYPEC_ORIENT_NONE;
+	}
+
+	return true;
+}
+
 static void rockchip_tcphy_get_orientation(struct udevice *dev,
 					   struct rockchip_tcphy *priv)
 {
+	struct scmi_lc_typec_ext_status st;
+
 	priv->flip = false;
+
+	/*
+	 * The M0's answer is the same CC reading a TCPM would give, so it goes
+	 * through the same board inversion and bench override below.
+	 */
+	if (rockchip_tcphy_m0_port(dev, &st)) {
+		priv->flip = st.orientation == SCMI_LC_TYPEC_ORIENT_REVERSE;
+		goto adjust;
+	}
 
 #if !CONFIG_IS_ENABLED(TYPEC_TCPM) && CONFIG_IS_ENABLED(TYPEC_FUSB302_CC)
 	int orientation = rockchip_tcphy_cc_orientation(dev);
@@ -709,6 +771,7 @@ static void rockchip_tcphy_get_orientation(struct udevice *dev,
 	if (tcpm_get_orientation(tcpm) == TYPEC_ORIENTATION_REVERSE)
 		priv->flip = true;
 #endif
+adjust:
 	priv->flip ^= priv->orient_inverted;
 	if (rockchip_tcphy_env_bit(priv, "tcphy_invert"))
 		priv->flip = !priv->flip;
@@ -741,6 +804,21 @@ static int rockchip_tcphy_get_mode(struct udevice *dev,
 	 * the port is doing. Host stays the answer when no controller said.
 	 */
 	u8 fallback = priv->usb_role ?: MODE_DFP_USB;
+	struct scmi_lc_typec_ext_status st;
+
+	/*
+	 * The M0's port is sink-only, so an attached partner is a source and,
+	 * absent a DR_Swap, the DFP: this side is the UFP, which is what
+	 * tcpm_snk_attach() asserts on the TCPM path too. The M0 performs a
+	 * DR_Swap only when the OS asks (UCSI SET_UOR), never in U-Boot, and
+	 * CONNECTOR_EXT_STATUS carries no data-role field. Rear DP alt mode is
+	 * not the M0's (out of scope), so there is no MODE_DFP_DP answer.
+	 * Nothing attached keeps the no-TCPM default.
+	 */
+	if (rockchip_tcphy_m0_port(dev, &st))
+		return st.orientation != SCMI_LC_TYPEC_ORIENT_NONE ?
+		       MODE_UFP_USB : fallback;
+
 #if CONFIG_IS_ENABLED(TYPEC_TCPM)
 	struct udevice *tcpm = rockchip_tcphy_find_tcpm(dev, false);
 	int mode;

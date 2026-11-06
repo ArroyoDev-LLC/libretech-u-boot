@@ -24,6 +24,19 @@ config RAM_ROCKCHIP_DEBUG
 	  This is an option for developers to understand the ram drivers
 	  initialization, configurations and etc.
 
+config RAM_ROCKCHIP_RK3328_FALLBACK
+	bool "RK3328: step down to the DDR4-666 parameter set on a training failure"
+	depends on ROCKCHIP_RK3328
+	help
+	  When training at the board's rockchip,sdram-params fails, TPL
+	  reinitialises the DRAM with the DDR4 333 MHz (DDR-666) set and prints
+	  "DDR: WARNING clock fallback"; both failing is a printed DRAM init
+	  failure. The set is the one rk3328-sdram-ddr4-666.dtsi uses, from
+	  asm/arch-rockchip/sdram_rk3328_ddr4_666.h, compiled into the TPL
+	  rather than carried in the DMC's platdata: the platdata is copied into
+	  the TPL's early heap at bind, which has no room for a second set.
+	  Select only for a DDR4 board whose configured set runs faster.
+
 config RAM_ROCKCHIP_DDR4
 	bool "DDR4 support for Rockchip SoCs"
 	help

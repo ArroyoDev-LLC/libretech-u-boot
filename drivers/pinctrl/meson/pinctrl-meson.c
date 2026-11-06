@@ -438,9 +438,14 @@ int meson_pinctrl_bind(struct udevice *dev)
 		return -EINVAL;
 	}
 
+	/*
+	 * A build with no GPIO uclass (an xPL with PINCTRL but not DM_GPIO) has
+	 * no bank to bind; the pin controller itself still muxes. Failing bind
+	 * here failed the whole xPL driver-model init (spl_early_init -ENOENT).
+	 */
 	if (!lists_uclass_lookup(UCLASS_GPIO)) {
-		puts("Cannot find GPIO driver\n");
-		return -ENOENT;
+		debug("%s: no GPIO uclass, no bank bound\n", dev->name);
+		return 0;
 	}
 
 	data = (const struct meson_pinctrl_data *)dev_get_driver_data(dev);

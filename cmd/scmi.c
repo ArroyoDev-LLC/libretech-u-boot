@@ -12,6 +12,7 @@
 #include <reset.h>
 #include <scmi_agent.h>
 #include <scmi_agent-uclass.h>
+#include <scmi_lc_typec.h>
 #include <stdlib.h>
 #include <asm/io.h>
 #include <asm/types.h>
@@ -802,7 +803,80 @@ static int do_scmi_rx(struct cmd_tbl *cmdtp, int flag, int argc,
 	return found ? CMD_RET_SUCCESS : CMD_RET_FAILURE;
 }
 
+#if CONFIG_IS_ENABLED(SCMI_LC_TYPEC)
+static const char *typec_orient_name(u32 o)
+{
+	switch (o) {
+	case SCMI_LC_TYPEC_ORIENT_NONE:
+		return "none";
+	case SCMI_LC_TYPEC_ORIENT_NORMAL:
+		return "normal";
+	case SCMI_LC_TYPEC_ORIENT_REVERSE:
+		return "reverse";
+	default:
+		return "?";
+	}
+}
+
+static const char *typec_owner_name(u32 o)
+{
+	switch (o) {
+	case SCMI_LC_TYPEC_OWNER_M0:
+		return "M0";
+	case SCMI_LC_TYPEC_OWNER_YIELDED:
+		return "YIELDED";
+	default:
+		return "?";
+	}
+}
+
+/**
+ * do_scmi_typec() - lc-typec (vendor 0x80) CONNECTOR_EXT_STATUS, rear port
+ *
+ * typec status
+ *
+ * Prints the bind-time ownership decision (what U-Boot acted on) beside a
+ * fresh CONNECTOR_EXT_STATUS (what the M0 says now); the two differ exactly
+ * when the M0 yielded after bind.
+ */
+static int do_scmi_typec(struct cmd_tbl *cmdtp, int flag, int argc,
+			 char * const argv[])
+{
+	struct scmi_lc_typec_ext_status st;
+	int ret;
+
+	if (argc != 2 || strcmp(argv[1], "status"))
+		return CMD_RET_USAGE;
+
+	printf("bind-time decision: %s\n",
+	       scmi_m0_owns_typec() ? "M0 owns Type-C0" : "legacy");
+
+	ret = scmi_lc_typec_rear_status(&st);
+	if (ret == -ENODEV) {
+		printf("lc-typec protocol 0x80 not bound (server did not list it)\n");
+		return CMD_RET_FAILURE;
+	}
+	if (ret) {
+		printf("CONNECTOR_EXT_STATUS failed (%d)\n", ret);
+		return CMD_RET_FAILURE;
+	}
+
+	printf("connector:   %u (rear Type-C0)\n", SCMI_LC_TYPEC_CONN_REAR);
+	printf("orientation: %u (%s)\n", st.orientation,
+	       typec_orient_name(st.orientation));
+	printf("contract:    %u mV, %u mA\n", st.contract_mv, st.contract_ma);
+	printf("pd-rev:      %u\n", st.pd_rev);
+	printf("owner:       %u (%s)\n", st.owner, typec_owner_name(st.owner));
+
+	return CMD_RET_SUCCESS;
+}
+#endif
+
 static struct cmd_tbl cmd_scmi_sub[] = {
+#if CONFIG_IS_ENABLED(SCMI_LC_TYPEC)
+	U_BOOT_CMD_MKENT(typec, CONFIG_SYS_MAXARGS, 1,
+			 do_scmi_typec, "", ""),
+#endif
 	U_BOOT_CMD_MKENT(info, CONFIG_SYS_MAXARGS, 1,
 			 do_scmi_info, "", ""),
 	U_BOOT_CMD_MKENT(clk, CONFIG_SYS_MAXARGS, 1,
@@ -859,6 +933,13 @@ static int do_scmi(struct cmd_tbl *cmdtp, int flag,
 #define SCMI_RD_RESET_HELP ""
 #endif
 
+#if CONFIG_IS_ENABLED(SCMI_LC_TYPEC)
+#define SCMI_TYPEC_HELP \
+	" typec status - lc-typec CONNECTOR_EXT_STATUS of the rear Type-C0 port\n"
+#else
+#define SCMI_TYPEC_HELP ""
+#endif
+
 U_BOOT_LONGHELP(scmi,
 	" - SCMI utility\n"
 	" info - get the info of SCMI services\n"
@@ -873,6 +954,7 @@ U_BOOT_LONGHELP(scmi,
 	" perf set <domain> <level> - PERF_LEVEL_SET (drives the SC emitter)\n"
 	" perf notify <domain> <on|off> - PERF_NOTIFY_LEVEL (subscribe LEVEL_CHANGED)\n"
 	" rx poll - drain any SCP->AP (P2A) notification from the hpri/lpri windows\n"
+	SCMI_TYPEC_HELP
 	" perm_dev <agent-id in hex> <device-id in hex> <flags in hex>\n"
 	"   - set access permission to device\n"
 	" perm_proto <agent-id in hex> <device-id in hex> <protocol-id in hex> <flags in hex>\n"

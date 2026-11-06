@@ -30,6 +30,18 @@ config USB_XHCI_HCD
 
 if USB_XHCI_HCD
 
+config USB_XHCI_ASYNC_BULK
+	bool "xHCI non-blocking bulk-IN transfer descriptors"
+	default n
+	help
+	  Add an optional API for bulk-IN endpoints whose transfer descriptor
+	  is queued and left pending, polled without blocking, and never
+	  cancelled per poll (xhci_async_bulk_open/submit/poll/close). A
+	  synchronous transfer's event wait consumes a pending async TD's
+	  completion on its behalf instead of dropping it. With this option
+	  off the xHCI driver is unchanged. Used by CONFIG_WIFI_MT7601U; not
+	  needed otherwise.
+
 config USB_XHCI_DWC3
 	bool "DesignWare USB3 DRD Core Support"
 	help

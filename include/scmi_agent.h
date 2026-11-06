@@ -12,6 +12,7 @@
 
 #include <scmi_protocols.h>
 #include <asm/types.h>
+#include <linux/types.h>
 
 struct udevice;
 struct scmi_channel;
@@ -95,5 +96,15 @@ struct udevice *scmi_get_protocol(struct udevice *dev,
  * Return: 0 for successful status and a negative errno otherwise
  */
 int scmi_to_linux_errno(s32 scmi_errno);
+
+/**
+ * scmi_protocol_is_supported() - did Base list this protocol?
+ *
+ * @dev:	SCMI agent device
+ * @proto_id:	SCMI protocol ID
+ * Return: true when the server listed @proto_id (Base is always true)
+ */
+bool scmi_protocol_is_supported(struct udevice *dev,
+				enum scmi_std_protocol proto_id);
 
 #endif /* SCMI_H */

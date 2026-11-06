@@ -280,6 +280,41 @@ int usb_get_class_descriptor(struct usb_device *dev, int ifnum,
 			unsigned char type, unsigned char id, void *buf,
 			int size);
 int usb_clear_halt(struct usb_device *dev, int pipe);
+
+#if CONFIG_IS_ENABLED(USB_XHCI_ASYNC_BULK)
+/*
+ * Non-blocking bulk-IN transfer descriptors. One TD per registered endpoint
+ * is queued and left pending; poll checks for its completion without waiting
+ * and without stopping the endpoint, and hands over the data. See
+ * drivers/usb/host/xhci-ring.c.
+ */
+struct xhci_async_stats {
+	u32 submitted;
+	u32 completed;
+	u32 completed_in_wait;	/* event consumed inside another wait */
+	u32 polls;
+	u32 errors;		/* queueing failed */
+	u32 cancels;		/* Stop Endpoint on a pending TD */
+	u32 sync_cancels;	/* ... because a sync transfer used the ep */
+	u32 orphans;		/* foreign events acknowledged by a poll */
+	u32 last_orphan[4];
+	int last_comp;
+	bool active;
+};
+
+/* Return: a handle >= 0, or a negative errno. */
+int xhci_async_bulk_open(struct usb_device *udev, unsigned long pipe);
+/* Queue the one pending TD. -EBUSY if one is still outstanding. */
+int xhci_async_bulk_submit(int handle, void *buffer, int length);
+/*
+ * 0 = completed OK (*actual set, buffer invalidated), -EIO = completed with
+ * an error, -EINPROGRESS = pending, -ENOENT = none queued / cancelled by a
+ * synchronous transfer, -ENODEV = handle forgotten (controller gone).
+ */
+int xhci_async_bulk_poll(int handle, int *actual);
+void xhci_async_bulk_close(int handle);
+int xhci_async_bulk_stats(int handle, struct xhci_async_stats *st);
+#endif
 int usb_string(struct usb_device *dev, int index, char *buf, size_t size);
 int usb_set_interface(struct usb_device *dev, int interface, int alternate);
 int usb_get_port_status(struct usb_device *dev, int port, void *data);

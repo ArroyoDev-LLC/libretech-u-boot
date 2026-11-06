@@ -52,10 +52,20 @@ static int rk3328_vop_remove(struct udevice *dev)
 	return 0;
 }
 
+/*
+ * max_output as Linux's rockchip_vop_reg.c rk3328_vop gives it. Having one is
+ * also what puts this VOP on rk_vop_probe_ranked(): the walk that latches a
+ * board with nothing on HDMI as headless after one walk. The unranked loop
+ * re-walked on every video probe, and each walk failed the HDMI encoder's
+ * probe after dw_hdmi's 300 ms HPD wait -- 9 times to the kernel on a
+ * ROC-RK3328-CC with no monitor.
+ */
 struct rkvop_driverdata rk3328_driverdata = {
 	.dsp_offset = 0x490,
 	.win_offset = 0xd0,
 	.features = VOP_FEATURE_OUTPUT_10BIT,
+	.max_output_width = 4096,
+	.max_output_height = 2160,
 	.set_pin_polarity = rk3328_set_pin_polarity,
 };
 

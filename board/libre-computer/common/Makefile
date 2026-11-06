@@ -15,6 +15,8 @@ else
 obj-y	:= board.o
 obj-$(CONFIG_ARCH_MESON)	+= board-meson.o
 obj-$(CONFIG_ARCH_MESON)	+= meson-spifc-nor.o
+obj-$(CONFIG_MESON_LC_STATUS)	+= lc-status.o
+obj-$(CONFIG_ROCKCHIP_LC_STATUS)	+= lc-status.o
 obj-$(CONFIG_ARCH_SUNXI)	+= board-sunxi.o
 obj-$(CONFIG_ARCH_ROCKCHIP)	+= board-rockchip.o
 endif

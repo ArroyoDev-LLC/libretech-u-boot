@@ -39,6 +39,8 @@ struct ums {
 };
 
 int fsg_init(struct ums *ums_devs, int count, struct udevice *udc);
+/* The interface class of the next bind (default USB_CLASS_MASS_STORAGE) */
+void fsg_set_interface_class(u8 cls);
 void fsg_cleanup(void);
 int fsg_main_thread(void *);
 int fsg_add(struct usb_configuration *c);

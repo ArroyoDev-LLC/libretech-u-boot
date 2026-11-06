@@ -6,7 +6,9 @@
 
 #define LOG_CATEGORY	LOGC_CONSOLE
 
+#include <bootrom.h>
 #include <console.h>
+#include <cyclic.h>
 #include <debug_uart.h>
 #include <display_options.h>
 #include <dm.h>
@@ -366,12 +368,179 @@ static int console_tstc(int file)
 	return 0;
 }
 
+#if defined(CONFIG_CONSOLE_PREFER_USB) && !defined(CONFIG_XPL_BUILD)
+#include <cyclic.h>
+#include <g_dnl.h>
+#include <time.h>
+
+/*
+ * CONSOLE_PREFER_USB: while the usbacm console's host reads
+ * (console_usb_host_ready()), the console's other output devices never hold
+ * its output up. Each gets a ring that a cyclic callback drains within a
+ * time budget; a device that falls behind skips ahead and says so. Every
+ * byte used to wait for the slowest device: on GXL the AO UART's 11.6 kB/s
+ * paced the USB console, which alone runs at 1.96 MB/s
+ * (tools/audit/2026-11-02-uboot-gadget-throughput-baseline.md in the docs
+ * repo). Short output fits in the ring and reaches every device in full.
+ * When the host lets go, each ring is drained in full before the next byte
+ * goes to its device, so the order is kept.
+ */
+#define CPU_DEVS		4
+#define CPU_RING		CONFIG_CONSOLE_PREFER_USB_BUF
+#define CPU_PERIOD_US		10000	/* the drain's period */
+#define CPU_BUDGET_US		1000	/* and its time per run */
+#define CPU_CHUNK		16	/* bytes per write while draining */
+
+struct cpu_ring {
+	struct stdio_dev *dev;
+	char *buf;
+	ulong head, tail;	/* tail - head bytes are held */
+	ulong dropped;		/* skipped since the ring filled */
+	bool skipping;		/* dropping until the ring has drained */
+};
+
+static struct cpu_ring cpu_rings[CPU_DEVS];
+static struct cyclic_info cpu_cyclic;
+static bool cpu_cyclic_on;
+static bool cpu_in_drain;
+
+static bool cpu_is_usb(struct stdio_dev *dev)
+{
+	return !strcmp(dev->name, "usbacm");
+}
+
+static struct cpu_ring *cpu_find(struct stdio_dev *dev, bool make)
+{
+	struct cpu_ring *r, *free_r = NULL;
+
+	for (r = cpu_rings; r < cpu_rings + CPU_DEVS; r++) {
+		if (r->dev == dev)
+			return r;
+		if (!r->dev && !free_r)
+			free_r = r;
+	}
+	if (!make || !free_r)
+		return NULL;
+	free_r->buf = malloc(CPU_RING);
+	if (!free_r->buf)
+		return NULL;
+	free_r->dev = dev;
+	free_r->head = free_r->tail = free_r->dropped = 0;
+	free_r->skipping = false;
+
+	return free_r;
+}
+
+/* Write held bytes to the device; stop at @deadline (timer_get_us()), 0: never */
+static void cpu_drain(struct cpu_ring *r, ulong deadline)
+{
+	char chunk[CPU_CHUNK + 1];
+	char note[48];
+	int n;
+
+	cpu_in_drain = true;
+	while (r->tail != r->head) {
+		if (deadline && (long)(timer_get_us() - deadline) >= 0)
+			break;
+		for (n = 0; n < CPU_CHUNK && r->head != r->tail; n++)
+			chunk[n] = r->buf[r->head++ % CPU_RING];
+		chunk[n] = '\0';
+		r->dev->puts(r->dev, chunk);
+	}
+	if (r->tail == r->head && r->skipping) {
+		snprintf(note, sizeof(note), "\n[%lu bytes not shown]\n",
+			 r->dropped);
+		r->dev->puts(r->dev, note);
+		r->dropped = 0;
+		r->skipping = false;
+	}
+	cpu_in_drain = false;
+}
+
+/*
+ * Within the budget whether or not the host reads: the order of a device's
+ * bytes is cpu_defer()'s to keep (a byte for a device whose host let go
+ * drains that ring in full first), so the cyclic never needs to. Draining in
+ * full here held U-Boot for the ring's whole length at the UART's rate when
+ * the host let go: 1.67 s for 16 KiB on an S905D3-CC, every other cyclic and
+ * the gadget's EP0 waiting.
+ */
+static void cpu_cyclic_run(struct cyclic_info *c)
+{
+	ulong deadline = timer_get_us() + CPU_BUDGET_US;
+	struct cpu_ring *r;
+
+	for (r = cpu_rings; r < cpu_rings + CPU_DEVS; r++)
+		if (r->dev && (r->tail != r->head || r->skipping))
+			cpu_drain(r, deadline);
+}
+
+/* True when @dev's copy of @s was taken into its ring instead */
+static bool cpu_defer(struct stdio_dev *dev, const char *s, size_t len)
+{
+	struct cpu_ring *r;
+
+	if (cpu_in_drain || cpu_is_usb(dev) || !dev->puts)
+		return false;
+	if (!console_usb_host_ready()) {
+		/* The host let go: what the ring holds goes first */
+		r = cpu_find(dev, false);
+		if (r && (r->tail != r->head || r->skipping))
+			cpu_drain(r, 0);
+		return false;
+	}
+	r = cpu_find(dev, true);
+	if (!r)
+		return false;
+	/*
+	 * Skipping ends once half the ring is free again: the note goes in at
+	 * the point where the bytes were skipped, and what follows (a short
+	 * answer after a long dump) is kept.
+	 */
+	if (r->skipping && CPU_RING - (r->tail - r->head) >= CPU_RING / 2) {
+		char note[48];
+		int i, n;
+
+		n = snprintf(note, sizeof(note), "\n[%lu bytes not shown]\n",
+			     r->dropped);
+		for (i = 0; i < n; i++)
+			r->buf[r->tail++ % CPU_RING] = note[i];
+		r->dropped = 0;
+		r->skipping = false;
+	}
+	while (len--) {
+		if (!r->skipping && r->tail - r->head == CPU_RING)
+			r->skipping = true;
+		if (r->skipping)
+			r->dropped++;
+		else
+			r->buf[r->tail++ % CPU_RING] = *s;
+		s++;
+	}
+	if (!cpu_cyclic_on) {
+		cyclic_register(&cpu_cyclic, cpu_cyclic_run, CPU_PERIOD_US,
+				"console_prefer_usb");
+		cpu_cyclic_on = true;
+	}
+
+	return true;
+}
+#else
+static bool cpu_defer(struct stdio_dev *dev, const char *s, size_t len)
+{
+	return false;
+}
+#endif
+
 static void console_putc(int file, const char c)
 {
 	int i;
 	struct stdio_dev *dev;
+	const char s[2] = { c, '\0' };
 
 	for_each_console_dev(i, file, dev) {
+		if (cpu_defer(dev, s, 1))
+			continue;
 		if (dev->putc != NULL)
 			dev->putc(dev, c);
 	}
@@ -426,8 +595,11 @@ static void console_puts(int file, const char *s)
 {
 	int i;
 	struct stdio_dev *dev;
+	size_t len = strlen(s);
 
 	for_each_console_dev(i, file, dev) {
+		if (cpu_defer(dev, s, len))
+			continue;
 		if (dev->puts != NULL)
 			dev->puts(dev, s);
 	}
@@ -661,6 +833,14 @@ void console_kept_keys_to_cli(void)
 {
 	if (gd->flags & GD_FLG_RELOC)
 		console_kept.open = true;
+}
+
+bool console_kept_keys_hold(void)
+{
+	bool was = console_kept.open;
+
+	console_kept.open = false;
+	return was;
 }
 
 void console_discard_input(void)
@@ -1111,6 +1291,19 @@ int confirm_yesno(void)
 	console_flush_stdin();
 	i = 0;
 	while (i < sizeof(str_input)) {
+		/*
+		 * Asked before its command does anything: a wait for a person,
+		 * so a USB `bootrom` request acts here (bootrom.h).
+		 */
+		if (CONFIG_IS_ENABLED(CMD_BOOTROM) && !i) {
+			enum bootrom_wait prev = bootrom_wait_set(BOOTROM_WAIT_PAUSE);
+
+			while (!tstc()) {
+				bootrom_act();
+				schedule();
+			}
+			bootrom_wait_set(prev);
+		}
 		str_input[i] = getchar();
 		putc(str_input[i]);
 		if (str_input[i] == '\r')

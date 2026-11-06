@@ -10,10 +10,14 @@
 #include <scmi_agent.h>
 #include <scmi_agent-uclass.h>
 #include <scmi_protocols.h>
+#include <scmi_lc_typec.h>
+#include <asm/global_data.h>
 #include <dm/device_compat.h>
 #include <dm/device-internal.h>
+#include <dm/uclass-internal.h>
 #include <linux/compat.h>
 #include <linux/delay.h>
+#include <linux/string.h>
 #include <asm/io.h>
 #include <stdio.h>
 
@@ -49,10 +53,10 @@ static const struct error_code scmi_linux_errmap[] = {
  * check if the protocol, @proto_id, is provided by the SCMI agent,
  * @dev.
  *
- * Return:	0 on success, error code otherwise
+ * Return:	true when the server listed @proto_id
  */
-static bool scmi_protocol_is_supported(struct udevice *dev,
-				       enum scmi_std_protocol proto_id)
+bool scmi_protocol_is_supported(struct udevice *dev,
+				enum scmi_std_protocol proto_id)
 {
 	struct scmi_agent_priv *priv;
 	int i;
@@ -432,7 +436,7 @@ static struct driver *scmi_proto_driver_get(unsigned int proto_id)
  * only meaningful on a build whose startup hook reaches that seed.
  *
  * They are printed here because this target cannot be asked for them any other
- * way: aml-s905d3-cc_libre_residual_opensc_defconfig sets CONFIG_BOOTDELAY=-1
+ * way: aml-s905d3-cc_residual_opensc_defconfig sets CONFIG_BOOTDELAY=-1
  * and CONFIG_BOOTCOMMAND="", so the "=> " it prints is never read and there is
  * no Linux to read 0xFFFE7410 from either.
  *
@@ -703,6 +707,147 @@ static int scmi_residual_clk_opps(struct udevice *proto, u32 clock_id,
 	return 0;
 }
 
+#if CONFIG_IS_ENABLED(SCMI_LC_TYPEC)
+/*
+ * lc-typec (vendor protocol 0x80): who owns the rear Type-C0 port.
+ *
+ * ONE decision, taken once, here at bind time: the M0 owns the port only if
+ * Base listed 0x80 from the "libre-computer" server AND CONNECTOR_EXT_STATUS
+ * reads status 0 and owner == M0. Everything else -- no 0x80, another
+ * vendor's 0x80 (i.MX LMM is 0x80 too; message 5 there is LMM_RESET, so the
+ * vendor check is not cosmetic), a transport error, an M0 that already
+ * yielded -- is legacy: U-Boot and Linux keep their own TCPMs on I2C7.
+ *
+ * Every consumer reads this cached answer and none re-asks it: the fusb302
+ * of_to_plat refusal, the Type-C PHY and the kernel DT fixup. A Base failure
+ * here followed by a success at fixup time would otherwise hand Linux an
+ * M0-mode DT while U-Boot had bound I2C7 and the M0 had yielded, and nobody
+ * would serve the port.
+ *
+ * The query rides the Base protocol device, so the decision does not depend
+ * on the 0x80 client driver. No protocol@80 driver is bound yet at this
+ * point (the subnode walk below binds it).
+ */
+DECLARE_GLOBAL_DATA_PTR;
+
+static bool scmi_m0_typec_owned;
+
+int scmi_lc_typec_ext_status(struct udevice *dev, u32 connector,
+			     struct scmi_lc_typec_ext_status *st)
+{
+	struct scmi_lc_typec_ext_status_in in = { .connector = connector };
+	struct scmi_lc_typec_ext_status_out out = { 0 };
+	struct scmi_msg msg = SCMI_MSG_IN(SCMI_PROTOCOL_ID_VENDOR_80,
+					  SCMI_LC_TYPEC_CONNECTOR_EXT_STATUS,
+					  in, out);
+	int ret;
+
+	ret = devm_scmi_process_msg(dev, &msg);
+	if (ret < 0)
+		return ret;
+	ret = scmi_to_linux_errno(out.status);
+	if (ret)
+		return ret;
+	/* A short answer is not a status; never read stale bytes as one. */
+	if (msg.out_msg_sz < sizeof(out))
+		return -EPROTO;
+
+	st->orientation = out.orientation;
+	st->contract_mv = out.contract_mv;
+	st->contract_ma = out.contract_ma;
+	st->pd_rev = out.pd_rev;
+	st->owner = out.owner;
+	return 0;
+}
+
+static bool scmi_lc_typec_server(struct udevice *agent)
+{
+	struct scmi_agent_priv *priv = dev_get_uclass_plat(agent);
+
+	return priv && priv->vendor &&
+	       !strcmp((const char *)priv->vendor, SCMI_LC_TYPEC_VENDOR) &&
+	       scmi_protocol_is_supported(agent, SCMI_PROTOCOL_ID_VENDOR_80);
+}
+
+static void scmi_m0_typec_decide(struct udevice *agent, struct udevice *base)
+{
+	struct scmi_lc_typec_ext_status st;
+	int ret;
+
+	/*
+	 * Pre-relocation BSS is not writable on ARM. Nothing that reads the
+	 * flag runs before relocation; the post-relocation bind decides.
+	 */
+	if (!(gd->flags & GD_FLG_RELOC))
+		return;
+
+	scmi_m0_typec_owned = false;
+
+	if (!scmi_lc_typec_server(agent)) {
+		printf("SCMI: Type-C0: legacy (no lc-typec protocol 0x80)\n");
+		return;
+	}
+
+	ret = scmi_lc_typec_ext_status(base, SCMI_LC_TYPEC_CONN_REAR, &st);
+	if (ret) {
+		printf("SCMI: Type-C0: legacy (CONNECTOR_EXT_STATUS failed: %d)\n",
+		       ret);
+		return;
+	}
+
+	if (st.owner != SCMI_LC_TYPEC_OWNER_M0) {
+		printf("SCMI: Type-C0: legacy (M0 owner=%u, yielded)\n",
+		       st.owner);
+		return;
+	}
+
+	scmi_m0_typec_owned = true;
+	printf("SCMI: Type-C0: owned by M0 (orientation %u, %u mV %u mA, PD rev %u)\n",
+	       st.orientation, st.contract_mv, st.contract_ma, st.pd_rev);
+}
+
+bool scmi_m0_owns_typec(void)
+{
+	return scmi_m0_typec_owned;
+}
+
+int scmi_m0_typec_query(struct scmi_lc_typec_ext_status *st)
+{
+	struct udevice *agent;
+	struct scmi_agent_priv *priv;
+
+	if (uclass_find_first_device(UCLASS_SCMI_AGENT, &agent) || !agent)
+		return -ENODEV;
+	priv = dev_get_uclass_plat(agent);
+	if (!priv || !priv->base_dev || !device_active(priv->base_dev))
+		return -ENODEV;
+	if (!scmi_lc_typec_server(agent))
+		return -ENODEV;
+
+	return scmi_lc_typec_ext_status(priv->base_dev,
+					SCMI_LC_TYPEC_CONN_REAR, st);
+}
+
+bool scmi_m0_owns_tcpc(ofnode tcpc)
+{
+	ofnode bus;
+
+	if (!scmi_m0_typec_owned || !ofnode_valid(tcpc))
+		return false;
+
+	bus = ofnode_get_parent(tcpc);
+	if (!ofnode_valid(bus))
+		return false;
+
+	return ofnode_get_addr(bus) == SCMI_LC_TYPEC_M0_I2C_BASE;
+}
+#else
+static inline void scmi_m0_typec_decide(struct udevice *agent,
+					struct udevice *base)
+{
+}
+#endif /* SCMI_LC_TYPEC */
+
 /*
  * SCMI agent devices binds devices of various uclasses depending on
  * the FDT description. scmi_bind_protocol() is a generic bind sequence
@@ -772,6 +917,9 @@ static int scmi_bind_protocols(struct udevice *dev)
 			scmi_residual_probe_banner(dev, "BASE info FAIL", ret);
 		return 0;
 	}
+
+	/* lc-typec: the one bind-time Type-C0 ownership decision. */
+	scmi_m0_typec_decide(dev, proto);
 
 	if (IS_ENABLED(CONFIG_SCMI_RESIDUAL_DIAG)) {
 		struct scmi_agent_priv *apriv = dev_get_uclass_plat(dev);

@@ -32,6 +32,10 @@ ifeq ($(CONFIG_XPL_BUILD)$(CONFIG_TPL_BUILD),)
 # meaning "turn it off".
 obj-y += boot_mode.o
 obj-$(CONFIG_ROCKCHIP_COMMON_BOARD) += board.o bootsource.o
+# `bootrom`: the BOOT_BROM_DOWNLOAD flag our TPL acts on
+obj-$(CONFIG_CMD_BOOTROM) += bootrom-rk.o
+# The bootsettings command's Rockchip decode (cmd/bootsettings.c)
+obj-$(CONFIG_CMD_BOOTSETTINGS) += bootsettings.o
 endif
 
 ifeq ($(CONFIG_TPL_BUILD),)

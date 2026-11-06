@@ -268,6 +268,23 @@ config CONSOLE_MUX
 	  adds a small amount of size to U-Boot.  Changes to the environment
 	  variables stdout, stdin and stderr will take effect immediately.
 
+config CONSOLE_PREFER_USB
+	bool "The USB console comes first while its host reads"
+	depends on CONSOLE_MUX && USB_FUNCTION_ACM && CYCLIC
+	help
+	  While the usbacm console's host holds the port open and reads, the
+	  console's other output devices (serial, video) no longer hold its
+	  output up: each mirrors it through a ring that a cyclic callback
+	  drains in the background, and a device that falls behind skips
+	  ahead and prints "[N bytes not shown]". Short output still reaches
+	  every device in full. When the host lets go, each ring drains in
+	  full first, so the order is kept.
+
+config CONSOLE_PREFER_USB_BUF
+	int "Bytes each mirrored device can hold behind the USB console"
+	depends on CONSOLE_PREFER_USB
+	default 16384
+
 config USB_BOOT_ACM_CONSOLE
 	bool "On a USB boot, also put the console on a USB ACM serial port"
 	depends on BOOTSOURCE && USB_FUNCTION_ACM && CONSOLE_MUX

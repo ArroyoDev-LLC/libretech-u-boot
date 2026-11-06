@@ -8,6 +8,7 @@
 #include <dm.h>
 #include <env.h>
 #include <i2c.h>
+#include <scmi_lc_typec.h>
 #include <asm/gpio.h>
 #include <linux/delay.h>
 #include <linux/err.h>
@@ -17,6 +18,8 @@
 #include "fusb302_reg.h"
 
 #define FUSB302_MAX_MSG_LEN 0x1F
+/* upper bound on VBUSOK settling after the measure block powers up */
+#define FUSB302_VBUSOK_SETTLE_US 10000
 
 enum toggling_mode {
 	TOGGLING_MODE_OFF,
@@ -348,9 +351,25 @@ static int fusb302_init(struct udevice *dev)
 	ret = fusb302_set_power_mode(dev, FUSB_REG_POWER_PWR_ALL);
 	if (ret)
 		return ret;
-	ret = fusb302_i2c_read(dev, FUSB_REG_STATUS0, &data);
-	if (ret)
-		return ret;
+	/*
+	 * VBUSOK comes from the measure block that the write above just
+	 * powered, and it is not valid on the next I2C read: on ROC-RK3399-PC
+	 * Type-C0, a board powered through this very VBUS read it clear at
+	 * both probes of every boot. tcpm_post_probe() decides from it whether
+	 * to negotiate at all, so a stale 0 left a PD source's Source_Caps
+	 * unanswered until a consumer happened to ask, and the source's hard
+	 * reset cut the board's only supply. Give the comparator a bounded
+	 * time to settle; a port with no VBUS pays the whole bound once.
+	 */
+	for (int i = 0; ; i++) {
+		ret = fusb302_i2c_read(dev, FUSB_REG_STATUS0, &data);
+		if (ret)
+			return ret;
+		if ((data & FUSB_REG_STATUS0_VBUSOK) ||
+		    i >= FUSB302_VBUSOK_SETTLE_US / 100)
+			break;
+		udelay(100);
+	}
 	chip->vbus_present = !!(data & FUSB_REG_STATUS0_VBUSOK);
 	ret = fusb302_i2c_read(dev, FUSB_REG_DEVICE_ID, &data);
 	if (ret)
@@ -1779,6 +1798,27 @@ static struct dm_tcpm_ops fusb302_ops = {
 	.get_prior_roles = fusb302_get_prior_roles,
 };
 
+/*
+ * Refuse the port the RK3399 M0 owns (SCMI lc-typec 0x80), and refuse it HERE
+ * rather than in probe: device_probe() runs this hook, then probes the parent
+ * I2C bus, then this device's probe. The I2C7 bus probe writes CLKDIV
+ * (i2c_post_probe -> rk_i2c_set_clk), which would clobber the M0's
+ * controller and trip its yield guard -- so the refusal has to come before
+ * the parent is ever probed. The answer is the agent's cached bind-time
+ * decision (Base discovery runs at the SCMI agent's post_bind, before
+ * dm_autoprobe); nothing is re-queried. Any other fusb302 -- the front port
+ * on I2C4 included -- is never refused.
+ */
+static int fusb302_of_to_plat(struct udevice *dev)
+{
+	if (scmi_m0_owns_tcpc(dev_ofnode(dev))) {
+		dev_info(dev, "Type-C port owned by the M0 (SCMI lc-typec); TCPM and its I2C bus left alone\n");
+		return -ENODEV;
+	}
+
+	return 0;
+}
+
 static const struct udevice_id fusb302_ids[] = {
 	{ .compatible = "fcs,fusb302" },
 	{ }
@@ -1788,6 +1828,9 @@ U_BOOT_DRIVER(fusb302) = {
 	.name = "fusb302",
 	.id = UCLASS_TCPM,
 	.of_match = fusb302_ids,
+	.of_to_plat = fusb302_of_to_plat,
 	.ops = &fusb302_ops,
 	.priv_auto = sizeof(struct fusb302_chip),
+	/* removed before the OS so tcpm_pre_remove() can quiesce an inlet */
+	.flags = DM_FLAG_OS_PREPARE,
 };

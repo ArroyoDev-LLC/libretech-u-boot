@@ -1224,6 +1224,12 @@ struct xhci_ctrl {
 	int page_size;
 	u32 quirks;
 #define XHCI_MTK_HOST		BIT(0)
+	/*
+	 * Event-wait ceiling in milliseconds. 0 uses XHCI_TIMEOUT. A caller
+	 * that must return inside one cyclic tick sets this around a single
+	 * transfer and clears it before returning.
+	 */
+	unsigned int event_wait_ms;
 };
 
 #if CONFIG_IS_ENABLED(DM_USB)
@@ -1253,6 +1259,27 @@ void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr,
 			u32 slot_id, u32 ep_index, trb_type cmd);
 void xhci_acknowledge_event(struct xhci_ctrl *ctrl);
 union xhci_trb *xhci_wait_for_event(struct xhci_ctrl *ctrl, trb_type expected);
+
+/*
+ * Non-blocking bulk-IN TDs (CONFIG_USB_XHCI_ASYNC_BULK). The dispatch macro
+ * is injected into xhci_wait_for_event()'s poll loop on an existing line, so
+ * that with the option off it expands to nothing and the compiled xHCI
+ * objects are unchanged. xhci_async_consume() acknowledges and records an
+ * event belonging to a pending async TD and returns true.
+ */
+#if CONFIG_IS_ENABLED(USB_XHCI_ASYNC_BULK)
+bool xhci_async_consume(struct xhci_ctrl *ctrl, union xhci_trb *event);
+void xhci_async_forget_ctrl(struct xhci_ctrl *ctrl);
+int xhci_ep_debug_state(struct usb_device *udev, unsigned long pipe,
+			u32 *ep_state, u64 *hw_deq, u64 *sw_enq);
+#define XHCI_ASYNC_DISPATCH(ctrl, event, type)				\
+	if ((type) == TRB_TRANSFER && xhci_async_consume((ctrl), (event)))\
+		continue;
+#define XHCI_ASYNC_FORGET(ctrl)	xhci_async_forget_ctrl(ctrl)
+#else
+#define XHCI_ASYNC_DISPATCH(ctrl, event, type)
+#define XHCI_ASYNC_FORGET(ctrl)
+#endif
 int xhci_bulk_tx(struct usb_device *udev, unsigned long pipe,
 		 int length, void *buffer);
 int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
@@ -1289,6 +1316,9 @@ int xhci_register(struct udevice *dev, struct xhci_hccr *hccr,
 extern struct dm_usb_ops xhci_usb_ops;
 
 struct xhci_ctrl *xhci_get_ctrl(struct usb_device *udev);
+
+/* ms == 0 restores XHCI_TIMEOUT. Writes the ctrl xhci_get_ctrl returns. */
+void xhci_set_event_wait_ms(struct usb_device *udev, unsigned int ms);
 
 static inline dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, void *addr,
 				      size_t size)

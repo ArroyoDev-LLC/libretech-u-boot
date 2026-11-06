@@ -449,6 +449,14 @@ static int event_ready(struct xhci_ctrl *ctrl)
 	return 1;
 }
 
+/* 0 keeps XHCI_TIMEOUT. A non-zero event_wait_ms is one transfer's ceiling. */
+static unsigned long xhci_event_limit(struct xhci_ctrl *ctrl)
+{
+	if (ctrl->event_wait_ms)
+		return ctrl->event_wait_ms;
+	return XHCI_TIMEOUT;
+}
+
 /**
  * Waits for a specific type of event and returns it. Discards unexpected
  * events. Caller *must* call xhci_acknowledge_event() after it is finished
@@ -469,7 +477,21 @@ union xhci_trb *xhci_wait_for_event(struct xhci_ctrl *ctrl, trb_type expected)
 		if (!event_ready(ctrl))
 			continue;
 
-		type = TRB_FIELD_TO_TYPE(le32_to_cpu(event->event_cmd.flags));
+		type = TRB_FIELD_TO_TYPE(le32_to_cpu(event->event_cmd.flags)); XHCI_ASYNC_DISPATCH(ctrl, event, type);
+		/*
+		 * A Stop Endpoint transfer event belongs to the TD that was
+		 * cancelled, not to whatever transfer is waiting now. Leave
+		 * it for that waiter and the next control transfer times out.
+		 */
+		if (type == TRB_TRANSFER) {
+			u32 comp = GET_COMP_CODE(le32_to_cpu(
+					event->trans_event.transfer_len));
+
+			if (comp == COMP_STOP || comp == COMP_STOP_INVAL) {
+				xhci_acknowledge_event(ctrl);
+				continue;
+			}
+		}
 		if (type == expected ||
 		    (expected == TRB_NONE && type != TRB_PORT_STATUS))
 			return event;
@@ -483,7 +505,11 @@ union xhci_trb *xhci_wait_for_event(struct xhci_ctrl *ctrl, trb_type expected)
 			BUG_ON(GET_COMP_CODE(
 				le32_to_cpu(event->generic.field[2])) !=
 								COMP_SUCCESS);
-		else
+		else if (!ctrl->event_wait_ms)
+			/*
+			 * A 1 ms cyclic ceiling discards a burst of these.
+			 * Printing each one is what held the scan tick.
+			 */
 			printf("Unexpected XHCI event TRB, skipping... "
 				"(%08x %08x %08x %08x)\n",
 				le32_to_cpu(event->generic.field[0]),
@@ -492,7 +518,7 @@ union xhci_trb *xhci_wait_for_event(struct xhci_ctrl *ctrl, trb_type expected)
 				le32_to_cpu(event->generic.field[3]));
 
 		xhci_acknowledge_event(ctrl);
-	} while (get_timer(ts) < XHCI_TIMEOUT);
+	} while (get_timer(ts) < xhci_event_limit(ctrl));
 
 	if (expected == TRB_TRANSFER)
 		return NULL;
@@ -540,8 +566,8 @@ static void reset_ep(struct usb_device *udev, int ep_index)
  * TRBs by setting the xHC's dequeue pointer to our enqueue pointer. The next
  * xhci_bulk_tx/xhci_ctrl_tx on this enpoint will add new transfers there and
  * ring the doorbell, causing this endpoint to start working again.
- * (Careful: This will BUG() when there was no transfer in progress. Shouldn't
- * happen in practice for current uses and is too complicated to fix right now.)
+ * An endpoint that is already stopped completes with Context State Error
+ * and is left alone.
  */
 static void abort_td(struct usb_device *udev, int ep_index)
 {
@@ -549,38 +575,84 @@ static void abort_td(struct usb_device *udev, int ep_index)
 	struct xhci_ring *ring =  ctrl->devs[udev->slot_id]->eps[ep_index].ring;
 	union xhci_trb *event;
 	xhci_comp_code comp;
-	trb_type type;
 	u64 addr;
-	u32 field;
 
 	xhci_queue_command(ctrl, 0, udev->slot_id, ep_index, TRB_STOP_RING);
 
-	event = xhci_wait_for_event(ctrl, TRB_NONE);
-	if (!event)
-		return;
+	/*
+	 * Command completion and the Stopped transfer event arrive in
+	 * either order. Set TR Dequeue is issued only after the Stopped
+	 * event has been acknowledged: doing it on the command completion
+	 * alone leaves that event for the next control transfer, which
+	 * then waits out the event ceiling. An endpoint that is already stopped
+	 * completes with Context State Error and has no transfer event.
+	 */
+	{
+		bool seen_cmd = false, seen_stop = false;
+		unsigned long ts = get_timer(0);
 
-	type = TRB_FIELD_TO_TYPE(le32_to_cpu(event->event_cmd.flags));
-	if (type == TRB_TRANSFER) {
-		field = le32_to_cpu(event->trans_event.flags);
-		BUG_ON(TRB_TO_SLOT_ID(field) != udev->slot_id);
-		BUG_ON(TRB_TO_EP_INDEX(field) != ep_index);
-		BUG_ON(GET_COMP_CODE(le32_to_cpu(event->trans_event.transfer_len != COMP_STOP)));
-		xhci_acknowledge_event(ctrl);
+		comp = COMP_SUCCESS;
+		while (get_timer(ts) < xhci_event_limit(ctrl)) {
+			trb_type type;
+			u32 status, flags;
 
-		event = xhci_wait_for_event(ctrl, TRB_COMPLETION);
-		if (!event)
+			if (!event_ready(ctrl))
+				continue;
+			event = ctrl->event_ring->dequeue;
+			flags = le32_to_cpu(event->generic.field[3]);
+			status = le32_to_cpu(event->generic.field[2]);
+			type = TRB_FIELD_TO_TYPE(flags);
+			if (type == TRB_TRANSFER &&
+			    TRB_TO_SLOT_ID(flags) == udev->slot_id &&
+			    TRB_TO_EP_INDEX(flags) == ep_index &&
+			    (GET_COMP_CODE(status) == COMP_STOP ||
+			     GET_COMP_CODE(status) == COMP_STOP_INVAL)) {
+#if CONFIG_IS_ENABLED(USB_XHCI_ASYNC_BULK)
+				if (!xhci_async_consume(ctrl, event))
+					xhci_acknowledge_event(ctrl);
+#else
+				xhci_acknowledge_event(ctrl);
+#endif
+				seen_stop = true;
+				if (seen_cmd)
+					break;
+				continue;
+			}
+#if CONFIG_IS_ENABLED(USB_XHCI_ASYNC_BULK)
+			if (type == TRB_TRANSFER &&
+			    xhci_async_consume(ctrl, event))
+				continue;
+#endif
+			if (type == TRB_COMPLETION &&
+			    TRB_TO_SLOT_ID(flags) == udev->slot_id) {
+				comp = GET_COMP_CODE(status);
+				xhci_acknowledge_event(ctrl);
+				seen_cmd = true;
+				if (comp == COMP_CTX_STATE || seen_stop)
+					break;
+				continue;
+			}
+			if (type != TRB_PORT_STATUS && !ctrl->event_wait_ms)
+				/*
+				 * A 1 ms cyclic ceiling discards a burst of these.
+				 * Printing each one is what held the scan tick.
+				 */
+				printf("Unexpected XHCI event TRB, skipping... "
+				       "(%08x %08x %08x %08x)\n",
+				       le32_to_cpu(event->generic.field[0]),
+				       le32_to_cpu(event->generic.field[1]),
+				       le32_to_cpu(event->generic.field[2]),
+				       le32_to_cpu(event->generic.field[3]));
+			xhci_acknowledge_event(ctrl);
+		}
+		if (!seen_cmd)
 			return;
-		type = TRB_FIELD_TO_TYPE(le32_to_cpu(event->event_cmd.flags));
-
-	} else {
-		printf("abort_td: Expected a TRB_TRANSFER TRB first\n");
+		BUG_ON(comp != COMP_SUCCESS && comp != COMP_CTX_STATE);
+		if (comp == COMP_CTX_STATE)
+			return;
+		/* No Stopped event yet: still move the dequeue pointer.
+		 * A late event is discarded by xhci_wait_for_event(). */
 	}
-
-	comp = GET_COMP_CODE(le32_to_cpu(event->event_cmd.status));
-	BUG_ON(type != TRB_COMPLETION ||
-		TRB_TO_SLOT_ID(le32_to_cpu(event->event_cmd.flags)) != udev->slot_id ||
-		(comp != COMP_SUCCESS && comp != COMP_CTX_STATE));
-	xhci_acknowledge_event(ctrl);
 	addr = xhci_trb_virt_to_dma(ring->enq_seg, ring->enqueue) |
 		ring->cycle_state;
 	xhci_queue_command(ctrl, addr, udev->slot_id, ep_index, TRB_SET_DEQ);
@@ -1057,3 +1129,440 @@ abort:
 	udev->act_len = 0;
 	return -ETIMEDOUT;
 }
+
+#if CONFIG_IS_ENABLED(USB_XHCI_ASYNC_BULK)
+/*
+ * Non-blocking bulk-IN transfer descriptors.
+ *
+ * One TD per registered endpoint is queued and left pending. Its transfer
+ * event is consumed by whoever reads the event ring first: a driver poll
+ * (xhci_async_bulk_poll, which drains ready events without waiting) or any
+ * synchronous control / bulk / command wait (xhci_wait_for_event via the
+ * XHCI_ASYNC_DISPATCH hook -> xhci_async_consume). Either way the completion
+ * is recorded in the slot and handed to the owner at its next poll. Nothing
+ * here waits or stops an endpoint except close and a synchronous transfer on
+ * the same endpoint (one Stop Endpoint + Set TR Dequeue), and controller
+ * teardown (slots forgotten).
+ *
+ * Handles are slot_index | generation << 8, so a slot forgotten at
+ * xhci_deregister() (usb reset / usb stop) is detected without touching the
+ * stale usb_device. Buffers are single-TRB (the caller aligns them and keeps
+ * them < 64 KiB), so there is no chained-TD inner-event handling.
+ */
+#define XHCI_ASYNC_MAX		6
+
+struct xhci_async_td {
+	struct xhci_ctrl *ctrl;		/* NULL = free */
+	struct usb_device *udev;
+	unsigned long pipe;
+	int slot_id;
+	int ep_index;
+	u32 gen;
+	bool active;			/* TD queued, event not yet seen */
+	bool done;			/* event seen, not handed over */
+	void *buffer;
+	int length;
+	u64 buf_64;
+	dma_addr_t last_trb;
+	int comp;
+	int act_len;
+	struct xhci_async_stats st;
+};
+
+static struct xhci_async_td xhci_async[XHCI_ASYNC_MAX];
+
+static struct xhci_async_td *xhci_async_lookup(int h)
+{
+	int i = h & 0xff;
+
+	if (h < 0 || i >= XHCI_ASYNC_MAX)
+		return NULL;
+	if (!xhci_async[i].ctrl || xhci_async[i].gen != ((u32)h >> 8))
+		return NULL;
+	return &xhci_async[i];
+}
+
+/* Queue one single-TRB bulk-IN TD and ring the doorbell; does not wait. */
+static int xhci_async_queue(struct xhci_async_td *e)
+{
+	struct xhci_ctrl *ctrl = e->ctrl;
+	struct usb_device *udev = e->udev;
+	int ep_index = e->ep_index;
+	struct xhci_virt_device *virt_dev = ctrl->devs[udev->slot_id];
+	struct xhci_ep_ctx *ep_ctx;
+	struct xhci_ring *ring;
+	struct xhci_generic_trb *start_trb;
+	int start_cycle, maxpacketsize, ret;
+	u32 field, remainder, length_field;
+	u32 trb_fields[4];
+	u64 addr;
+
+	e->buf_64 = xhci_dma_map(ctrl, e->buffer, e->length);
+
+	xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes,
+			 virt_dev->out_ctx->size);
+	ep_ctx = xhci_get_ep_ctx(ctrl, virt_dev->out_ctx, ep_index);
+	if ((le32_to_cpu(ep_ctx->ep_info) & EP_STATE_MASK) == EP_STATE_HALTED) {
+		reset_ep(udev, ep_index);
+		xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes,
+				 virt_dev->out_ctx->size);
+	}
+
+	ring = virt_dev->eps[ep_index].ring;
+	if (!ring)
+		return -EINVAL;
+
+	ret = prepare_ring(ctrl, ring,
+			   le32_to_cpu(ep_ctx->ep_info) & EP_STATE_MASK);
+	if (ret < 0)
+		return ret;
+
+	start_trb = &ring->enqueue->generic;
+	start_cycle = ring->cycle_state;
+	maxpacketsize = usb_maxpacket(udev, e->pipe);
+	addr = e->buf_64;
+
+	xhci_flush_cache((uintptr_t)e->buffer, e->length);
+
+	field = (start_cycle == 0) ? TRB_CYCLE : 0;
+	field |= TRB_IOC | TRB_ISP;
+	remainder = xhci_td_remainder(ctrl, 0, e->length, e->length,
+				      maxpacketsize, false);
+	length_field = TRB_LEN(e->length) | TRB_TD_SIZE(remainder) |
+		TRB_INTR_TARGET(0);
+	trb_fields[0] = lower_32_bits(addr);
+	trb_fields[1] = upper_32_bits(addr);
+	trb_fields[2] = length_field;
+	trb_fields[3] = field | TRB_TYPE(TRB_NORMAL);
+	e->last_trb = queue_trb(ctrl, ring, false, trb_fields);
+
+	giveback_first_trb(udev, ep_index, start_cycle, start_trb);
+	return 0;
+}
+
+/*
+ * An event at the ring dequeue: consume it if it belongs to a pending async
+ * TD. Several TDs share one endpoint (the RX pool). A synchronous bulk OUT
+ * waits on this same event ring, so attributing the completion to the first
+ * active TD marks the wrong buffer done and leaves the TD that actually
+ * finished posted forever. Match the event's TRB, the same way the poll
+ * drain does. A single posted TD may take an event with no TRB pointer.
+ */
+bool xhci_async_consume(struct xhci_ctrl *ctrl, union xhci_trb *event)
+{
+	u32 flags = le32_to_cpu(event->trans_event.flags);
+	u32 tl = le32_to_cpu(event->trans_event.transfer_len);
+	u64 ev_trb = le64_to_cpu(event->trans_event.buffer);
+	int slot = TRB_TO_SLOT_ID(flags);
+	int ep = TRB_TO_EP_INDEX(flags);
+	struct xhci_async_td *hit = NULL;
+	int i, nactive = 0;
+
+	for (i = 0; i < XHCI_ASYNC_MAX; i++) {
+		struct xhci_async_td *e = &xhci_async[i];
+
+		if (e->ctrl != ctrl || !e->active || e->slot_id != slot ||
+		    e->ep_index != ep)
+			continue;
+		nactive++;
+		if (ev_trb && e->last_trb == ev_trb)
+			hit = e;
+	}
+	if (!hit && nactive == 1) {
+		for (i = 0; i < XHCI_ASYNC_MAX; i++) {
+			struct xhci_async_td *e = &xhci_async[i];
+
+			if (e->ctrl != ctrl || !e->active ||
+			    e->slot_id != slot || e->ep_index != ep)
+				continue;
+			hit = e;
+			break;
+		}
+	}
+	if (!hit)
+		return false;
+
+	hit->comp = GET_COMP_CODE(tl);
+	hit->act_len = min(hit->length, hit->length - (int)EVENT_TRB_LEN(tl));
+	hit->st.last_comp = hit->comp;
+	hit->active = false;
+	hit->done = true;
+	hit->st.completed++;
+	hit->st.completed_in_wait++;
+	xhci_acknowledge_event(ctrl);
+	return true;
+}
+
+/* Drain every ready event without waiting (driver poll context). */
+static void xhci_async_drain(struct xhci_ctrl *ctrl, struct xhci_async_td *me)
+{
+	while (event_ready(ctrl)) {
+		union xhci_trb *event = ctrl->event_ring->dequeue;
+		trb_type type;
+
+		type = TRB_FIELD_TO_TYPE(le32_to_cpu(event->event_cmd.flags));
+		if (type == TRB_TRANSFER) {
+			u32 flags = le32_to_cpu(event->trans_event.flags);
+			u32 tl = le32_to_cpu(event->trans_event.transfer_len);
+			u64 ev_trb = le64_to_cpu(event->trans_event.buffer);
+			int slot = TRB_TO_SLOT_ID(flags);
+			int ep = TRB_TO_EP_INDEX(flags);
+			struct xhci_async_td *hit = NULL;
+			int i;
+
+			/*
+			 * Pass 1: exact match on the completed TRB pointer, so
+			 * several TDs posted on the SAME endpoint (the RX pool)
+			 * are attributed to the right handle and buffer.
+			 */
+			for (i = 0; i < XHCI_ASYNC_MAX; i++) {
+				struct xhci_async_td *e = &xhci_async[i];
+
+				if (e->ctrl != ctrl || !e->active ||
+				    e->slot_id != slot || e->ep_index != ep)
+					continue;
+				if (ev_trb && e->last_trb == ev_trb) {
+					hit = e;
+					break;
+				}
+			}
+			/* Pass 2: fall back to the first active TD on this ep
+			 * (single-handle users, or no TRB-pointer match). */
+			if (!hit) {
+				for (i = 0; i < XHCI_ASYNC_MAX; i++) {
+					struct xhci_async_td *e = &xhci_async[i];
+
+					if (e->ctrl != ctrl || !e->active ||
+					    e->slot_id != slot ||
+					    e->ep_index != ep)
+						continue;
+					hit = e;
+					break;
+				}
+			}
+			if (hit) {
+				hit->comp = GET_COMP_CODE(tl);
+				hit->act_len = min(hit->length,
+						   hit->length -
+						   (int)EVENT_TRB_LEN(tl));
+				hit->st.last_comp = hit->comp;
+				hit->active = false;
+				hit->done = true;
+				hit->st.completed++;
+				xhci_acknowledge_event(ctrl);
+				continue;
+			}
+		}
+
+		/*
+		 * Not a pending async TD: no synchronous waiter is running
+		 * while the owner polls, so nobody else will read it.
+		 * Acknowledge it so it does not block the ring; keep a copy.
+		 */
+		if (type != TRB_PORT_STATUS) {
+			me->st.orphans++;
+			me->st.last_orphan[0] = le32_to_cpu(event->generic.field[0]);
+			me->st.last_orphan[1] = le32_to_cpu(event->generic.field[1]);
+			me->st.last_orphan[2] = le32_to_cpu(event->generic.field[2]);
+			me->st.last_orphan[3] = le32_to_cpu(event->generic.field[3]);
+		}
+		xhci_acknowledge_event(ctrl);
+	}
+}
+
+int xhci_async_bulk_open(struct usb_device *udev, unsigned long pipe)
+{
+	struct xhci_ctrl *ctrl = xhci_get_ctrl(udev);
+	int ep_index = usb_pipe_ep_index(pipe);
+	int i, free_i = -1;
+
+	if (!ctrl || !udev->slot_id || usb_pipetype(pipe) != PIPE_BULK)
+		return -EINVAL;
+
+	/*
+	 * Multiple handles on the same endpoint are allowed: the RX data path
+	 * keeps a pool of TDs posted so the endpoint is never left empty (an
+	 * empty endpoint wedges the dongle's USB RX DMA). Completions are
+	 * attributed by TRB pointer in xhci_async_drain().
+	 */
+	for (i = 0; i < XHCI_ASYNC_MAX; i++) {
+		struct xhci_async_td *e = &xhci_async[i];
+
+		if (!e->ctrl && free_i < 0)
+			free_i = i;
+	}
+	if (free_i < 0)
+		return -ENOSPC;
+
+	i = free_i;
+	memset(&xhci_async[i].st, 0, sizeof(xhci_async[i].st));
+	xhci_async[i].ctrl = ctrl;
+	xhci_async[i].udev = udev;
+	xhci_async[i].pipe = pipe;
+	xhci_async[i].slot_id = udev->slot_id;
+	xhci_async[i].ep_index = ep_index;
+	xhci_async[i].active = false;
+	xhci_async[i].done = false;
+
+	return i | (xhci_async[i].gen << 8);
+}
+
+int xhci_async_bulk_submit(int h, void *buffer, int length)
+{
+	struct xhci_async_td *e = xhci_async_lookup(h);
+	int ret;
+
+	if (!e)
+		return -ENODEV;
+	if (e->active || e->done)
+		return -EBUSY;
+
+	e->buffer = buffer;
+	e->length = length;
+	ret = xhci_async_queue(e);
+	if (ret) {
+		e->st.errors++;
+		return ret;
+	}
+
+	e->active = true;
+	e->st.submitted++;
+	return 0;
+}
+
+int xhci_async_bulk_poll(int h, int *actual)
+{
+	struct xhci_async_td *e = xhci_async_lookup(h);
+
+	if (!e)
+		return -ENODEV;
+
+	e->st.polls++;
+	if (!e->done)
+		xhci_async_drain(e->ctrl, e);
+
+	if (e->done) {
+		e->done = false;
+		xhci_inval_cache((uintptr_t)e->buffer, e->length);
+		xhci_dma_unmap(e->ctrl, e->buf_64, e->length);
+		*actual = e->act_len;
+		return (e->comp == COMP_SUCCESS || e->comp == COMP_SHORT_TX) ?
+			0 : -EIO;
+	}
+
+	return e->active ? -EINPROGRESS : -ENOENT;
+}
+
+/*
+ * Stop a pending TD. Stop Endpoint on an endpoint that is not running
+ * returns a command completion instead of a transfer event. abort_td()
+ * then consumes that completion as if it were the stop, and the next
+ * control transfer times out. Two TDs on one endpoint hit this on the
+ * second close: the first stop already left the endpoint stopped.
+ */
+static void xhci_async_stop(struct xhci_async_td *e)
+{
+	struct xhci_virt_device *virt_dev;
+	struct xhci_ep_ctx *ep_ctx;
+	u32 ep_state = EP_STATE_RUNNING;
+
+	if (!e->active)
+		return;
+
+	/* A completion that landed before close is not a transfer to stop. */
+	xhci_async_drain(e->ctrl, e);
+	if (!e->active) {
+		if (e->done) {
+			e->done = false;
+			xhci_inval_cache((uintptr_t)e->buffer, e->length);
+			xhci_dma_unmap(e->ctrl, e->buf_64, e->length);
+		}
+		return;
+	}
+
+	/*
+	 * Leave active set so abort_td() can match the Stopped transfer
+	 * event to this TD. Clearing active first leaves that event on
+	 * the ring for the next control transfer.
+	 */
+	virt_dev = e->ctrl->devs[e->slot_id];
+	if (virt_dev && virt_dev->out_ctx) {
+		xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes,
+				 virt_dev->out_ctx->size);
+		ep_ctx = xhci_get_ep_ctx(e->ctrl, virt_dev->out_ctx,
+					 e->ep_index);
+		ep_state = le32_to_cpu(ep_ctx->ep_info) & EP_STATE_MASK;
+	}
+	if (ep_state == EP_STATE_RUNNING)
+		abort_td(e->udev, e->ep_index);
+	e->active = false;
+	e->done = false;
+	xhci_dma_unmap(e->ctrl, e->buf_64, e->length);
+	e->st.cancels++;
+}
+
+void xhci_async_bulk_close(int h)
+{
+	struct xhci_async_td *e = xhci_async_lookup(h);
+
+	if (!e)
+		return;
+
+	xhci_async_stop(e);
+	e->done = false;
+	e->ctrl = NULL;
+	e->gen++;
+}
+
+int xhci_async_bulk_stats(int h, struct xhci_async_stats *st)
+{
+	struct xhci_async_td *e = xhci_async_lookup(h);
+
+	if (!e)
+		return -ENODEV;
+	*st = e->st;
+	st->active = e->active;
+	return 0;
+}
+
+/* Controller going away (usb stop / usb reset): forget its async TDs. */
+void xhci_async_forget_ctrl(struct xhci_ctrl *ctrl)
+{
+	int i;
+
+	for (i = 0; i < XHCI_ASYNC_MAX; i++)
+		if (xhci_async[i].ctrl == ctrl) {
+			xhci_async[i].ctrl = NULL;
+			xhci_async[i].active = false;
+			xhci_async[i].done = false;
+			xhci_async[i].gen++;
+		}
+}
+
+/* Read an endpoint context state from the output context (wifi diag). */
+int xhci_ep_debug_state(struct usb_device *udev, unsigned long pipe,
+			u32 *ep_state, u64 *hw_deq, u64 *sw_enq)
+{
+	struct xhci_ctrl *ctrl = xhci_get_ctrl(udev);
+	int ep_index = usb_pipe_ep_index(pipe);
+	struct xhci_virt_device *virt_dev;
+	struct xhci_ep_ctx *ep_ctx;
+	struct xhci_ring *ring;
+
+	if (!ctrl || !udev->slot_id)
+		return -ENODEV;
+	virt_dev = ctrl->devs[udev->slot_id];
+	if (!virt_dev)
+		return -ENODEV;
+
+	xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes,
+			 virt_dev->out_ctx->size);
+	ep_ctx = xhci_get_ep_ctx(ctrl, virt_dev->out_ctx, ep_index);
+	*ep_state = le32_to_cpu(ep_ctx->ep_info) & EP_STATE_MASK;
+	*hw_deq = le64_to_cpu(ep_ctx->deq);
+	ring = virt_dev->eps[ep_index].ring;
+	*sw_enq = ring ? (xhci_trb_virt_to_dma(ring->enq_seg, ring->enqueue) |
+			  ring->cycle_state) : 0;
+	return 0;
+}
+#endif /* USB_XHCI_ASYNC_BULK */

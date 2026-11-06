@@ -4,9 +4,11 @@
  * Samuel Dionne-Riel <samuel@dionne-riel.com>
  */
 
+#include <bootrom.h>
 #include <cli.h>
 #include <command.h>
 #include <console.h>
+#include <cyclic.h>
 #include <stdio.h>
 
 static int do_pause(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
@@ -34,6 +36,16 @@ static int do_pause(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[
 	 * previous ctrlc() latched.  Test the key we blocked for ourselves, the
 	 * same way ctrlc() tests the key it polls.
 	 */
+	/* `pause` waits for a person: a USB `bootrom` request acts here */
+	if (CONFIG_IS_ENABLED(CMD_BOOTROM)) {
+		enum bootrom_wait prev = bootrom_wait_set(BOOTROM_WAIT_PAUSE);
+
+		while (!tstc()) {
+			bootrom_act();
+			schedule();
+		}
+		bootrom_wait_set(prev);
+	}
 	c = getchar();
 
 	/* Since there was no newline, we need it now */

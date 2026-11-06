@@ -8,9 +8,12 @@
 #include <asm/arch-rockchip/hardware.h>
 #include <asm/arch-rockchip/grf_rk3328.h>
 #include <asm/arch-rockchip/uart.h>
+#include <asm/arch-rockchip/usbflash-alts.h>
 #include <asm/armv8/mmu.h>
 
 #define CRU_BASE		0xFF440000
+#define CRU_GLB_CNT_TH		0x0090
+#define CRU_GLB_WDT_TSADC_FST	(BIT(15) | BIT(14))
 #define GRF_BASE		0xFF100000
 #define UART2_BASE		0xFF130000
 #define FW_DDR_CON_REG		0xFF7C0040
@@ -69,6 +72,18 @@ int arch_cpu_init(void)
 
 	/* Disable the ddr secure region setting to make it non-secure */
 	rk_setreg(FW_DDR_CON_REG, 0x200);
+
+	/*
+	 * Make the watchdog and the TSADC trigger the first global reset,
+	 * as px30 and rk3399 do. CRU_GLB_CNT_TH[15] wdt_glb_srst_ctrl and
+	 * [14] tsadc_glb_srst_ctrl reset to 0, the second global reset,
+	 * which keeps the GRF and the GPIOs (RK3328 TRM part 1, 2.8.4);
+	 * after one the board never comes back -- from U-Boot's
+	 * "wdt expire" or Linux's dw_wdt alike -- while the first global
+	 * reset (TF-A's PSCI SYSTEM_RESET) reboots it. Not a write-mask
+	 * register: [31:16] is pll_lockperiod.
+	 */
+	setbits_le32(CRU_BASE + CRU_GLB_CNT_TH, CRU_GLB_WDT_TSADC_FST);
 
 	/* Use efuse auto mode */
 	reg = readl(EFUSE_NS_BASE + EFUSE_MOD);
@@ -134,3 +149,11 @@ void board_debug_uart_init(void)
 	/* enable FIFO */
 	writel(0x1, &uart->sfe);
 }
+
+#if CONFIG_IS_ENABLED(USBFLASH)
+/* On a MaskROM boot: the USB flash session, then the boot goes on */
+void spl_board_init(void)
+{
+	rockchip_spl_usbflash();
+}
+#endif

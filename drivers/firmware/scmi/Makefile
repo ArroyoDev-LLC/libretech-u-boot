@@ -8,3 +8,4 @@ obj-$(CONFIG_SCMI_POWER_DOMAIN)		+= pwdom.o
 obj-$(CONFIG_PINCTRL_SCMI)		+= pinctrl.o
 obj-$(CONFIG_SANDBOX)		+= sandbox-scmi_agent.o sandbox-scmi_devices.o
 obj-y += vendors/imx/
+obj-y += vendors/libre/

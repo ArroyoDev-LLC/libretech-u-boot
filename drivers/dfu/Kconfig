@@ -124,6 +124,18 @@ config DFU_SF
 	  This option enables using DFU to read and write to SPI flash based
 	  storage.
 
+config DFU_SF_BOOT_SECTOR_LAST
+	bool "Write the flash's first sector last"
+	depends on DFU_SF
+	default y if ARCH_ROCKCHIP
+	help
+	  A transfer that writes offset 0 of the SPI flash erases its first
+	  sector at once and writes it back last, at the end of the transfer.
+	  A BootROM that validates a loader header at offset 0 then finds no
+	  header while the rest is being written, and falls through to its
+	  next boot source if the update is cut short, instead of running a
+	  half-written loader behind a valid header.
+
 config DFU_SF_PART
 	bool "MTD partition support for SPI flash back end"
 	depends on DFU_SF && CMD_MTDPARTS

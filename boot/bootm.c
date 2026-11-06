@@ -6,6 +6,7 @@
 
 #ifndef USE_HOSTCC
 #include <bootm.h>
+#include <bootrom.h>
 #include <bootstage.h>
 #include <dm/root.h>
 #include <cli.h>
@@ -1209,6 +1210,9 @@ void bootm_final(int flag)
 	bootstage_stash_default();
 	if (IS_ENABLED(CONFIG_BOOTSTAGE_REPORT))
 		bootstage_report();
+
+	/* A pending USB `bootrom` request runs instead of the OS (bootrom.h) */
+	bootrom_act_handoff();
 
 	/* Platform policy: watchdogs stopped unless wdt_handoff=1 */
 	wdt_handoff_to_os();

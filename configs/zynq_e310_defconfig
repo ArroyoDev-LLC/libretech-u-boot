@@ -15,7 +15,7 @@ CONFIG_SF_DEFAULT_BUS=0
 CONFIG_SF_DEFAULT_CS=0
 CONFIG_SF_DEFAULT_SPEED=30000000
 # Env size for FAT uboot.env (Libre Computer policy: env proper on boot media
-# EFI/FAT, NOT in SPI NOR). Matches aml-s905d3-cc_defconfig ENV_SIZE.
+# EFI/FAT, NOT in SPI NOR). Matches aml-s905d3-cc_vendor_defconfig ENV_SIZE.
 CONFIG_ENV_SIZE=0x2000
 # No CONFIG_BOOT_SCRIPT_OFFSET: this board has no NOR boot script at all. See
 # the block above CONFIG_BOARD_CONFIG below, plus the comments in

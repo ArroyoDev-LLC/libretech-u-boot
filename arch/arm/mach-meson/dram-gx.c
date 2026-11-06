@@ -1300,7 +1300,7 @@ void meson_dram_dmc_set_addrmap(void)
  * win, handing a single-chip 16-bit board the 32-bit board's 2 GB window
  * while the DRAM_16BIT_RANK arm sat unreachable for every DDR4 build.  That
  * was invisible only because no 16-bit DDR4 defconfig existed to compile it;
- * libretech-ac_libre_defconfig is the first, so it is live now.  Per the
+ * libretech-ac_defconfig is the first, so it is live now.  Per the
  * paragraph above, this constant is a property of the MAP: the 16BIT_RANK
  * map meson_dram_dmc_set_addrmap() programs is one rank on a 16-bit bus,
  * meson_dram_detect_max_mb() is derived from it, so a 2048 here would send
@@ -1354,7 +1354,7 @@ void meson_dram_dmc_set_addrmap(void)
  * CONFIG_DRAM_ONE_RANK, so a DMC rank-1 range on a ONE_RANK build offers an
  * untrained rank -- measured as a hang before the size print.  The GXL+DDR3
  * arm used to be forced on here, which is exactly that case: Le Potato's
- * libretech-cc_libre_defconfig is ONE_RANK.  A ONE_RANK build of a two-rank
+ * libretech-cc_defconfig is ONE_RANK.  A ONE_RANK build of a two-rank
  * board therefore reports 1 GB of its 2 GB; that is the honest number for what
  * has been trained, not a size regression to chase.
  */
@@ -1447,7 +1447,7 @@ static inline u32 meson_dram_dmc_ctrl_rank1(void)
  * can drift.
  *
  * Until N18 (2026-08-29) only the GXL+DDR4 arm derived it and the DDR3 arm
- * kept the flat 2048, which on the shipping libretech-cc_libre_defconfig
+ * kept the flat 2048, which on the shipping libretech-cc_defconfig
  * (ONE_RANK: RANK0_MB 1024, RANK1_MB 0) made the first probe 0x7ffffffc --
  * exactly the measured case the paragraph above records.  The DDR3 window
  * derived here is the same 1 GB the alias instrument booted with on this
@@ -2281,7 +2281,7 @@ DDR_DETECT_PROVIDE(DDR_DETECT_GEN);
  * Used by BOTH DRAM types.  It was DDR4-scoped on a size argument -- "the DDR3
  * SPL has 29 B of headroom against CONFIG_SPL_MAX_SIZE and this costs 304 B"
  * -- which described the pre-split SINGLE-SPL geometry.  On the TPL/SPL chain
- * this code lives in the TPL: libretech-cc_libre_defconfig links 19144 B
+ * this code lives in the TPL: libretech-cc_defconfig links 19144 B
  * against CONFIG_TPL_SIZE_LIMIT=0xb000 (45056 B), i.e. 25912 B free, and the
  * full-entropy memtest costs 288 B of it.  See the memtest block below.
  */
@@ -2538,7 +2538,7 @@ static int meson_dram_attempt(int attempt, u32 *size_mb)
 	 * size argument: "the DDR3 target links at 45027 B against a 45056 B
 	 * limit, i.e. 29 B free, so it does not fit".  That budget was the
 	 * SINGLE-SPL SRAM geometry.  Since the TPL/SPL split this code links
-	 * into the TPL, and libretech-cc_libre_defconfig builds a 19144 B TPL
+	 * into the TPL, and libretech-cc_defconfig builds a 19144 B TPL
 	 * against CONFIG_TPL_SIZE_LIMIT=0xb000 (45056 B) -- 25912 B free, of
 	 * which the full-entropy pattern plus the histogram costs 288 B.  The
 	 * blocker the #if named does not exist on this geometry, and the same

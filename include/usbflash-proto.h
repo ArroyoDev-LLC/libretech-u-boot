@@ -10,6 +10,13 @@
  * "\r\n":
  *   usbflash ums mmc <n>       UMS of mmc <n>'s user area, read-write
  *   usbflash ums mmc <n> ro    the same, read-only
+ *   usbflash ums mmc <n> [ro] app
+ *                              the same, with the interface in the vendor
+ *                              class (ff/06/50) instead of mass storage
+ *                              (08/06/50), for the Libre Computer app: no
+ *                              host OS driver binds it (macOS's mass-storage
+ *                              driver holds a class 08 interface, which the
+ *                              app then cannot claim)
  *   usbflash dfu               DFU again
  *   usbflash boot              leave the session, continue the boot
  *   usbflash boot kernel       the same, and U-Boot proper runs `bootm` on the
@@ -18,6 +25,11 @@
  *                              it waits at its prompt for the host's commands
  *                              (on the USB console, USB_BOOT_ACM_CONSOLE)
  *   usbflash reset             reset the board
+ *   usbflash bootrom           reset to the BootROM's USB mode (`bootrom`,
+ *                              policy section 6); only when the session ends
+ *                              with the host's DETACH -- a session that times
+ *                              out drops it and the boot continues, so a host
+ *                              that vanished never strands the board
  * <n> is one decimal digit, U-Boot's mmc numbering (0 = eMMC, 1 = SD).
  * Anything else is refused.  Which accepted lines a layer can carry out is
  * the layer's own rule (the SPL has no write path, so it refuses a
@@ -60,12 +72,14 @@ enum usbflash_verb {
 	USBFLASH_BOOT_KERNEL,
 	USBFLASH_BOOT_PROMPT,
 	USBFLASH_RESET,
+	USBFLASH_BOOTROM,
 };
 
 struct usbflash_cmd {
 	enum usbflash_verb verb;
 	int mmc;		/* USBFLASH_UMS only */
 	bool ro;		/* USBFLASH_UMS only */
+	bool app;		/* USBFLASH_UMS only: vendor-class interface */
 };
 
 /* Is the word at @p (length @n) exactly @w? */
@@ -113,14 +127,24 @@ static inline int usbflash_parse(const char *buf, size_t len,
 		return -EINVAL;
 
 	if (usbflash_word(w[1], wl[1], "ums")) {
-		if ((n != 4 && n != 5) || !usbflash_word(w[2], wl[2], "mmc") ||
+		bool ro = false, app = false;
+
+		if (n < 4 || n > 6 || !usbflash_word(w[2], wl[2], "mmc") ||
 		    wl[3] != 1 || w[3][0] < '0' || w[3][0] > '9')
 			return -EINVAL;
-		if (n == 5 && !usbflash_word(w[4], wl[4], "ro"))
-			return -EINVAL;
+		/* then "ro", "app" or "ro app", in that order */
+		for (i = 4; i < n; i++) {
+			if (!ro && !app && usbflash_word(w[i], wl[i], "ro"))
+				ro = true;
+			else if (!app && usbflash_word(w[i], wl[i], "app"))
+				app = true;
+			else
+				return -EINVAL;
+		}
 		cmd->verb = USBFLASH_UMS;
 		cmd->mmc = w[3][0] - '0';
-		cmd->ro = n == 5;
+		cmd->ro = ro;
+		cmd->app = app;
 		return 0;
 	}
 	if (n == 3 && usbflash_word(w[1], wl[1], "boot") &&
@@ -141,6 +165,8 @@ static inline int usbflash_parse(const char *buf, size_t len,
 		cmd->verb = USBFLASH_BOOT;
 	else if (usbflash_word(w[1], wl[1], "reset"))
 		cmd->verb = USBFLASH_RESET;
+	else if (usbflash_word(w[1], wl[1], "bootrom"))
+		cmd->verb = USBFLASH_BOOTROM;
 	else
 		return -EINVAL;
 

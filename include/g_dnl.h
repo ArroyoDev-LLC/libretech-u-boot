@@ -49,6 +49,17 @@ void acm_console_suspend(void);
 void acm_console_resume(void);
 /* USB_FUNCTION_ACM_DFU: the console's gadget carries its resident DFU function */
 bool acm_console_has_dfu(void);
+/* CONSOLE_PREFER_USB: the usbacm console's host holds the port open and reads */
+bool console_usb_host_ready(void);
+/*
+ * The next usbacm start keeps its gadget up when no host configures it in
+ * time, and waits for one in the background (serviced from the console's
+ * input poll and writes), instead of giving up.  A USB boot sets it: there
+ * a host is on the port, only perhaps late.
+ */
+void acm_console_wait_for_host(bool on);
+/* The usbacm console's gadget is configured by a host */
+bool acm_console_connected(void);
 /* A download gadget, not the usbacm console's, holds the UDC */
 bool g_dnl_download_active(void);
 void g_dnl_set_serialnumber(char *);
@@ -58,6 +69,12 @@ bool g_dnl_detach(void);
 void g_dnl_trigger_detach(void);
 void g_dnl_clear_detach(void);
 int run_usb_dnl_gadget(int usbctrl_index, char *usb_dnl_gadget);
+/*
+ * usb_dnl_last_detached() - did the last run_usb_dnl_gadget() end with the
+ * host's DETACH (or its bus reset after one), rather than a timeout, Ctrl-C or
+ * the host going away?  A flash session's `usbflash bootrom` acts only then.
+ */
+bool usb_dnl_last_detached(void);
 
 /* f_acm.c, USB_GADGET_DNL_ACM: an ACM console beside DFU in one configuration */
 int acm_dnl_attach(struct usb_configuration *c);

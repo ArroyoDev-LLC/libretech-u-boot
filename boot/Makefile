@@ -15,6 +15,7 @@ obj-$(CONFIG_PXE_UTILS) += pxe_utils.o
 
 obj-$(CONFIG_BOARD_CONFIG) += board-config.o
 obj-$(CONFIG_BOARD_CONFIG_NOR) += board-config-nor.o
+obj-$(CONFIG_BOARD_CONFIG_NOR_DM_SF) += board-config-sf.o
 
 else
 

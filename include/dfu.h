@@ -92,6 +92,12 @@ struct ram_internal_data {
 
 struct sf_internal_data {
 	struct spi_flash *dev;
+	/*
+	 * DM: the flash's device, which stays bound while `sf probe` removes
+	 * and probes it again (freeing the spi_flash @dev pointed to); each
+	 * access probes it and reads @dev from it again.
+	 */
+	struct udevice *udev;
 
 	/* RAW programming */
 	u64 start;
@@ -278,6 +284,20 @@ bool dfu_entities_in_use(void);
  * A no-op otherwise.
  */
 void dfu_console_release(void);
+
+/**
+ * dfu_init_env_groups() - one entity list from several interfaces
+ *
+ * @groups is "<interface> <devstr>" groups separated by '&' (e.g.
+ * "sf 0:0&virt 0"). Each group's alternates come from set_dfu_alt_info(), as
+ * dfu_init_env_entities() takes them for one interface, and the groups make
+ * one list, in that order (dfu_config_interfaces()). Needs
+ * CONFIG_SET_DFU_ALT_INFO. The list must be freed by dfu_free_entities().
+ *
+ * @groups:	the groups
+ * Return:	0 on success, a negative error code otherwise
+ */
+int dfu_init_env_groups(const char *groups);
 
 /**
  * dfu_set_progress() - whether transfers print their progress

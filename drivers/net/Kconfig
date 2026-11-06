@@ -1117,6 +1117,7 @@ config MDIO_MUX_MESON_GXL
 source "drivers/net/phy/Kconfig"
 source "drivers/net/pfe_eth/Kconfig"
 source "drivers/net/fsl-mc/Kconfig"
+source "drivers/net/wireless/Kconfig"
 
 endif # NETDEVICES
 

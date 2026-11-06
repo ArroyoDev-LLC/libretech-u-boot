@@ -163,6 +163,9 @@ static int meson_usbflash_cmd(const char *line, size_t len,
 
 	if (!ret && cmd->verb == USBFLASH_UMS && cmd->mmc > 1)
 		ret = -EINVAL;
+	/* proper's UMS is the `ums` command, which keeps the mass-storage class */
+	if (!ret && cmd->verb == USBFLASH_UMS && cmd->app)
+		ret = -EINVAL;
 
 	return ret;
 }
@@ -210,6 +213,10 @@ static int do_usbflash(struct cmd_tbl *cmdtp, int flag, int argc,
 	case USBFLASH_RESET:
 		env_set("usbflash_next", "reset");
 		break;
+	case USBFLASH_BOOTROM:
+		/* acts only if this session's dfu ended with the host's DETACH */
+		env_set("usbflash_next", "bootrom -d");
+		break;
 	}
 
 	return CMD_RET_SUCCESS;
@@ -217,7 +224,7 @@ static int do_usbflash(struct cmd_tbl *cmdtp, int flag, int argc,
 
 U_BOOT_CMD(usbflash, 6, 0, do_usbflash,
 	   "flash-session step, for the next DFU DETACH",
-	   "ums mmc <n> [ro] | dfu | boot [kernel|prompt] | reset");
+	   "ums mmc <n> [ro] | dfu | boot [kernel|prompt] | reset | bootrom");
 
 /*
  * Refuse a `usbflash` line the protocol does not accept at the DFU manifest
@@ -479,9 +486,24 @@ static char *meson_dfu_sf_alts(char *buf, int len)
 void meson_set_dfu_alt_info(char *interface, char *devstr)
 {
 	debug("%s: interface %s devstr %s\n", __func__, interface, devstr);
-	char *dfu_alt_info;
+	char *dfu_alt_info = NULL;
 	bool free_dfu_alt_info = false;
 	if (interface){
+		if (strcmp(interface, "virt") == 0) {
+#ifdef CONFIG_CMD_BOOTROM
+			/*
+			 * virt 1: the console gadget's `bootrom` alternate, the
+			 * USB reset-to-BootROM request (f_dfu.c serves it by name)
+			 */
+			if (devstr && !strcmp(devstr, "1"))
+				dfu_alt_info = "bootrom";
+#endif
+#ifdef CONFIG_MESON_LC_STATUS
+			/* board/libre-computer/common/lc-status.c: virt 0 */
+			if (!dfu_alt_info)
+				dfu_alt_info = "status";
+#endif
+		}
 #ifdef CONFIG_DFU_RAM
 		if (strcmp(interface, "ram") == 0)
 			dfu_alt_info = MESON_DFU_RAM_ALTS;

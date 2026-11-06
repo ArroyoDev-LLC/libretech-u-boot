@@ -38,8 +38,8 @@
 # costs nothing that matters.
 #
 # What this buys, measured at v2026.07/lc-master e8fba1cfb00: the two shipping
-# open-chain SPLs libretech-ac_libre_defconfig (41035 B) and
-# libretech-cc_v2_libre_defconfig (40987 B) are stub-free with 4021 B and
+# open-chain SPLs libretech-ac_defconfig (41035 B) and
+# libretech-cc_v2_defconfig (40987 B) are stub-free with 4021 B and
 # 4069 B of nominal spare, i.e. guaranteed-usable -75 B and -27 B, and the size
 # gate calls both EXPOSED: an edit of ANY size, including one that removes
 # code, can instantiate the veneer and put them over the cap.  With the ADR
